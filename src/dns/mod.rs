@@ -211,11 +211,20 @@ pub async fn answer_query(
         Outbound::Block => unreachable!(),
     };
     tracing::debug!("dns {domain} -> {ob_label} ({upstream})");
-    let resp = upstream::exchange(upstream, query).await?;
+    let resp = match upstream::exchange(upstream, query).await {
+        Ok(r) => r,
+        Err(e) => {
+            // 上游失败时回 SERVFAIL，而不是丢弃查询：客户端立即得知失败并可切换到
+            // 下一个解析器 / 重试，不必干等自己的超时。SERVFAIL 不缓存。
+            tracing::warn!("dns {domain} via {ob_label} ({upstream}) failed: {e:#}");
+            return Ok(build_rcode_response(query, 2));
+        }
+    };
     if !domain.is_empty() && resp.len() >= 12 {
-        // Cache NOERROR / NXDOMAIN
+        // Cache NOERROR / NXDOMAIN；被截断（TC）的响应不完整，不缓存。
         let rcode = resp[3] & 0x0F;
-        if rcode == 0 || rcode == 3 {
+        let truncated = resp[2] & 0x02 != 0;
+        if !truncated && (rcode == 0 || rcode == 3) {
             let secs = cache::response_ttl_secs(&resp, 300);
             cache_put(router, &domain, qtype, &resp, Duration::from_secs(secs as u64));
         }
@@ -278,7 +287,8 @@ fn build_rcode_response(query: &[u8], rcode: u8) -> Vec<u8> {
     } else {
         [0, 0]
     };
-    let flag2: u8 = 0x85;
+    // AA 仅对本地合成的 NOERROR（如 block）有意义；错误码响应不置 AA。
+    let flag2: u8 = if rcode == 0 { 0x85 } else { 0x81 };
     let flag3: u8 = 0x80 | (rcode & 0x0F);
 
     if let Some(end) = question_end {
