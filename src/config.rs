@@ -139,8 +139,10 @@ fn default_cache_size() -> usize {
 ///
 /// ## vless
 /// `uuid` (or `password` as uuid), `network` = `tcp`|`ws`|`xhttp`, `tls` = bool,
-/// optional `sni`, `skip-cert-verify`, `ws-path`, `ws-host`,
-/// `reality-public-key` / `reality-short-id`, `xhttp-path` / `xhttp-host` / `xhttp-mode`
+/// optional `sni`, `skip-cert-verify`, `client-fingerprint` (uTLS: chrome /
+/// firefox / safari / edge / ios / android / 360 / qq / random),
+/// `ws-path`, `ws-host`, `reality-public-key` / `reality-short-id`,
+/// `xhttp-path` / `xhttp-host` / `xhttp-mode` (`auto`|`packet-up`|`stream-up`|`stream-one`)
 #[derive(Debug, Clone, Deserialize)]
 #[allow(dead_code)]
 pub struct ProxyConfig {
@@ -179,8 +181,15 @@ pub struct ProxyConfig {
     pub alpn: Option<Vec<String>>,
     #[serde(default, rename = "skip-cert-verify")]
     pub skip_cert_verify: bool,
+    /// hysteria2: 证书 SHA256 指纹（pinning）；vless: uTLS 浏览器指纹
+    /// (`client-fingerprint`)，支持 chrome/firefox/safari/edge/ios/android/
+    /// 360/qq/random（见 outbound::utls 的 `UtlsFingerprint::parse`）。
     #[serde(default)]
     pub fingerprint: Option<String>,
+    /// vless uTLS 浏览器指纹（clash `client-fingerprint` 字段）。
+    /// 设置后 VLESS 的 TLS 握手发送浏览器形状的 ClientHello。
+    #[serde(default, rename = "client-fingerprint")]
+    pub client_fingerprint: Option<String>,
 
     #[serde(default, rename = "ws-path")]
     pub ws_path: Option<String>,
@@ -202,7 +211,8 @@ pub struct ProxyConfig {
     /// XHTTP Host header (default: SNI / server).
     #[serde(default, rename = "xhttp-host")]
     pub xhttp_host: Option<String>,
-    /// `auto` | `stream-one` | `packet-up` | `stream-up` (currently stream-one over HTTP/1.1).
+    /// `auto` | `stream-one` | `packet-up` | `stream-up`。
+    /// `auto`：对齐 Xray dialer.go —— 默认 `packet-up`；REALITY 下默认 `stream-one`。
     #[serde(default, rename = "xhttp-mode")]
     pub xhttp_mode: Option<String>,
     /// Extra XHTTP request headers.

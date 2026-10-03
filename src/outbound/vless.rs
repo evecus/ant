@@ -13,8 +13,11 @@
 //! Response: version(1) + addon_len(1) + addon
 
 use super::reality::{reality_connect, RealityDialConfig};
+use super::utls::{connect_utls, TlsStreamBox, UtlsFingerprint};
 use super::vision::{TlsLayer, VisionConn};
-use super::xhttp::{connect_over_stream, XhttpConfig};
+use super::xhttp::connect_over_stream;
+use super::xhttp::XhttpConfig;
+use super::xhttp_h2;
 use super::{BoxedStream, OutboundDialer, UdpSession};
 use crate::config::ProxyConfig;
 use anyhow::{anyhow, bail, Context, Result};
@@ -52,6 +55,17 @@ const ATYP_IPV4: u8 = 1;
 const ATYP_DOMAIN: u8 = 2;
 const ATYP_IPV6: u8 = 3;
 
+/// xhttp 运行模式（配置在 `new()` 阶段解析完成，对齐 Xray dialer.go:362-371）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum XhttpResolved {
+    /// 手写 HTTP/1.1 单 POST 双向流（`super::xhttp`，REALITY 唯一支持的模式）。
+    StreamOne,
+    /// hyper：GET 长轮询下行 + 攒批分包 POST 上行。
+    PacketUp,
+    /// hyper：GET 长轮询下行 + 单条流式 POST 上行。
+    StreamUp,
+}
+
 #[derive(Clone)]
 struct VlessOption {
     server: String,
@@ -72,12 +86,23 @@ struct VlessOption {
     flow: Option<String>,
     /// Set when network == "xhttp".
     xhttp: Option<XhttpConfig>,
+    /// xhttp 运行模式（`auto` 已在此处展开）。
+    xhttp_resolved: XhttpResolved,
+    /// uTLS 浏览器指纹（`client-fingerprint`）。REALITY 下不生效（REALITY
+    /// 是自实现 TLS 1.3，不经过 rustls 握手）。
+    utls: Option<UtlsFingerprint>,
+    /// 传给 rustls ClientConfig 与伪造 ClientHello 的有效 ALPN（二者必须一致）。
+    tls_alpn: Vec<String>,
+    /// xhttp packet-up / stream-up 用的 TLS 配置（ALPN 强制 h2）；
+    /// REALITY 下为 None（这些模式不支持 REALITY，已在 new() fail-fast）。
+    xhttp_h2_tls: Option<Arc<rustls::ClientConfig>>,
 }
 
 #[derive(Clone)]
 pub struct VlessOutbound {
     opts: VlessOption,
-    tls_connector: Option<TlsConnector>,
+    /// Plain-rustls client config（REALITY 下为 None）。uTLS 与普通 TLS 共用。
+    tls_config: Option<Arc<ClientConfig>>,
 }
 
 impl VlessOutbound {
@@ -115,6 +140,35 @@ impl VlessOutbound {
             alpn: alpn.clone(),
         });
 
+        // uTLS 浏览器指纹（client-fingerprint），未知值 fail-fast。
+        let utls = cfg
+            .client_fingerprint
+            .as_ref()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(|s| {
+                UtlsFingerprint::parse(s).with_context(|| {
+                    format!(
+                        "vless `{}`: unknown client-fingerprint {s:?} \
+                         (supported: chrome/firefox/safari/edge/ios/android/360/qq/random)",
+                        cfg.name
+                    )
+                })
+            })
+            .transpose()?;
+        if utls.is_some() && reality.is_some() {
+            tracing::warn!(
+                "vless `{}`: client-fingerprint is ignored under REALITY \
+                 (REALITY handshake is self-implemented TLS 1.3)",
+                cfg.name
+            );
+        } else if utls.is_some() && !cfg.tls {
+            tracing::warn!(
+                "vless `{}`: client-fingerprint set but tls is disabled — no effect",
+                cfg.name
+            );
+        }
+
         // fail-fast 配置校验（对齐 sing-box KTLSCompatible 门控）：
         // * flow 只支持 xtls-rprx-vision，且只能在 TCP 直连（含 REALITY）上使用；
         // * REALITY 本身是 TLS 1.3 over TCP，ws 传输无法承载（xhttp 保留既有支持）。
@@ -144,6 +198,11 @@ impl VlessOutbound {
                 cfg.name
             );
         }
+
+        // xhttp 运行模式解析（对齐 Xray dialer.go:362-371）：
+        //   auto / 空 → packet-up；REALITY 下 → stream-one（Xray REALITY 默认）。
+        //   显式 packet-up / stream-up + REALITY → fail-fast（hyper 连接器无法
+        //   承载自实现 REALITY TLS）。
         let xhttp = if network == "xhttp" {
             let host = cfg
                 .xhttp_host
@@ -154,19 +213,47 @@ impl VlessOutbound {
             if !path.starts_with('/') {
                 path.insert(0, '/');
             }
-            Some(XhttpConfig {
-                host,
-                path,
-                mode: cfg
-                    .xhttp_mode
-                    .clone()
-                    .filter(|m| !m.is_empty())
-                    .unwrap_or_else(|| "auto".into()),
-                headers: cfg.xhttp_headers.clone().unwrap_or_default(),
-            })
+            let raw_mode = cfg
+                .xhttp_mode
+                .as_ref()
+                .map(|m| m.trim())
+                .filter(|m| !m.is_empty())
+                .unwrap_or("auto");
+            let resolved = match raw_mode {
+                "auto" => {
+                    if reality.is_some() {
+                        XhttpResolved::StreamOne
+                    } else {
+                        XhttpResolved::PacketUp
+                    }
+                }
+                "stream-one" => XhttpResolved::StreamOne,
+                "packet-up" if reality.is_none() => XhttpResolved::PacketUp,
+                "stream-up" if reality.is_none() => XhttpResolved::StreamUp,
+                other @ ("packet-up" | "stream-up") => bail!(
+                    "vless `{}`: xhttp-mode {other:?} cannot run over REALITY \
+                     (REALITY only supports stream-one; use `auto` or `stream-one`)",
+                    cfg.name
+                ),
+                other => bail!(
+                    "vless `{}`: unknown xhttp-mode {other:?} \
+                     (supported: auto/packet-up/stream-up/stream-one)",
+                    cfg.name
+                ),
+            };
+            (
+                Some(XhttpConfig {
+                    host,
+                    path,
+                    mode: raw_mode.to_string(),
+                    headers: cfg.xhttp_headers.clone().unwrap_or_default(),
+                }),
+                resolved,
+            )
         } else {
-            None
+            (None, XhttpResolved::StreamOne)
         };
+        let (xhttp, xhttp_resolved) = xhttp;
 
         let opts = VlessOption {
             server: cfg.server.clone(),
@@ -183,25 +270,63 @@ impl VlessOutbound {
             ws_headers,
             reality,
             flow,
+            utls,
             xhttp,
+            xhttp_resolved,
+            tls_alpn: Vec::new(),
+            xhttp_h2_tls: None,
         };
 
-        // Plain-rustls connector is skipped when REALITY handles TLS itself.
-        // ws and xhttp upgrades speak HTTP/1.1: never let the server pick h2.
-        let tls_connector = if opts.tls && opts.reality.is_none() {
-            Some(build_tls_connector(
+        // Plain-rustls client config is skipped when REALITY handles TLS itself.
+        //
+        // 有效 ALPN：伪造 ClientHello 的 ALPN 必须与 rustls config 一致
+        // （服务端按伪造 ClientHello 选择协议，rustls 拒绝自身未 offer 的选择）。
+        // ws / xhttp stream-one upgrade 走 HTTP/1.1：强制 http/1.1；
+        // tcp(+utls) 未配置 ALPN 时用浏览器默认 [h2, http/1.1]。
+        if opts.tls && opts.reality.is_none() {
+            let force_http11 = opts.network == "ws"
+                || (opts.network == "xhttp" && opts.xhttp_resolved == XhttpResolved::StreamOne);
+            let effective_alpn: Vec<String> = if force_http11 {
+                vec!["http/1.1".to_string()]
+            } else if !alpn.is_empty() {
+                alpn.clone()
+            } else if opts.utls.is_some() {
+                vec!["h2".to_string(), "http/1.1".to_string()]
+            } else {
+                Vec::new()
+            };
+
+            let client_config = Arc::new(build_tls_client_config(
                 opts.skip_cert_verify,
-                opts.network == "ws" || opts.network == "xhttp",
-                &alpn,
-            )?)
-        } else {
-            None
-        };
+                &effective_alpn,
+            )?);
 
-        Ok(Self {
-            opts,
-            tls_connector,
-        })
+            // xhttp packet-up / stream-up：独立的 h2 TLS 配置（ALPN 强制 h2，
+            // 对齐 Xray downloadSettings.streamSettings 必须为 h2）。
+            let xhttp_h2_tls = if opts.network == "xhttp"
+                && opts.xhttp_resolved != XhttpResolved::StreamOne
+            {
+                Some(Arc::new(build_tls_client_config(
+                    opts.skip_cert_verify,
+                    &["h2".to_string()],
+                )?))
+            } else {
+                None
+            };
+
+            let mut opts = opts;
+            opts.tls_alpn = effective_alpn;
+            opts.xhttp_h2_tls = xhttp_h2_tls;
+            Ok(Self {
+                opts,
+                tls_config: Some(client_config),
+            })
+        } else {
+            Ok(Self {
+                opts,
+                tls_config: None,
+            })
+        }
     }
 
     async fn connect_raw(&self) -> Result<TcpStream> {
@@ -213,21 +338,39 @@ impl VlessOutbound {
         Ok(s)
     }
 
-    /// 建立 rustls TLS 层（返回带类型的信息，供 Vision 取裸 TCP）。
-    async fn connect_tls_layer(
-        &self,
-        stream: TcpStream,
-    ) -> Result<tokio_rustls::client::TlsStream<TcpStream>> {
-        let connector = self
-            .tls_connector
+    /// 建立 rustls TLS 层（普通 rustls 或 uTLS 浏览器指纹），
+    /// 返回统一类型供 Vision / ws / xhttp stream-one 使用。
+    async fn connect_tls_layer(&self, stream: TcpStream) -> Result<TlsStreamBox> {
+        let cfg = self
+            .tls_config
             .as_ref()
             .context("tls not configured")?;
-        let name = ServerName::try_from(self.opts.sni.clone())
-            .map_err(|_| anyhow!("invalid sni {}", self.opts.sni))?;
-        connector
-            .connect(name, stream)
-            .await
-            .context("vless tls handshake")
+        match self.opts.utls {
+            Some(fp) => {
+                // 伪造 ClientHello 的 ALPN 与 rustls config 一致（见 new()）。
+                Ok(TlsStreamBox::Utls(Box::new(
+                    connect_utls(
+                        stream,
+                        &self.opts.sni,
+                        &fp,
+                        cfg.clone(),
+                        &self.opts.tls_alpn,
+                    )
+                    .await
+                    .context("vless utls handshake")?,
+                )))
+            }
+            None => {
+                let name = ServerName::try_from(self.opts.sni.clone())
+                    .map_err(|_| anyhow!("invalid sni {}", self.opts.sni))?;
+                Ok(TlsStreamBox::Plain(
+                    TlsConnector::from(cfg.clone())
+                        .connect(name, stream)
+                        .await
+                        .context("vless tls handshake")?,
+                ))
+            }
+        }
     }
 
     async fn wrap_tls(&self, stream: TcpStream) -> Result<BoxedStream> {
@@ -260,14 +403,47 @@ impl VlessOutbound {
         };
         let header = build_vless_header(&self.opts.uuid, host_hint, addr, cmd, flow);
 
-        // XHTTP stream-one: POST with a chunked body over TCP / TLS / REALITY.
+        // XHTTP：stream-one 走手写 HTTP/1.1 单 POST 双向流（支持 REALITY）；
+        // packet-up / stream-up 走 hyper 客户端（TLS 时 ALPN 强制 h2）。
         if let Some(xcfg) = &self.opts.xhttp {
-            let transport = self.connect_xhttp_transport().await?;
-            let pipe = connect_over_stream(transport, xcfg).await?;
-            return Ok(Box::new(VlessStreamIo::with_header(
-                pipe,
-                Bytes::from(header),
-            )));
+            match self.opts.xhttp_resolved {
+                XhttpResolved::StreamOne => {
+                    let transport = self.connect_xhttp_transport().await?;
+                    let pipe = connect_over_stream(transport, xcfg).await?;
+                    return Ok(Box::new(VlessStreamIo::with_header(
+                        pipe,
+                        Bytes::from(header),
+                    )));
+                }
+                XhttpResolved::PacketUp | XhttpResolved::StreamUp => {
+                    let mode = match self.opts.xhttp_resolved {
+                        XhttpResolved::PacketUp => "packet-up",
+                        XhttpResolved::StreamUp => "stream-up",
+                        XhttpResolved::StreamOne => unreachable!("handled above"),
+                    };
+                    let tls = self.opts.xhttp_h2_tls.clone().map(|config| {
+                        xhttp_h2::XhttpH2Tls {
+                            config,
+                            server_name: self.opts.sni.clone(),
+                            utls: self.opts.utls,
+                        }
+                    });
+                    let pipe = xhttp_h2::connect(
+                        &self.opts.server,
+                        self.opts.port,
+                        &xcfg.host,
+                        &xcfg.path,
+                        mode,
+                        &xcfg.headers,
+                        tls,
+                    )
+                    .await?;
+                    return Ok(Box::new(VlessStreamIo::with_header(
+                        pipe,
+                        Bytes::from(header),
+                    )));
+                }
+            }
         }
 
         if self.is_ws() {
@@ -293,7 +469,10 @@ impl VlessOutbound {
                 reality_connect(tcp, rcfg).await.context("vless reality handshake")?,
             )
         } else if self.opts.tls {
-            TlsLayer::Rustls(Box::new(self.connect_tls_layer(tcp).await?))
+            match self.connect_tls_layer(tcp).await? {
+                TlsStreamBox::Plain(s) => TlsLayer::Rustls(Box::new(s)),
+                TlsStreamBox::Utls(s) => TlsLayer::RustlsUtls(s),
+            }
         } else {
             TlsLayer::Plain(tcp)
         };
@@ -312,6 +491,7 @@ impl VlessOutbound {
 
         let mut transport: BoxedStream = match layer {
             TlsLayer::Rustls(s) => Box::new(s),
+            TlsLayer::RustlsUtls(s) => Box::new(s),
             TlsLayer::Reality(s) => Box::new(s),
             TlsLayer::Plain(s) => Box::new(s),
         };
@@ -593,7 +773,9 @@ async fn read_vless_response<R: AsyncRead + Unpin>(r: &mut R) -> Result<()> {
     Ok(())
 }
 
-fn build_tls_connector(skip: bool, ws: bool, alpn: &[String]) -> Result<TlsConnector> {
+/// 构建 rustls 客户端配置（普通 TLS 与 uTLS 共用）。
+/// `alpn` 同时用于 rustls config 与伪造 ClientHello（调用方保证一致）。
+fn build_tls_client_config(skip: bool, alpn: &[String]) -> Result<ClientConfig> {
     let mut config = if skip {
         ClientConfig::builder()
             .dangerous()
@@ -606,15 +788,10 @@ fn build_tls_connector(skip: bool, ws: bool, alpn: &[String]) -> Result<TlsConne
             .with_root_certificates(roots)
             .with_no_client_auth()
     };
-    if ws {
-        // WebSocket upgrade is HTTP/1.1 only; never let the server pick h2.
-        config.alpn_protocols = vec![b"http/1.1".to_vec()];
-    } else if !alpn.is_empty() {
-        // 用户显式配置的 ALPN 之前被静默丢弃（ws 分支之外无任何引用），
-        // 这里对齐 clash-rs / sing-box：vless+tcp 的 ALPN 按配置发送。
+    if !alpn.is_empty() {
         config.alpn_protocols = alpn.iter().map(|p| p.as_bytes().to_vec()).collect();
     }
-    Ok(TlsConnector::from(Arc::new(config)))
+    Ok(config)
 }
 
 #[derive(Debug)]
@@ -1102,7 +1279,7 @@ mod tests {
         });
 
         let cfg: ProxyConfig = serde_yaml::from_str(&format!(
-            "type: vless\nserver: '127.0.0.1'\nport: {port}\nuuid: aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa\nnetwork: xhttp\ntls: false\nxhttp-path: /xhttp-t\nxhttp-host: example.com\n"
+            "type: vless\nserver: '127.0.0.1'\nport: {port}\nuuid: aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa\nnetwork: xhttp\ntls: false\nxhttp-path: /xhttp-t\nxhttp-host: example.com\nxhttp-mode: stream-one\n"
         ))
         .unwrap();
         let ob = VlessOutbound::new(&cfg).await.unwrap();
@@ -1116,6 +1293,74 @@ mod tests {
         let n = s.read(&mut buf).await.unwrap();
         assert_eq!(&buf[..n], b"world");
         server.await.unwrap();
+    }
+
+    /// VLESS + xhttp packet-up 回环：GET 长轮询下行（VLESS 响应头在 body
+    /// 开头被剥离），上行 VLESS 头 + payload 经分包 POST 发出。
+    /// 无 TLS → hyper 客户端走 HTTP/1.1（与 Xray 无 TLS 行为一致）。
+    #[tokio::test]
+    async fn vless_xhttp_packet_up_roundtrip() {
+        use http_body_util::{BodyExt, Full};
+        use hyper::service::service_fn;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let server = tokio::spawn(async move {
+            loop {
+                let (tcp, _) = listener.accept().await.unwrap();
+                tokio::spawn(async move {
+                    let _ = hyper::server::conn::http1::Builder::new()
+                        .serve_connection(
+                            hyper_util::rt::TokioIo::new(tcp),
+                            service_fn(|req: hyper::Request<hyper::body::Incoming>| async move {
+                                if req.method() == hyper::Method::GET {
+                                    // 下行：VLESS 响应头 [0,0] + payload。
+                                    let payload = [&[0u8, 0u8][..], b"world".as_slice()].concat();
+                                    let resp = hyper::Response::builder()
+                                        .status(hyper::StatusCode::OK)
+                                        .body(Full::new(bytes::Bytes::from(payload)))
+                                        .unwrap();
+                                    Ok::<_, std::io::Error>(resp)
+                                } else {
+                                    // 上行 POST：读完 body，返回 200。
+                                    let body = req.into_body().collect().await.unwrap();
+                                    let body = body.to_bytes();
+                                    // 第一个 POST 应携带 VLESS 请求头 + 首段 payload。
+                                    if !body.is_empty() {
+                                        assert_eq!(body[0], 0, "vless version");
+                                    }
+                                    let resp = hyper::Response::builder()
+                                        .status(hyper::StatusCode::OK)
+                                        .body(Full::new(bytes::Bytes::new()))
+                                        .unwrap();
+                                    Ok(resp)
+                                }
+                            }),
+                        )
+                        .await;
+                });
+            }
+        });
+
+        let cfg: ProxyConfig = serde_yaml::from_str(&format!(
+            "type: vless\nserver: '127.0.0.1'\nport: {port}\nuuid: aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa\nnetwork: xhttp\ntls: false\nxhttp-path: /xh\nxhttp-host: example.com\nxhttp-mode: packet-up\n"
+        ))
+        .unwrap();
+        let ob = VlessOutbound::new(&cfg).await.unwrap();
+        assert_eq!(ob.opts.xhttp_resolved, XhttpResolved::PacketUp);
+        let mut s = ob
+            .dial_tcp("1.2.3.4:443".parse().unwrap(), Some("example.com"))
+            .await
+            .unwrap();
+        s.write_all(b"hello").await.unwrap();
+        s.flush().await.unwrap();
+        let mut buf = [0u8; 16];
+        let n = s.read(&mut buf).await.unwrap();
+        assert_eq!(&buf[..n], b"world");
+        drop(s);
+        server.abort();
     }
 
     /// flow addon：请求头携带 protobuf Flow 字段；非法组合在 new() 阶段 fail-fast。
@@ -1193,10 +1438,98 @@ mod tests {
         assert!(ob.opts.reality.is_some(), "reality must be enabled");
         assert!(ob.opts.tls, "reality implies tls");
         assert!(
-            ob.tls_connector.is_none(),
+            ob.tls_config.is_none(),
             "rustls connector must be skipped under REALITY"
         );
         assert_eq!(ob.opts.xhttp.as_ref().unwrap().path, "/xh");
         assert_eq!(ob.opts.xhttp.as_ref().unwrap().host, "example.com");
+        // auto + REALITY → stream-one（Xray REALITY 默认模式）
+        assert_eq!(ob.opts.xhttp_resolved, XhttpResolved::StreamOne);
+    }
+
+    /// client-fingerprint：合法值解析为 uTLS 指纹，非法值 fail-fast。
+    #[tokio::test]
+    async fn vless_utls_config() {
+        let cfg: ProxyConfig = serde_yaml::from_str(
+            "type: vless\nserver: '1.2.3.4'\nport: 443\nuuid: aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa\nnetwork: tcp\ntls: true\nsni: example.com\nclient-fingerprint: chrome\n",
+        )
+        .unwrap();
+        let ob = VlessOutbound::new(&cfg).await.unwrap();
+        assert_eq!(ob.opts.utls, Some(UtlsFingerprint::Chrome));
+        // 未配置 ALPN 时，utls 用浏览器默认 [h2, http/1.1]，rustls config 同步。
+        assert_eq!(ob.opts.tls_alpn, vec!["h2", "http/1.1"]);
+        assert!(ob.tls_config.is_some());
+
+        // 非法值 fail-fast
+        let cfg: ProxyConfig = serde_yaml::from_str(
+            "type: vless\nserver: '1.2.3.4'\nport: 443\nuuid: aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa\nnetwork: tcp\ntls: true\nclient-fingerprint: nosuch\n",
+        )
+        .unwrap();
+        assert!(
+            VlessOutbound::new(&cfg).await.is_err(),
+            "unknown client-fingerprint must fail fast"
+        );
+
+        // ws + utls：ALPN 强制 http/1.1（伪造 hello 与 rustls config 一致）
+        let cfg: ProxyConfig = serde_yaml::from_str(
+            "type: vless\nserver: '1.2.3.4'\nport: 443\nuuid: aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa\nnetwork: ws\ntls: true\nsni: example.com\nclient-fingerprint: firefox\n",
+        )
+        .unwrap();
+        let ob = VlessOutbound::new(&cfg).await.unwrap();
+        assert_eq!(ob.opts.tls_alpn, vec!["http/1.1"]);
+    }
+
+    /// xhttp 运行模式解析（对齐 Xray dialer.go：auto → packet-up）。
+    #[tokio::test]
+    async fn vless_xhttp_mode_resolution() {
+        let base = "type: vless\nserver: '1.2.3.4'\nport: 443\nuuid: aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa\nnetwork: xhttp\ntls: true\nsni: example.com\nxhttp-path: /xh\n";
+
+        // 显式 packet-up
+        let cfg: ProxyConfig =
+            serde_yaml::from_str(&format!("{base}xhttp-mode: packet-up\n")).unwrap();
+        let ob = VlessOutbound::new(&cfg).await.unwrap();
+        assert_eq!(ob.opts.xhttp_resolved, XhttpResolved::PacketUp);
+        // packet-up 需要 h2 TLS 配置
+        assert!(ob.opts.xhttp_h2_tls.is_some());
+
+        // 显式 stream-up
+        let cfg: ProxyConfig =
+            serde_yaml::from_str(&format!("{base}xhttp-mode: stream-up\n")).unwrap();
+        let ob = VlessOutbound::new(&cfg).await.unwrap();
+        assert_eq!(ob.opts.xhttp_resolved, XhttpResolved::StreamUp);
+
+        // 显式 stream-one：不建 h2 TLS 配置
+        let cfg: ProxyConfig =
+            serde_yaml::from_str(&format!("{base}xhttp-mode: stream-one\n")).unwrap();
+        let ob = VlessOutbound::new(&cfg).await.unwrap();
+        assert_eq!(ob.opts.xhttp_resolved, XhttpResolved::StreamOne);
+        assert!(ob.opts.xhttp_h2_tls.is_none());
+
+        // auto（无 REALITY）→ packet-up
+        let cfg: ProxyConfig =
+            serde_yaml::from_str(&format!("{base}xhttp-mode: auto\n")).unwrap();
+        let ob = VlessOutbound::new(&cfg).await.unwrap();
+        assert_eq!(ob.opts.xhttp_resolved, XhttpResolved::PacketUp);
+
+        // 未知模式 fail-fast
+        let cfg: ProxyConfig =
+            serde_yaml::from_str(&format!("{base}xhttp-mode: bogus\n")).unwrap();
+        assert!(
+            VlessOutbound::new(&cfg).await.is_err(),
+            "unknown xhttp-mode must fail fast"
+        );
+
+        // packet-up + REALITY fail-fast；auto + REALITY → stream-one
+        let reality = "reality-public-key: q6urq6urq6urq6urq6urq6urq6urq6urq6urq6urq6s\n";
+        let cfg: ProxyConfig =
+            serde_yaml::from_str(&format!("{base}xhttp-mode: packet-up\n{reality}")).unwrap();
+        assert!(
+            VlessOutbound::new(&cfg).await.is_err(),
+            "packet-up + REALITY must fail fast"
+        );
+        let cfg: ProxyConfig =
+            serde_yaml::from_str(&format!("{base}xhttp-mode: auto\n{reality}")).unwrap();
+        let ob = VlessOutbound::new(&cfg).await.unwrap();
+        assert_eq!(ob.opts.xhttp_resolved, XhttpResolved::StreamOne);
     }
 }

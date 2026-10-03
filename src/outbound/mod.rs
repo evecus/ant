@@ -2,8 +2,10 @@ mod direct;
 mod hysteria2;
 mod vless;
 mod reality;
+mod utls;
 mod vision;
 mod xhttp;
+mod xhttp_h2;
 
 pub use direct::DirectOutbound;
 pub use hysteria2::Hysteria2Outbound;

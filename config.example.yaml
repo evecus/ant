@@ -100,8 +100,13 @@ proxies:
     reality-short-id: "0123abcd"              # hex, 0~16 chars
     # alpn: [h2]                              # optional, forwarded to the REALITY ClientHello
 
-  # VLESS + XHTTP (HTTP/1.1 stream-one: chunked POST up, response body down).
-  # Can be combined with REALITY: just add reality-public-key / reality-short-id.
+  # VLESS + XHTTP.
+  #   stream-one : 单条 POST 双向流（HTTP/1.1，支持 REALITY）。
+  #   packet-up  : GET 长轮询下行 + 攒批分包 POST 上行（h2，Xray 默认）。
+  #   stream-up  : GET 长轮询下行 + 单条流式 POST 上行（h2）。
+  #   auto       : 默认 packet-up；REALITY 下自动选 stream-one。
+  # 与 REALITY 组合：直接加 reality-public-key / reality-short-id（此时仅
+  # 支持 stream-one，显式 packet-up/stream-up 会在启动时报错）。
   - name: vless-xhttp
     type: vless
     server: 1.2.3.4
@@ -110,9 +115,10 @@ proxies:
     network: xhttp
     tls: true
     sni: example.com
+    client-fingerprint: chrome               # uTLS 浏览器指纹（可选）
     xhttp-path: /xhttp
     xhttp-host: example.com                   # Host header, defaults to SNI
-    xhttp-mode: stream-one                    # auto | stream-one | packet-up | stream-up
+    xhttp-mode: auto                          # auto | stream-one | packet-up | stream-up
     # xhttp-headers:
     #   User-Agent: Mozilla/5.0
     skip-cert-verify: false
