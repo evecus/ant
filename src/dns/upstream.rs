@@ -11,6 +11,10 @@ use tokio_rustls::rustls::{ClientConfig, RootCertStore};
 use tokio_rustls::TlsConnector;
 
 const TIMEOUT: Duration = Duration::from_secs(5);
+/// Bootstrap DNS retries when default-nameserver is temporarily unreachable
+/// (e.g. restart race with residual tproxy/redir rules). Never falls back to system DNS.
+const BOOTSTRAP_RETRIES: u32 = 8;
+const BOOTSTRAP_RETRY_BASE: Duration = Duration::from_millis(400);
 
 #[derive(Debug, Clone)]
 pub enum DnsUpstream {
@@ -334,15 +338,82 @@ fn tls_connector_doh() -> TlsConnector {
 
 /// Resolve `host` to an address using the bootstrap nameserver (A query).
 /// IP literals are returned as-is. Used for nameserver hostnames and the outbound server.
+///
+/// On transient failures (connection refused / timeout / network unreachable) retries with
+/// backoff. Never falls back to the system resolver.
 pub async fn lookup_via(bootstrap: &DnsUpstream, host: &str, port: u16) -> Result<SocketAddr> {
     let host = host.trim_matches(|c| c == '[' || c == ']');
     if let Ok(ip) = host.parse::<std::net::IpAddr>() {
         return Ok(SocketAddr::new(ip, port));
     }
     let query = build_a_query(host);
-    let resp = exchange(bootstrap, &query).await.context("default-nameserver lookup")?;
-    let ip = first_a(&resp).with_context(|| format!("no A record for {host} via default-nameserver"))?;
-    Ok(SocketAddr::new(std::net::IpAddr::V4(ip), port))
+    let mut last_err = None;
+    for attempt in 0..BOOTSTRAP_RETRIES {
+        match exchange(bootstrap, &query).await {
+            Ok(resp) => {
+                let ip = first_a(&resp).with_context(|| {
+                    format!("no A record for {host} via default-nameserver")
+                })?;
+                return Ok(SocketAddr::new(std::net::IpAddr::V4(ip), port));
+            }
+            Err(e) => {
+                let retryable = is_retryable_dns_err(&e);
+                last_err = Some(e);
+                if !retryable || attempt + 1 == BOOTSTRAP_RETRIES {
+                    break;
+                }
+                let wait = BOOTSTRAP_RETRY_BASE * 2u32.pow(attempt.min(4));
+                tracing::warn!(
+                    "default-nameserver lookup for {host} failed (attempt {}/{}), retry in {:?}: {}",
+                    attempt + 1,
+                    BOOTSTRAP_RETRIES,
+                    wait,
+                    last_err.as_ref().unwrap()
+                );
+                tokio::time::sleep(wait).await;
+            }
+        }
+    }
+    Err(last_err
+        .unwrap_or_else(|| anyhow::anyhow!("default-nameserver lookup failed"))
+        .context("default-nameserver lookup"))
+}
+
+/// Whether a bootstrap DNS error is worth retrying (transient network issues).
+fn is_retryable_dns_err(err: &anyhow::Error) -> bool {
+    for cause in err.chain() {
+        if let Some(io) = cause.downcast_ref::<std::io::Error>() {
+            use std::io::ErrorKind::*;
+            match io.kind() {
+                ConnectionRefused
+                | ConnectionReset
+                | ConnectionAborted
+                | TimedOut
+                | NotConnected
+                | BrokenPipe
+                | UnexpectedEof
+                | NetworkUnreachable
+                | HostUnreachable
+                | AddrNotAvailable => return true,
+                _ => {}
+            }
+            // Linux: os error 111 = ECONNREFUSED, 101 = ENETUNREACH, 110 = ETIMEDOUT
+            match io.raw_os_error() {
+                Some(111 | 101 | 110 | 113 | 11) => return true,
+                _ => {}
+            }
+        }
+        let s = cause.to_string().to_lowercase();
+        if s.contains("connection refused")
+            || s.contains("timed out")
+            || s.contains("timeout")
+            || s.contains("network is unreachable")
+            || s.contains("no route to host")
+        {
+            return true;
+        }
+    }
+    false
 }
 
 fn build_a_query(host: &str) -> Vec<u8> {
