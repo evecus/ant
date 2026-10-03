@@ -56,6 +56,7 @@ async fn main() -> Result<()> {
     match cli.cmd {
         Some(Commands::RulesetConvert { input, output, behavior }) => {
             tracing_subscriber::fmt()
+                .with_ansi(false)
                 .with_env_filter(EnvFilter::new("info"))
                 .init();
             let beh = behavior
@@ -68,6 +69,7 @@ async fn main() -> Result<()> {
         Some(Commands::Check { path }) => {
             // Runtime logs to stderr so stdout stays a clean check report.
             tracing_subscriber::fmt()
+                .with_ansi(false)
                 .with_writer(std::io::stderr)
                 .with_env_filter(EnvFilter::new("info"))
                 .init();
@@ -81,7 +83,10 @@ async fn main() -> Result<()> {
     crate::dns::apply_bootstrap(&mut cfg).await?;
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new(&cfg.global.log_level));
-    tracing_subscriber::fmt().with_env_filter(filter).init();
+    tracing_subscriber::fmt()
+        .with_ansi(false)
+        .with_env_filter(filter)
+        .init();
 
     tracing::info!("ant starting, config={}", cli.config);
 
