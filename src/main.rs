@@ -7,7 +7,6 @@ use tracing_subscriber::EnvFilter;
 mod app;
 mod config;
 mod dns;
-mod api;
 mod inbound;
 mod outbound;
 mod ruleset;
@@ -135,10 +134,10 @@ async fn main() -> Result<()> {
     }
 
     if !cfg.global.api.trim().is_empty() {
-        match api::parse_listen(&cfg.global.api) {
+        match app::api::parse_listen(&cfg.global.api) {
             Ok(addr) => {
                 handles.push(tokio::spawn(async move {
-                    if let Err(e) = api::run_api(addr).await {
+                    if let Err(e) = app::api::run_api(addr).await {
                         tracing::error!("api exited: {e:#}");
                     }
                 }));

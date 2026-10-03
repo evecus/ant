@@ -1,4 +1,9 @@
-<!DOCTYPE html>
+//! Embedded UI panel HTML (served at `/ui` by the API).
+//!
+//! Migrated from `src/api/ui.html`. Plain HTML + CSS + vanilla JS polling
+//! `/connections` every 1.5s.
+
+pub const UI_HTML: &str = r#"<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8"/>
@@ -108,3 +113,4 @@ setInterval(refresh, 1500);
 </script>
 </body>
 </html>
+"#;

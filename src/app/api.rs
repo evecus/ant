@@ -4,6 +4,7 @@
 //! short TTL. Closing the browser stops registration and frees the map.
 
 use crate::app::stats;
+use crate::app::ui::UI_HTML;
 use anyhow::{Context, Result};
 use http_body_util::Full;
 use hyper::body::Bytes;
@@ -14,8 +15,6 @@ use hyper_util::rt::TokioIo;
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use tokio::net::TcpListener;
-
-const UI_HTML: &str = include_str!("ui.html");
 
 pub async fn run_api(listen: SocketAddr) -> Result<()> {
     let listener = TcpListener::bind(listen)
