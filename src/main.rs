@@ -94,7 +94,7 @@ async fn main() -> Result<()> {
     let bind = cfg.global.bind_address.clone();
     tracing::info!("bind-address={bind}");
     let router = Router::from_config(&cfg)?;
-    let outbounds = OutboundManager::new(&cfg.proxies).await?;
+    let outbounds = OutboundManager::new(&cfg.proxies, Some(&cfg.dns)).await?;
 
     let mut handles = Vec::new();
 
@@ -218,7 +218,7 @@ async fn cmd_check(path: &str) -> Result<()> {
         cfg.rule_providers.len()
     );
 
-    OutboundManager::new(&cfg.proxies)
+    OutboundManager::new(&cfg.proxies, Some(&cfg.dns))
         .await
         .context("outbound build failed (no dial attempted)")?;
     println!("  ok    outbounds built ({} node(s), no dial)", cfg.proxies.len());

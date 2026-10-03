@@ -62,6 +62,10 @@ hmac = "0.12"
 sha2 = "0.10"
 x25519-dalek = { version = "2", features = ["static_secrets"] }
 
+# HPKE (RFC 9180) for rustls client-side ECH — the ring provider ships no HPKE,
+# so we provide one on the same pure-Rust crates as REALITY.
+hkdf = "0.12"
+
 # Linux/Android-only: transparent proxy inbounds (tproxy / redir) use netfilter
 # sockopts via libc; etherparse is for raw-packet re-injection in tproxy.
 [target.'cfg(any(target_os = "linux", target_os = "android"))'.dependencies]

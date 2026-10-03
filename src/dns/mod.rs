@@ -6,7 +6,7 @@ mod upstream;
 pub mod fakeip;
 pub mod cache;
 
-pub use upstream::{apply_bootstrap, parse_nameserver, DnsUpstream};
+pub use upstream::{apply_bootstrap, exchange, parse_nameserver, DnsUpstream};
 
 use crate::app::router::Router;
 use crate::config::Config;

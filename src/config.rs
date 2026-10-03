@@ -142,6 +142,8 @@ fn default_cache_size() -> usize {
 /// optional `sni`, `skip-cert-verify`, `client-fingerprint` (uTLS: chrome /
 /// firefox / safari / edge / ios / android / 360 / qq / random),
 /// `ws-path`, `ws-host`, `reality-public-key` / `reality-short-id`,
+/// `ech` / `ech-config` / `ech-config-path` / `ech-query-server-name`
+/// (Encrypted Client Hello, mutually exclusive with REALITY and uTLS),
 /// `xhttp-path` / `xhttp-host` / `xhttp-mode` (`auto`|`packet-up`|`stream-up`|`stream-one`)
 #[derive(Debug, Clone, Deserialize)]
 #[allow(dead_code)]
@@ -204,6 +206,23 @@ pub struct ProxyConfig {
     /// REALITY shortId (hex, 0..16 chars).
     #[serde(default, rename = "reality-short-id", alias = "short-id")]
     pub reality_short_id: Option<String>,
+
+    /// VLESS ECH（Encrypted Client Hello，RFC 9849/9460）。启用后 rustls 客户端
+    /// 用 HPKE 把真实 SNI（inner）加密进 outer ClientHello 的 ECH 扩展，outer
+    /// SNI 取 ECH 配置中的 public_name，防止链路观察者看到真实域名。
+    /// 仅作用于 rustls TLS 路径：与 REALITY / client-fingerprint (uTLS) 互斥
+    /// （构建期 fail-fast）。
+    #[serde(default, rename = "ech")]
+    pub ech: bool,
+    /// ECH 配置（PEM `ECH CONFIGS` 块）。设置后不再走 DNS HTTPS RR。
+    #[serde(default, rename = "ech-config")]
+    pub ech_config: Option<String>,
+    /// ECH 配置文件路径（PEM `ECH CONFIGS` 块）。
+    #[serde(default, rename = "ech-config-path")]
+    pub ech_config_path: Option<PathBuf>,
+    /// DNS HTTPS RR 获取 ECH 配置时使用的查询域名（默认 sni）。
+    #[serde(default, rename = "ech-query-server-name")]
+    pub ech_query_server_name: Option<String>,
 
     /// XHTTP path (default `/`).
     #[serde(default, rename = "xhttp-path", alias = "path")]
@@ -492,6 +511,25 @@ impl Config {
                     if let Some(pk) = &p.reality_public_key {
                         if pk.is_empty() {
                             bail!("reality-public-key must not be empty when set");
+                        }
+                    }
+                    if p.ech {
+                        if p.reality_public_key.is_some() {
+                            bail!(
+                                "vless node `{label}`: ech cannot be combined with \
+                                 reality-public-key (REALITY is self-implemented TLS 1.3, \
+                                 not the rustls ECH path)"
+                            );
+                        }
+                        if !p.tls {
+                            bail!("vless node `{label}`: ech requires tls");
+                        }
+                        if p.client_fingerprint.is_some() {
+                            bail!(
+                                "vless node `{label}`: ech cannot be combined with \
+                                 client-fingerprint (uTLS patches the ClientHello, rustls \
+                                 ECH constructs its own)"
+                            );
                         }
                     }
                 }

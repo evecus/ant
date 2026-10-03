@@ -1,4 +1,6 @@
 mod direct;
+mod ech;
+mod hpke;
 mod hysteria2;
 mod vless;
 mod reality;
@@ -11,7 +13,8 @@ pub use direct::DirectOutbound;
 pub use hysteria2::Hysteria2Outbound;
 pub use vless::VlessOutbound;
 
-use crate::config::ProxyConfig;
+use crate::config::{DnsConfig, ProxyConfig};
+use crate::dns::{parse_nameserver, DnsUpstream};
 use crate::app::router::Outbound;
 use anyhow::{bail, Result};
 use async_trait::async_trait;
@@ -44,12 +47,28 @@ pub struct OutboundManager {
 }
 
 impl OutboundManager {
-    pub async fn new(proxies: &[ProxyConfig]) -> Result<Arc<Self>> {
+    pub async fn new(proxies: &[ProxyConfig], dns: Option<&DnsConfig>) -> Result<Arc<Self>> {
+        // ECH 的 DNS HTTPS RR 查询 upstream 优先级：
+        // proxy-nameserver（通常为加密上游）→ nameserver（rule 模式回退）
+        // → default-nameserver（bootstrap）。
+        let ech_dns: Vec<DnsUpstream> = match dns {
+            Some(d) => [
+                d.resolved_proxy.clone(),
+                d.resolved_nameserver.clone(),
+                parse_nameserver(&d.default_nameserver).ok(),
+            ]
+            .into_iter()
+            .flatten()
+            .collect(),
+            None => Vec::new(),
+        };
         let mut nodes = HashMap::new();
         for cfg in proxies {
             let dialer: Arc<dyn OutboundDialer> = match cfg.ty.to_lowercase().as_str() {
                 "hysteria2" => Arc::new(Hysteria2Outbound::new(cfg).await?),
-                "vless" => Arc::new(VlessOutbound::new(cfg).await?),
+                "vless" => {
+                    Arc::new(VlessOutbound::new_with_ech_dns(cfg, &ech_dns).await?)
+                }
                 other => bail!("unsupported proxy type: {other}"),
             };
             tracing::info!("proxy node `{}` ({}) = {}:{} ready", cfg.name, cfg.ty, cfg.server, cfg.port);

@@ -12,6 +12,8 @@
 //! Request: version(1) + uuid(16) + addon_len(1) + addon + cmd(1) + port(2 BE) + atyp + addr
 //! Response: version(1) + addon_len(1) + addon
 
+use super::ech as ech_cfg;
+use super::hpke::ECH_HPKE_SUITES;
 use super::reality::{reality_connect, RealityDialConfig};
 use super::utls::{connect_utls, TlsStreamBox, UtlsFingerprint};
 use super::vision::{TlsLayer, VisionConn};
@@ -20,12 +22,14 @@ use super::xhttp::XhttpConfig;
 use super::xhttp_h2;
 use super::{BoxedStream, OutboundDialer, UdpSession};
 use crate::config::ProxyConfig;
+use crate::dns::DnsUpstream;
 use anyhow::{anyhow, bail, Context, Result};
 use async_trait::async_trait;
 use bytes::{BufMut, Bytes, BytesMut};
 use futures::{Sink, Stream};
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
-use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+use rustls::client::{EchConfig, EchMode};
+use rustls::pki_types::{CertificateDer, EchConfigListBytes, ServerName, UnixTime};
 use rustls::{ClientConfig, DigitallySignedStruct, Error as TlsError, RootCertStore, SignatureScheme};
 use std::collections::HashMap;
 use std::io;
@@ -91,6 +95,11 @@ struct VlessOption {
     /// uTLS 浏览器指纹（`client-fingerprint`）。REALITY 下不生效（REALITY
     /// 是自实现 TLS 1.3，不经过 rustls 握手）。
     utls: Option<UtlsFingerprint>,
+    /// ECH（Encrypted Client Hello）：rustls 已选定的 ECH 配置。启用后
+    /// ClientConfig 走 `with_ech`（TLS 1.3-only），握手时把 sni 作为 inner
+    /// SNI 加密，outer SNI 由 rustls 取 ECH 配置的 public_name。
+    /// 与 REALITY / uTLS 互斥（new() fail-fast）。
+    ech: Option<EchConfig>,
     /// 传给 rustls ClientConfig 与伪造 ClientHello 的有效 ALPN（二者必须一致）。
     tls_alpn: Vec<String>,
     /// xhttp packet-up / stream-up 用的 TLS 配置（ALPN 强制 h2）；
@@ -106,7 +115,15 @@ pub struct VlessOutbound {
 }
 
 impl VlessOutbound {
-    pub async fn new(cfg: &ProxyConfig) -> Result<Self> {
+    /// 构建节点。`ech_dns` 提供 ECH DNS HTTPS RR 查询可用的 upstream 列表
+    /// （按优先级：proxy-nameserver → nameserver → default-nameserver）。
+    /// `ech: true` 且未提供 `ech-config` / `ech-config-path` 时必须传入，
+    /// 否则构建失败（fail-fast）。
+    pub async fn new_with_ech_dns(cfg: &ProxyConfig, ech_dns: &[DnsUpstream]) -> Result<Self> {
+        Self::build(cfg, ech_dns).await
+    }
+
+    async fn build(cfg: &ProxyConfig, ech_dns: &[DnsUpstream]) -> Result<Self> {
         let uuid_str = cfg.vless_uuid()?;
         let uuid = Uuid::parse_str(&uuid_str).context("invalid vless uuid")?;
         let sni = cfg.effective_sni();
@@ -167,6 +184,31 @@ impl VlessOutbound {
                 "vless `{}`: client-fingerprint set but tls is disabled — no effect",
                 cfg.name
             );
+        }
+
+        // ECH 门控（fail-fast）：仅 rustls TLS 路径支持 ECH。
+        // * REALITY 是自实现 TLS 1.3，不经过 rustls，无法叠加 ECH；
+        // * uTLS 伪造的 ClientHello 与 rustls ECH 的 inner/outer 分裂不兼容；
+        // * ECH 加密的就是 TLS ClientHello，关掉 TLS 无从谈起。
+        let ech_enabled = cfg.ech;
+        if ech_enabled {
+            if reality.is_some() {
+                bail!(
+                    "vless `{}`: ech cannot be combined with reality-public-key \
+                     (REALITY handshake is self-implemented TLS 1.3, not the rustls ECH path)",
+                    cfg.name
+                );
+            }
+            if !cfg.tls {
+                bail!("vless `{}`: ech requires tls", cfg.name);
+            }
+            if utls.is_some() {
+                bail!(
+                    "vless `{}`: ech cannot be combined with client-fingerprint \
+                     (uTLS patches the ClientHello, rustls ECH constructs its own)",
+                    cfg.name
+                );
+            }
         }
 
         // fail-fast 配置校验（对齐 sing-box KTLSCompatible 门控）：
@@ -271,6 +313,7 @@ impl VlessOutbound {
             reality,
             flow,
             utls,
+            ech: None,
             xhttp,
             xhttp_resolved,
             tls_alpn: Vec::new(),
@@ -284,6 +327,28 @@ impl VlessOutbound {
         // ws / xhttp stream-one upgrade 走 HTTP/1.1：强制 http/1.1；
         // tcp(+utls) 未配置 ALPN 时用浏览器默认 [h2, http/1.1]。
         if opts.tls && opts.reality.is_none() {
+            // ECH：解析 ECHConfigList（inline / 文件 / DNS HTTPS RR）并交给
+            // rustls 选择与本地 HPKE suite 兼容的第一条配置。
+            let ech = if ech_enabled {
+                let list = ech_cfg::resolve_ech_config_list(
+                    cfg,
+                    &opts.sni,
+                    if ech_dns.is_empty() { None } else { Some(ech_dns) },
+                )
+                .await?;
+                let ech_config = EchConfig::new(EchConfigListBytes::from(list), ECH_HPKE_SUITES)
+                    .map_err(|e| {
+                        anyhow!("vless `{}`: no usable ECH config: {e}", cfg.name)
+                    })?;
+                tracing::info!(
+                    "vless `{}`: ech enabled (rustls client-side, TLS 1.3 only)",
+                    cfg.name
+                );
+                Some(ech_config)
+            } else {
+                None
+            };
+
             let force_http11 = opts.network == "ws"
                 || (opts.network == "xhttp" && opts.xhttp_resolved == XhttpResolved::StreamOne);
             let effective_alpn: Vec<String> = if force_http11 {
@@ -299,6 +364,7 @@ impl VlessOutbound {
             let client_config = Arc::new(build_tls_client_config(
                 opts.skip_cert_verify,
                 &effective_alpn,
+                ech.as_ref(),
             )?);
 
             // xhttp packet-up / stream-up：独立的 h2 TLS 配置（ALPN 强制 h2，
@@ -309,6 +375,7 @@ impl VlessOutbound {
                 Some(Arc::new(build_tls_client_config(
                     opts.skip_cert_verify,
                     &["h2".to_string()],
+                    ech.as_ref(),
                 )?))
             } else {
                 None
@@ -317,6 +384,7 @@ impl VlessOutbound {
             let mut opts = opts;
             opts.tls_alpn = effective_alpn;
             opts.xhttp_h2_tls = xhttp_h2_tls;
+            opts.ech = ech;
             Ok(Self {
                 opts,
                 tls_config: Some(client_config),
@@ -775,16 +843,38 @@ async fn read_vless_response<R: AsyncRead + Unpin>(r: &mut R) -> Result<()> {
 
 /// 构建 rustls 客户端配置（普通 TLS 与 uTLS 共用）。
 /// `alpn` 同时用于 rustls config 与伪造 ClientHello（调用方保证一致）。
-fn build_tls_client_config(skip: bool, alpn: &[String]) -> Result<ClientConfig> {
+///
+/// `ech` 非 None 时走 `with_ech`（rustls 客户端 ECH，强制 TLS 1.3-only）：
+/// 握手时 rustls 以 ECH 配置的 public_name 作 outer SNI，把传入的
+/// server_name（即节点 sni）加密为 inner ClientHello。ECH 配置与域名绑定，
+/// 因此该 ClientConfig 不可跨节点共享（见 rustls `with_ech` 文档）。
+fn build_tls_client_config(
+    skip: bool,
+    alpn: &[String],
+    ech: Option<&EchConfig>,
+) -> Result<ClientConfig> {
+    let builder = match ech {
+        Some(ech_config) => {
+            // 注意：0.23.45 的 `ClientConfig::builder()` 直接返回
+            // WantsVerifier（已选默认版本），而 `with_ech` 定义在
+            // WantsVersions 状态上 —— 必须经 builder_with_provider。
+            ClientConfig::builder_with_provider(Arc::new(
+                rustls::crypto::ring::default_provider(),
+            ))
+            .with_ech(EchMode::Enable(ech_config.clone()))
+            .context("enable ECH on rustls client config")?
+        }
+        None => ClientConfig::builder(),
+    };
     let mut config = if skip {
-        ClientConfig::builder()
+        builder
             .dangerous()
             .with_custom_certificate_verifier(Arc::new(SkipVerify))
             .with_no_client_auth()
     } else {
         let mut roots = RootCertStore::empty();
         roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-        ClientConfig::builder()
+        builder
             .with_root_certificates(roots)
             .with_no_client_auth()
     };
@@ -1201,7 +1291,7 @@ mod tests {
             "type: vless\nserver: '127.0.0.1'\nport: {port}\nuuid: aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa\nnetwork: ws\ntls: false\nws-path: ws\nsni: example.com\n"
         ))
         .unwrap();
-        let ob = VlessOutbound::new(&cfg).await.unwrap();
+        let ob = VlessOutbound::new_with_ech_dns(&cfg, &[]).await.unwrap();
         let mut s = ob
             .dial_tcp("1.2.3.4:443".parse().unwrap(), Some("example.com"))
             .await
@@ -1282,7 +1372,7 @@ mod tests {
             "type: vless\nserver: '127.0.0.1'\nport: {port}\nuuid: aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa\nnetwork: xhttp\ntls: false\nxhttp-path: /xhttp-t\nxhttp-host: example.com\nxhttp-mode: stream-one\n"
         ))
         .unwrap();
-        let ob = VlessOutbound::new(&cfg).await.unwrap();
+        let ob = VlessOutbound::new_with_ech_dns(&cfg, &[]).await.unwrap();
         let mut s = ob
             .dial_tcp("1.2.3.4:443".parse().unwrap(), Some("example.com"))
             .await
@@ -1348,7 +1438,7 @@ mod tests {
             "type: vless\nserver: '127.0.0.1'\nport: {port}\nuuid: aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa\nnetwork: xhttp\ntls: false\nxhttp-path: /xh\nxhttp-host: example.com\nxhttp-mode: packet-up\n"
         ))
         .unwrap();
-        let ob = VlessOutbound::new(&cfg).await.unwrap();
+        let ob = VlessOutbound::new_with_ech_dns(&cfg, &[]).await.unwrap();
         assert_eq!(ob.opts.xhttp_resolved, XhttpResolved::PacketUp);
         let mut s = ob
             .dial_tcp("1.2.3.4:443".parse().unwrap(), Some("example.com"))
@@ -1398,21 +1488,21 @@ mod tests {
             "type: vless\nserver: '1.2.3.4'\nport: 443\nuuid: aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa\nnetwork: ws\nflow: xtls-rprx-vision\n",
         )
         .unwrap();
-        assert!(VlessOutbound::new(&cfg).await.is_err(), "flow+ws must fail fast");
+        assert!(VlessOutbound::new_with_ech_dns(&cfg, &[]).await.is_err(), "flow+ws must fail fast");
 
         // gating: 未支持的 flow 值 → new() 直接报错
         let cfg: ProxyConfig = serde_yaml::from_str(
             "type: vless\nserver: '1.2.3.4'\nport: 443\nuuid: aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa\nnetwork: tcp\ntls: true\nflow: xtls-rprx-direct\n",
         )
         .unwrap();
-        assert!(VlessOutbound::new(&cfg).await.is_err(), "unknown flow must fail fast");
+        assert!(VlessOutbound::new_with_ech_dns(&cfg, &[]).await.is_err(), "unknown flow must fail fast");
 
         // gating: REALITY + ws → new() 直接报错
         let cfg: ProxyConfig = serde_yaml::from_str(
             "type: vless\nserver: '1.2.3.4'\nport: 443\nuuid: aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa\nnetwork: ws\nsni: example.com\nreality-public-key: q6urq6urq6urq6urq6urq6urq6urq6urq6urq6urq6s\n",
         )
         .unwrap();
-        assert!(VlessOutbound::new(&cfg).await.is_err(), "reality+ws must fail fast");
+        assert!(VlessOutbound::new_with_ech_dns(&cfg, &[]).await.is_err(), "reality+ws must fail fast");
     }
 
     /// vless + tcp + tls + flow：构造成功，vision 生效（无需真实服务器）。
@@ -1422,7 +1512,7 @@ mod tests {
             "type: vless\nserver: '1.2.3.4'\nport: 443\nuuid: aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa\nnetwork: tcp\ntls: true\nsni: example.com\nflow: xtls-rprx-vision\n",
         )
         .unwrap();
-        let ob = VlessOutbound::new(&cfg).await.unwrap();
+        let ob = VlessOutbound::new_with_ech_dns(&cfg, &[]).await.unwrap();
         assert_eq!(ob.opts.flow.as_deref(), Some("xtls-rprx-vision"));
     }
 
@@ -1434,7 +1524,7 @@ mod tests {
             "type: vless\nserver: '1.2.3.4'\nport: 443\nuuid: aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa\nnetwork: xhttp\ntls: true\nsni: example.com\nreality-public-key: q6urq6urq6urq6urq6urq6urq6urq6urq6urq6urq6s\nreality-short-id: '0123abcd'\nxhttp-path: /xh\n",
         )
         .unwrap();
-        let ob = VlessOutbound::new(&cfg).await.unwrap();
+        let ob = VlessOutbound::new_with_ech_dns(&cfg, &[]).await.unwrap();
         assert!(ob.opts.reality.is_some(), "reality must be enabled");
         assert!(ob.opts.tls, "reality implies tls");
         assert!(
@@ -1454,7 +1544,7 @@ mod tests {
             "type: vless\nserver: '1.2.3.4'\nport: 443\nuuid: aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa\nnetwork: tcp\ntls: true\nsni: example.com\nclient-fingerprint: chrome\n",
         )
         .unwrap();
-        let ob = VlessOutbound::new(&cfg).await.unwrap();
+        let ob = VlessOutbound::new_with_ech_dns(&cfg, &[]).await.unwrap();
         assert_eq!(ob.opts.utls, Some(UtlsFingerprint::Chrome));
         // 未配置 ALPN 时，utls 用浏览器默认 [h2, http/1.1]，rustls config 同步。
         assert_eq!(ob.opts.tls_alpn, vec!["h2", "http/1.1"]);
@@ -1466,7 +1556,7 @@ mod tests {
         )
         .unwrap();
         assert!(
-            VlessOutbound::new(&cfg).await.is_err(),
+            VlessOutbound::new_with_ech_dns(&cfg, &[]).await.is_err(),
             "unknown client-fingerprint must fail fast"
         );
 
@@ -1475,7 +1565,7 @@ mod tests {
             "type: vless\nserver: '1.2.3.4'\nport: 443\nuuid: aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa\nnetwork: ws\ntls: true\nsni: example.com\nclient-fingerprint: firefox\n",
         )
         .unwrap();
-        let ob = VlessOutbound::new(&cfg).await.unwrap();
+        let ob = VlessOutbound::new_with_ech_dns(&cfg, &[]).await.unwrap();
         assert_eq!(ob.opts.tls_alpn, vec!["http/1.1"]);
     }
 
@@ -1487,7 +1577,7 @@ mod tests {
         // 显式 packet-up
         let cfg: ProxyConfig =
             serde_yaml::from_str(&format!("{base}xhttp-mode: packet-up\n")).unwrap();
-        let ob = VlessOutbound::new(&cfg).await.unwrap();
+        let ob = VlessOutbound::new_with_ech_dns(&cfg, &[]).await.unwrap();
         assert_eq!(ob.opts.xhttp_resolved, XhttpResolved::PacketUp);
         // packet-up 需要 h2 TLS 配置
         assert!(ob.opts.xhttp_h2_tls.is_some());
@@ -1495,27 +1585,27 @@ mod tests {
         // 显式 stream-up
         let cfg: ProxyConfig =
             serde_yaml::from_str(&format!("{base}xhttp-mode: stream-up\n")).unwrap();
-        let ob = VlessOutbound::new(&cfg).await.unwrap();
+        let ob = VlessOutbound::new_with_ech_dns(&cfg, &[]).await.unwrap();
         assert_eq!(ob.opts.xhttp_resolved, XhttpResolved::StreamUp);
 
         // 显式 stream-one：不建 h2 TLS 配置
         let cfg: ProxyConfig =
             serde_yaml::from_str(&format!("{base}xhttp-mode: stream-one\n")).unwrap();
-        let ob = VlessOutbound::new(&cfg).await.unwrap();
+        let ob = VlessOutbound::new_with_ech_dns(&cfg, &[]).await.unwrap();
         assert_eq!(ob.opts.xhttp_resolved, XhttpResolved::StreamOne);
         assert!(ob.opts.xhttp_h2_tls.is_none());
 
         // auto（无 REALITY）→ packet-up
         let cfg: ProxyConfig =
             serde_yaml::from_str(&format!("{base}xhttp-mode: auto\n")).unwrap();
-        let ob = VlessOutbound::new(&cfg).await.unwrap();
+        let ob = VlessOutbound::new_with_ech_dns(&cfg, &[]).await.unwrap();
         assert_eq!(ob.opts.xhttp_resolved, XhttpResolved::PacketUp);
 
         // 未知模式 fail-fast
         let cfg: ProxyConfig =
             serde_yaml::from_str(&format!("{base}xhttp-mode: bogus\n")).unwrap();
         assert!(
-            VlessOutbound::new(&cfg).await.is_err(),
+            VlessOutbound::new_with_ech_dns(&cfg, &[]).await.is_err(),
             "unknown xhttp-mode must fail fast"
         );
 
@@ -1524,12 +1614,113 @@ mod tests {
         let cfg: ProxyConfig =
             serde_yaml::from_str(&format!("{base}xhttp-mode: packet-up\n{reality}")).unwrap();
         assert!(
-            VlessOutbound::new(&cfg).await.is_err(),
+            VlessOutbound::new_with_ech_dns(&cfg, &[]).await.is_err(),
             "packet-up + REALITY must fail fast"
         );
         let cfg: ProxyConfig =
             serde_yaml::from_str(&format!("{base}xhttp-mode: auto\n{reality}")).unwrap();
-        let ob = VlessOutbound::new(&cfg).await.unwrap();
+        let ob = VlessOutbound::new_with_ech_dns(&cfg, &[]).await.unwrap();
         assert_eq!(ob.opts.xhttp_resolved, XhttpResolved::StreamOne);
+    }
+
+    /// 合成一条最小合法 ECHConfigList（X25519 + HKDF-SHA256/AES-128-GCM，
+    /// 与 `ECH_HPKE_SUITES` 兼容），供 rustls `EchConfig::new` 选择。
+    fn test_ech_config_list() -> Vec<u8> {
+        let pk = vec![0x42u8; 32];
+        let mut contents = Vec::new();
+        contents.push(0x01); // config_id
+        contents.extend_from_slice(&0x0020u16.to_be_bytes()); // DHKEM_X25519_HKDF_SHA256
+        contents.extend_from_slice(&(pk.len() as u16).to_be_bytes());
+        contents.extend_from_slice(&pk);
+        let suite = [0x0001u16.to_be_bytes(), 0x0001u16.to_be_bytes()].concat();
+        contents.extend_from_slice(&(suite.len() as u16).to_be_bytes());
+        contents.extend_from_slice(&suite);
+        contents.push(0); // maximum_name_length
+        let pn = b"cloudflare-ech.com";
+        contents.push(pn.len() as u8);
+        contents.extend_from_slice(pn);
+        contents.extend_from_slice(&0u16.to_be_bytes()); // extensions
+
+        let mut ech_config = 0xfe0du16.to_be_bytes().to_vec();
+        ech_config.extend_from_slice(&(contents.len() as u16).to_be_bytes());
+        ech_config.extend_from_slice(&contents);
+
+        let mut list = (ech_config.len() as u16).to_be_bytes().to_vec();
+        list.extend_from_slice(&ech_config);
+        list
+    }
+
+    /// build_tls_client_config：ECH 配置能被本地 HPKE suite 选中，
+    /// 产出 ECH-enabled（TLS 1.3-only）ClientConfig。
+    #[test]
+    fn tls_client_config_with_ech() {
+        let list = test_ech_config_list();
+        let ech = EchConfig::new(EchConfigListBytes::from(list.clone()), ECH_HPKE_SUITES)
+            .expect("local HPKE suites must match the synthetic config");
+        // with_ech 内部强制 TLS 1.3-only（with_protocol_versions(&[TLS13])），
+        // 与本地 ring provider 组合能成功产出 ClientConfig 即验证了整条链路。
+        let _cfg = build_tls_client_config(true, &[], Some(&ech)).expect("build");
+
+        // 非 ECH 路径不受影响。
+        let _plain = build_tls_client_config(false, &[], None).expect("build plain");
+    }
+
+    /// ECH 门控：ech + REALITY / ech + uTLS / ech + tls=false 在构建期 fail-fast；
+    /// ech + inline ech-config 构建成功且 opts.ech 已设置。
+    #[tokio::test]
+    async fn vless_ech_gating_and_wiring() {
+        let base = "type: vless\nserver: '1.2.3.4'\nport: 443\nuuid: aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa\nnetwork: tcp\ntls: true\nsni: example.com\n";
+
+        // ech + reality-public-key → fail
+        let cfg: ProxyConfig = serde_yaml::from_str(&format!(
+            "{base}ech: true\nreality-public-key: q6urq6urq6urq6urq6urq6urq6urq6urq6urq6urq6s\n"
+        ))
+        .unwrap();
+        assert!(
+            VlessOutbound::new_with_ech_dns(&cfg, &[]).await.is_err(),
+            "ech + reality must fail fast"
+        );
+
+        // ech + client-fingerprint → fail
+        let cfg: ProxyConfig =
+            serde_yaml::from_str(&format!("{base}ech: true\nclient-fingerprint: chrome\n"))
+                .unwrap();
+        assert!(
+            VlessOutbound::new_with_ech_dns(&cfg, &[]).await.is_err(),
+            "ech + utls must fail fast"
+        );
+
+        // ech + tls=false → fail
+        let cfg: ProxyConfig = serde_yaml::from_str(
+            "type: vless\nserver: '1.2.3.4'\nport: 443\nuuid: aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa\nnetwork: tcp\ntls: false\nech: true\n",
+        )
+        .unwrap();
+        assert!(
+            VlessOutbound::new_with_ech_dns(&cfg, &[]).await.is_err(),
+            "ech without tls must fail fast"
+        );
+
+        // ech 启用但无任何配置来源（无 inline/path、无 DNS upstream）→ fail
+        let cfg: ProxyConfig = serde_yaml::from_str(&format!("{base}ech: true\n")).unwrap();
+        assert!(
+            VlessOutbound::new_with_ech_dns(&cfg, &[]).await.is_err(),
+            "ech without config source must fail fast"
+        );
+
+        // ech + inline ech-config（PEM）→ 构建成功，opts.ech 生效。
+        let b64 = {
+            // 与 test_ech_config_list 相同字节的 base64。
+            use base64::Engine;
+            base64::engine::general_purpose::STANDARD.encode(test_ech_config_list())
+        };
+        let pem = format!("-----BEGIN ECH CONFIGS-----\n{b64}\n-----END ECH CONFIGS-----\n");
+        let cfg: ProxyConfig = serde_yaml::from_str(&format!(
+            "{base}ech: true\nech-config: {:?}\n",
+            pem
+        ))
+        .unwrap();
+        let ob = VlessOutbound::new_with_ech_dns(&cfg, &[]).await.unwrap();
+        assert!(ob.opts.ech.is_some(), "ech must be resolved from inline config");
+        assert!(ob.tls_config.is_some());
     }
 }

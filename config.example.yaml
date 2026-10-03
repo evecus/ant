@@ -123,6 +123,29 @@ proxies:
     #   User-Agent: Mozilla/5.0
     skip-cert-verify: false
 
+  # VLESS + TLS + ECH (Encrypted Client Hello, RFC 9849/9460)。
+  # 启用后 rustls 用 HPKE 把真实 SNI（inner）加密进 outer ClientHello，
+  # outer SNI 使用 ECH 配置中的 public_name（如 cloudflare-ech.com），
+  # 中间链路只能看到 public_name，看不到真实域名。
+  #   ech-config / ech-config-path : 显式提供 PEM `ECH CONFIGS` 配置；
+  #   都不提供时自动通过 DNS HTTPS RR（type 65）查询 `ech` 参数，
+  #   upstream 依次尝试 proxy-nameserver → nameserver → default-nameserver
+  #   （建议 proxy-nameserver 用加密上游，否则查询会明文暴露 inner SNI）。
+  # 仅 rustls TLS 路径支持：与 reality-public-key / client-fingerprint 互斥，
+  # 组合会在启动时 fail-fast。非 443 端口按 RFC 9460 §9.1 用 _<port>._https 查询。
+  - name: vless-ech
+    type: vless
+    server: 1.2.3.4
+    port: 443
+    uuid: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+    network: tcp
+    tls: true
+    sni: example.com                          # inner SNI（真实域名，被 ECH 加密）
+    ech: true                                 # 启用 ECH
+    # ech-config-path: /etc/ant/ech.pem       # 可选：PEM ECH CONFIGS 文件
+    # ech-query-server-name: example.com      # 可选：DNS 查询域名（默认 sni）
+    skip-cert-verify: false
+
 # Local rule providers only (type: file). behavior: domain | ip | ipcidr
 rule-providers:
   ads:
