@@ -20,15 +20,17 @@ pub struct SniffResult {
     pub dns: bool,
 }
 
-/// Try to extract domain from the beginning of a TCP stream buffer.
-pub fn sniff_tcp(buf: &[u8]) -> SniffResult {
-    sniff_tcp_ex(buf, false)
-}
-
-/// `dns` enables DNS-query sniffing (TCP length-prefixed), used when hijack-dns is on.
-pub fn sniff_tcp_ex(buf: &[u8], dns: bool) -> SniffResult {
+/// Sniff the beginning of a TCP stream buffer.
+///
+/// `sniff` enables protocol domain sniffing (TLS SNI / HTTP Host), controlled by the
+/// top-level `sniff` config. `dns` enables DNS-query detection (TCP length-prefixed),
+/// controlled by `dns.route-hijack` — it runs regardless of `sniff`.
+pub fn sniff_tcp_ex(buf: &[u8], sniff: bool, dns: bool) -> SniffResult {
     if dns && is_dns_stream(buf) {
         return SniffResult { dns: true, ..SniffResult::default() };
+    }
+    if !sniff {
+        return SniffResult::default();
     }
     if let Some(sni) = sniff_tls_sni(buf) {
         return SniffResult { domain: Some(sni), ..SniffResult::default() };
@@ -39,15 +41,17 @@ pub fn sniff_tcp_ex(buf: &[u8], dns: bool) -> SniffResult {
     SniffResult::default()
 }
 
-/// Try to extract domain from a UDP datagram (QUIC Initial).
-pub fn sniff_udp(buf: &[u8]) -> SniffResult {
-    sniff_udp_ex(buf, false)
-}
-
-/// `dns` enables DNS-query sniffing on the UDP datagram.
-pub fn sniff_udp_ex(buf: &[u8], dns: bool) -> SniffResult {
+/// Sniff a UDP datagram (QUIC Initial SNI).
+///
+/// `sniff` enables QUIC domain sniffing, controlled by the top-level `sniff` config.
+/// `dns` enables DNS-query detection, controlled by `dns.route-hijack` — it runs
+/// regardless of `sniff`.
+pub fn sniff_udp_ex(buf: &[u8], sniff: bool, dns: bool) -> SniffResult {
     if dns && is_dns_packet(buf) {
         return SniffResult { dns: true, ..SniffResult::default() };
+    }
+    if !sniff {
+        return SniffResult::default();
     }
     if let Some(sni) = sniff_quic(buf) {
         return SniffResult { domain: Some(sni), ..SniffResult::default() };

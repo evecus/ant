@@ -55,6 +55,8 @@ pub struct Router {
     fakeip_pool: Option<FakeIpPool>,
     fakeip_filter: Vec<String>,
     fakeip_whitelist: bool,
+    /// Protocol sniffing (TLS/HTTP/QUIC) enabled via top-level `sniff: true`.
+    sniff: bool,
     // Read by the DNS-hijack path in tproxy/redir inbounds (linux/android only).
     #[cfg_attr(
         not(any(target_os = "linux", target_os = "android")),
@@ -155,6 +157,7 @@ impl Router {
             fakeip_pool,
             fakeip_filter: cfg.dns.fakeip_filter.clone(),
             fakeip_whitelist: cfg.dns.fakeip_filter_mode == "whitelist",
+            sniff: cfg.global.sniff,
             hijack_dns: cfg.dns.route_hijack,
             direct_dns: cfg.dns.resolved_direct.clone().unwrap_or(parse_nameserver(&cfg.dns.direct_nameserver)?),
             proxy_dns: cfg.dns.resolved_proxy.clone().unwrap_or(parse_nameserver(&cfg.dns.proxy_nameserver)?),
@@ -178,6 +181,10 @@ impl Router {
     )]
     pub fn hijack_dns(&self) -> bool {
         self.hijack_dns
+    }
+
+    pub fn sniff(&self) -> bool {
+        self.sniff
     }
 
     pub fn ipv6_enabled(&self) -> bool {
@@ -321,6 +328,7 @@ mod tests {
             fakeip_pool: Some(FakeIpPool::new(Some("198.18.0.0/15"), None).unwrap()),
             fakeip_filter: vec!["cn".to_string()],
             fakeip_whitelist: whitelist,
+            sniff: false,
             hijack_dns: false,
             direct_dns: parse_nameserver("223.5.5.5:53").unwrap(),
             proxy_dns: parse_nameserver("223.5.5.5:53").unwrap(),

@@ -46,6 +46,10 @@ pub struct GlobalConfig {
     pub bind_address: String,
     #[serde(default, rename = "api")]
     pub api: String,
+    /// Protocol sniffing (TLS SNI / HTTP Host / QUIC SNI) for domain-based routing.
+    /// Off by default. DNS-query sniffing is independent: it follows `dns.route-hijack`.
+    #[serde(default)]
+    pub sniff: bool,
 }
 
 fn default_bind() -> String {

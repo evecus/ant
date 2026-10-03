@@ -139,14 +139,19 @@ async fn handle_tproxy_tcp(
 
     let mut domain = None;
     let mut peek_buf = vec![0u8; 2048];
-    if let Ok(Ok(n)) =
-        tokio::time::timeout(Duration::from_millis(300), stream.peek(&mut peek_buf)).await
-    {
-        let sniffed = sniffer::sniff_tcp_ex(&peek_buf[..n], router.hijack_dns());
-        domain = sniffed.domain;
-        if router.hijack_dns() && (dest.port() == 53 || sniffed.dns) {
-            tracing::debug!("tproxy tcp hijack dns {peer} -> {dest}");
-            return hijack_dns_tcp(stream, router).await;
+    // Peek is only needed for protocol sniffing (`sniff`) or DNS-stream detection
+    // (`dns.route-hijack`, port 53 is hijacked unconditionally below).
+    let want_peek = router.sniff() || (router.hijack_dns() && dest.port() != 53);
+    if want_peek {
+        if let Ok(Ok(n)) =
+            tokio::time::timeout(Duration::from_millis(300), stream.peek(&mut peek_buf)).await
+        {
+            let sniffed = sniffer::sniff_tcp_ex(&peek_buf[..n], router.sniff(), router.hijack_dns());
+            domain = sniffed.domain;
+            if router.hijack_dns() && (dest.port() == 53 || sniffed.dns) {
+                tracing::debug!("tproxy tcp hijack dns {peer} -> {dest}");
+                return hijack_dns_tcp(stream, router).await;
+            }
         }
     }
     if router.hijack_dns() && dest.port() == 53 {
@@ -285,7 +290,7 @@ async fn udp_session_worker(
         Some(d) => d,
         None => return Ok(()),
     };
-    let sniffed = sniffer::sniff_udp_ex(&first, router.hijack_dns());
+    let sniffed = sniffer::sniff_udp_ex(&first, router.sniff(), router.hijack_dns());
     if router.hijack_dns() && (dest.port() == 53 || sniffed.dns) {
         tracing::debug!("tproxy udp hijack dns {peer} -> {dest}");
         return hijack_dns_udp(raw, peer, dest, first, rx, router).await;

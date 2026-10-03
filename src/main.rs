@@ -257,7 +257,7 @@ fn print_summary(cfg: &Config) {
         cfg.dns.default_nameserver
     );
     println!(
-        "  listen mixed-port={} tproxy-port={} redir-port={} api={}",
+        "  listen mixed-port={} tproxy-port={} redir-port={} api={} sniff={}",
         cfg.global.mixed_port,
         cfg.global.tproxy_port,
         cfg.global.redir_port,
@@ -265,6 +265,7 @@ fn print_summary(cfg: &Config) {
             "-"
         } else {
             cfg.global.api.as_str()
-        }
+        },
+        if cfg.global.sniff { "on" } else { "off" }
     );
 }

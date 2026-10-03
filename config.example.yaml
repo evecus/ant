@@ -8,6 +8,8 @@ log-level: info
 tproxy-port: 7878
 mixed-port: 7898
 redir-port: 7892
+# sniff: true  # sniff TLS SNI / HTTP Host / QUIC for domain routing (default off);
+#              # DNS-query sniffing follows dns.route-hijack independently
 
 dns:
   # route-hijack: true  # steal port 53 and sniffed DNS into this module

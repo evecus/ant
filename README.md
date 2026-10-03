@@ -35,7 +35,9 @@ See `config.example.yaml`.
 
 Layout (mihomo-style):
 
-- Flat top-level: `mixed-port`, `tproxy-port`, `log-level`, …
+- Flat top-level: `mixed-port`, `tproxy-port`, `log-level`, `sniff`, … (`sniff: true` enables
+  TLS SNI / HTTP Host / QUIC sniffing for domain routing, default off; DNS sniffing follows
+  `dns.route-hijack` independently)
 - `dns:` — field names unchanged (`direct-nameserver`, `proxy-nameserver`, `mode`, `fakeip-range`, …)
 - `proxies:` — node list
 - `rule-providers:` — local `.ars` files (`type: file`, `behavior: domain|ip`)

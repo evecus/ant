@@ -110,7 +110,7 @@ async fn handle_socks5(
             } else {
                 None
             };
-            if domain.is_none() {
+            if domain.is_none() && router.sniff() {
                 let mut tmp = vec![0u8; 2048];
                 let n = tokio::time::timeout(
                     std::time::Duration::from_millis(200),
@@ -121,7 +121,7 @@ async fn handle_socks5(
                 .and_then(|r| r.ok())
                 .unwrap_or(0);
                 if n > 0 {
-                    if let Some(d) = sniffer::sniff_tcp(&tmp[..n]).domain {
+                    if let Some(d) = sniffer::sniff_tcp_ex(&tmp[..n], true, false).domain {
                         domain = Some(d);
                     }
                 }
@@ -239,8 +239,10 @@ async fn socks5_udp_relay(
         };
         let domain_owned: Option<String> = if dst_ip.is_none() {
             Some(dst_host.clone())
+        } else if router.sniff() {
+            sniffer::sniff_udp_ex(&payload, true, false).domain
         } else {
-            sniffer::sniff_udp(&payload).domain
+            None
         };
         let decided = target::decide(&router, dest, domain_owned).await;
         if decided.outbound == Outbound::Block {
@@ -402,14 +404,16 @@ async fn handle_http(
             .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
             .await?;
 
-        if let Ok(Ok(n)) = tokio::time::timeout(
-            std::time::Duration::from_millis(200),
-            stream.peek(&mut peek_buf),
-        )
-        .await
-        {
-            if let Some(d) = sniffer::sniff_tcp(&peek_buf[..n]).domain {
-                domain = Some(d);
+        if router.sniff() {
+            if let Ok(Ok(n)) = tokio::time::timeout(
+                std::time::Duration::from_millis(200),
+                stream.peek(&mut peek_buf),
+            )
+            .await
+            {
+                if let Some(d) = sniffer::sniff_tcp_ex(&peek_buf[..n], true, false).domain {
+                    domain = Some(d);
+                }
             }
         }
         let decided = target::decide(&router, dest_addr, domain).await;
