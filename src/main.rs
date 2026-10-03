@@ -15,6 +15,9 @@ use app::router::Router;
 use config::Config;
 use outbound::OutboundManager;
 
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 #[derive(Parser, Debug)]
 #[command(name = "ant", about = "Minimal Linux proxy (Hysteria2 + .ars rulesets)")]
 struct Cli {
