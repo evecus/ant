@@ -17,8 +17,9 @@ pub async fn create_device(cfg: &TunConfig) -> Result<(tun::AsyncDevice, String)
     {
         let name = cfg.device.as_deref().filter(|s| !s.is_empty()).unwrap_or("ant-tun");
         tun_cfg.tun_name(name);
-        // Optional: if wintun.dll sits next to the binary, tun crate finds it.
-        // Users can also set WINTUN_DLL_PATH. Embedding is left to packaging.
+        // wintun.dll is loaded via the tun crate (wintun-bindings, bare name
+        // "wintun.dll" → LoadLibrary default search order): exe directory
+        // first, then System32, cwd, PATH. Ship it next to ant.exe.
     }
     #[cfg(not(target_os = "windows"))]
     {
