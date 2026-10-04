@@ -804,11 +804,16 @@ fn install_windows(
         args.push("metric=0".into());
         args.push("store=active".into());
         let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-        let st = Command::new("netsh").args(&arg_refs).status();
-        if st.map(|s| s.success()).unwrap_or(false) {
-            routes.push((*v6, dest.clone()));
-        } else {
-            warn!(dest = %dest, "tun: netsh route add failed");
+        let out = Command::new("netsh").args(&arg_refs).output();
+        match out {
+            Ok(out) if out.status.success() => routes.push((*v6, dest.clone())),
+            Ok(out) => warn!(
+                dest = %dest,
+                stderr = %String::from_utf8_lossy(&out.stderr).trim(),
+                stdout = %String::from_utf8_lossy(&out.stdout).trim(),
+                "tun: netsh route add failed"
+            ),
+            Err(e) => warn!(dest = %dest, err = %e, "failed to run netsh"),
         }
     }
 
