@@ -10,6 +10,7 @@ use super::packet::{
     broadcast_addr_v4, build_tcp_rst_v4, build_tcp_rst_v6, build_udp_reply_with_template,
     clamp_tcp_mss, compute_effective_mss, is_global_unicast_v4, is_global_unicast_v6,
     recompute_ipv4_checksum, recompute_tcp_checksum_v4, recompute_tcp_checksum_v6,
+    verify_checksums_v4,
 };
 #[cfg(not(unix))]
 use super::packet::{build_icmp_echo_reply_v4, build_icmp_echo_reply_v6};
