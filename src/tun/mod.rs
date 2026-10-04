@@ -15,8 +15,9 @@ mod ip_defrag;
 mod marks;
 mod nat;
 mod native_tun;
-mod offload;
 mod packet;
+#[cfg(any(target_os = "linux", target_os = "android"))]
+mod offload;
 #[cfg(any(target_os = "linux", target_os = "android"))]
 mod redirect;
 mod route;

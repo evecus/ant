@@ -73,9 +73,17 @@ pub struct TunConfig {
     #[serde(default, rename = "route-exclude-address")]
     pub route_exclude_address: Vec<String>,
     /// iproute2 table index for policy routing (Linux). Default 1982.
+    #[cfg_attr(
+        not(any(target_os = "linux", target_os = "android")),
+        allow(dead_code)
+    )]
     #[serde(default = "default_tun_table", rename = "iproute2-table-index")]
     pub iproute2_table_index: i32,
     /// iproute2 rule priority (Linux). Default 9000.
+    #[cfg_attr(
+        not(any(target_os = "linux", target_os = "android")),
+        allow(dead_code)
+    )]
     #[serde(default = "default_tun_rule", rename = "iproute2-rule-index")]
     pub iproute2_rule_index: i32,
 }

@@ -9,8 +9,12 @@
 //! always uses the classic topology and a single mark.
 
 pub const DEFAULT_ROUTE_MARK: u32 = 255;
+// iproute2 policy-routing constants — Linux/Android only.
+#[cfg(any(target_os = "linux", target_os = "android"))]
 pub const DEFAULT_TABLE: i32 = 2022;
+#[cfg(any(target_os = "linux", target_os = "android"))]
 pub const DEFAULT_RULE_PRIORITY: i32 = 9000;
+#[cfg(any(target_os = "linux", target_os = "android"))]
 pub const DEFAULT_FALLBACK_RULE_PRIORITY: i32 = 32768;
 
 #[derive(Clone, Copy, Debug)]

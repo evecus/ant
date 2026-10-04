@@ -85,6 +85,8 @@ pub async fn configure_addresses(
 ) -> Result<()> {
     let if_name = if_name.to_string();
     let mtu = cfg.mtu;
+    // Only consumed by the Windows DNS-registration branch below.
+    #[cfg(target_os = "windows")]
     let auto_route = cfg.auto_route;
     let v4 = v4.to_vec();
     let v6 = v6.to_vec();

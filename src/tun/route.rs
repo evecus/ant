@@ -12,7 +12,9 @@
 
 use crate::config::TunConfig;
 use anyhow::{Context, Result};
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::net::IpAddr;
+#[cfg(any(target_os = "linux", target_os = "android"))]
+use std::net::{Ipv4Addr, Ipv6Addr};
 use std::process::Command;
 use tracing::info;
 #[cfg(target_os = "windows")]
@@ -160,9 +162,12 @@ fn prefixes(cfg: &TunConfig) -> Result<Vec<(String, bool)>> {
 }
 
 /// Parse TUN interface address CIDRs from config for lo-src rules.
+#[cfg(any(target_os = "linux", target_os = "android"))]
 type AddrPrefix4 = Vec<(Ipv4Addr, u8)>;
+#[cfg(any(target_os = "linux", target_os = "android"))]
 type AddrPrefix6 = Vec<(Ipv6Addr, u8)>;
 
+#[cfg(any(target_os = "linux", target_os = "android"))]
 fn tun_address_prefixes(cfg: &TunConfig) -> (AddrPrefix4, AddrPrefix6) {
     let mut v4 = Vec::new();
     let mut v6 = Vec::new();
