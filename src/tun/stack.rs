@@ -312,10 +312,13 @@ pub async fn run_system_stack(p: TunStackParams) -> Result<()> {
 }
 
 async fn bind_with_retry(addr: SocketAddr) -> Option<TcpListener> {
-    for attempt in 0..5u32 {
+    // 10 x 300ms: tolerate residual address-validity transience after netsh
+    // address assignment (dadtransmits=0 is set in device.rs, this is belt
+    // and braces).
+    for attempt in 0..10u32 {
         match TcpListener::bind(addr).await {
             Ok(l) => return Some(l),
-            Err(e) if attempt < 4 => {
+            Err(e) if attempt < 9 => {
                 warn!(err = %e, attempt, addr = %addr, "tun: TCP bind failed, retrying");
                 tokio::time::sleep(Duration::from_millis(300)).await;
             }

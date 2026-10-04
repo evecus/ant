@@ -819,25 +819,19 @@ fn install_windows(
 
     // Interface parameters: metric 0 + forwarding (sing-tun inetIf.Set()).
     // store=active so nothing survives a reboot if the process is killed.
+    // Interface metric 0 (sing-tun: UseAutomaticMetric=false, Metric=0 when
+    // AutoRoute). dadtransmits/forwarding/routerdiscovery live in
+    // device.rs — they must be set BEFORE the address exists (IPv4 DAD).
     if has_v4 {
         run_quiet(&[
             "interface", "ipv4", "set", "subinterface", &format!("interface={if_name}"),
             "metric=0", "store=active",
-        ]);
-        run_quiet(&[
-            "interface", "ipv4", "set", "interface", &format!("interface={if_name}"),
-            "forwarding=enabled", "dadtransmits=0", "store=active",
         ]);
     }
     if has_v6 {
         run_quiet(&[
             "interface", "ipv6", "set", "subinterface", &format!("interface={if_name}"),
             "metric=0", "store=active",
-        ]);
-        run_quiet(&[
-            "interface", "ipv6", "set", "interface", &format!("interface={if_name}"),
-            "routerdiscovery=disabled", "managedaddress=disabled",
-            "otherstateful=disabled", "dadtransmits=0", "store=active",
         ]);
     }
 

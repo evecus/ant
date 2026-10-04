@@ -121,6 +121,39 @@ pub async fn configure_addresses(
 
         #[cfg(target_os = "windows")]
         {
+            // sing-tun configure(): DadTransmits=0 / RouterDiscovery disabled
+            // on BOTH families **before** addresses exist. netsh-assigned
+            // addresses otherwise sit in IPv4 DAD (tentative) for ~2s and
+            // binding them fails with WSAEADDRNOTAVAIL (10049).
+            run_cmd(
+                "netsh",
+                &[
+                    "interface",
+                    "ipv4",
+                    "set",
+                    "interface",
+                    &format!("interface={if_name}"),
+                    "dadtransmits=0",
+                    "forwarding=enabled",
+                    "store=active",
+                ],
+            );
+            run_cmd(
+                "netsh",
+                &[
+                    "interface",
+                    "ipv6",
+                    "set",
+                    "interface",
+                    &format!("interface={if_name}"),
+                    "dadtransmits=0",
+                    "routerdiscovery=disabled",
+                    "managedaddress=disabled",
+                    "otherstateful=disabled",
+                    "store=active",
+                ],
+            );
+
             for (ip, pl) in &v4 {
                 let mask = prefix_to_mask_v4(*pl);
                 let ok = run_cmd(
