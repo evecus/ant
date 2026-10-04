@@ -218,9 +218,14 @@ pub async fn connect_tcp(addr: SocketAddr) -> Result<TcpStream> {
     sock.set_nonblocking(true)?;
     match sock.connect(&addr.into()) {
         Ok(()) => {}
-        // Non-blocking connect on Unix reports EINPROGRESS.
+        // Non-blocking connect is expected to report "in progress": EINPROGRESS
+        // on Unix, WSAEWOULDBLOCK on Windows. Completion is awaited via
+        // stream.writable() + take_error() below; treating WSAEWOULDBLOCK as a
+        // real error made every outbound dial fail instantly on Windows.
         #[cfg(unix)]
         Err(e) if e.raw_os_error() == Some(libc::EINPROGRESS) => {}
+        #[cfg(windows)]
+        Err(e) if e.raw_os_error() == Some(windows_sys::Win32::Networking::WinSock::WSAEWOULDBLOCK) => {}
         Err(e) => return Err(e).context("tcp connect"),
     }
     let std: StdTcp = sock.into();
