@@ -865,17 +865,32 @@ fn run_quiet(args: &[&str]) {
     }
 }
 
-/// Resolve the TUN interface index by alias (`if_nametoindex` accepts the
-/// Windows interface alias; TUN names are ASCII).
+/// Resolve the TUN interface index by alias. Windows `if_nametoindex` does
+/// NOT accept the friendly alias (returns 0 / "no such device"), so enumerate
+/// the interface table via `GetIfTable2` and match `Alias`.
 #[cfg(target_os = "windows")]
 fn windows_if_index(if_name: &str) -> Option<u32> {
-    use windows_sys::Win32::NetworkManagement::IpHelper::if_nametoindex;
+    use windows_sys::Win32::NetworkManagement::IpHelper::{
+        FreeMibTable, GetIfTable2, MIB_IF_TABLE2,
+    };
 
-    let c_name = std::ffi::CString::new(if_name).ok()?;
-    let idx = unsafe { if_nametoindex(c_name.as_ptr() as *const u8) };
-    if idx == 0 {
-        None
-    } else {
-        Some(idx)
+    let mut table: *mut MIB_IF_TABLE2 = std::ptr::null_mut();
+    unsafe {
+        if GetIfTable2(&mut table) != 0 || table.is_null() {
+            return None;
+        }
+        let rows =
+            std::slice::from_raw_parts((*table).Table.as_ptr(), (*table).NumEntries as usize);
+        let mut found = None;
+        for row in rows {
+            let len = row.Alias.iter().position(|&c| c == 0).unwrap_or(257);
+            let alias = String::from_utf16_lossy(&row.Alias[..len]);
+            if alias == if_name {
+                found = Some(row.InterfaceIndex);
+                break;
+            }
+        }
+        FreeMibTable(table as *const _);
+        found
     }
 }
