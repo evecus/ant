@@ -273,6 +273,14 @@ pub async fn run_tun(
     // Brief wait so the OS registers the address before we bind listeners.
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
+    // Windows: allow inbound TCP to our listener. The system stack's NAT
+    // rewrites TUN SYNs to <tun addr>:port, so from Windows Firewall's view
+    // every proxied TCP connection is an **inbound** connection to ant.exe —
+    // the default block policy silently drops them (sing-tun
+    // fixWindowsFirewall does exactly this).
+    #[cfg(target_os = "windows")]
+    device::ensure_firewall_rule();
+
     // Keep route/redirect guards alive for the lifetime of the stack.
     let result = stack::run_system_stack(stack::TunStackParams {
         dev,

@@ -317,3 +317,48 @@ fn prefix_to_mask_v4(pl: u8) -> Ipv4Addr {
     };
     Ipv4Addr::from(mask)
 }
+
+/// sing-tun `fixWindowsFirewall()` alignment: the system stack's NAT rewrites
+/// TUN TCP SYNs to our listener address, so Windows Firewall sees every
+/// proxied connection as an **inbound** TCP connection to ant.exe and the
+/// default block policy silently drops them. Add an inbound allow rule for
+/// this executable (idempotent: delete + add; rule persists like sing-tun's).
+#[cfg(target_os = "windows")]
+pub fn ensure_firewall_rule() {
+    let Ok(exe) = std::env::current_exe() else {
+        warn!("tun: cannot resolve current exe, skipping firewall rule");
+        return;
+    };
+    let prog = exe.to_string_lossy().to_string();
+    let name = format!("ant ({prog})");
+    // Clean previous rule (same name), then add. Failure is non-fatal: the
+    // user may have allowed ant manually; warn so the cause is discoverable.
+    let _ = Command::new("netsh")
+        .args(["advfirewall", "firewall", "delete", "rule", &format!("name={name}")])
+        .output();
+    let out = Command::new("netsh")
+        .args([
+            "advfirewall",
+            "firewall",
+            "add",
+            "rule",
+            &format!("name={name}"),
+            "dir=in",
+            "action=allow",
+            &format!("program={prog}"),
+            "protocol=TCP",
+            "profile=any",
+        ])
+        .output();
+    match out {
+        Ok(out) if out.status.success() => {
+            info!(program = %prog, "tun: firewall inbound allow rule installed");
+        }
+        Ok(out) => warn!(
+            program = %prog,
+            stderr = %String::from_utf8_lossy(&out.stderr).trim(),
+            "tun: failed to add firewall rule (inbound TCP may be blocked)"
+        ),
+        Err(e) => warn!(program = %prog, err = %e, "failed to run netsh advfirewall"),
+    }
+}
