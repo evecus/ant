@@ -663,6 +663,19 @@ async fn handle_tcp_v4(
     }
     recompute_tcp_checksum_v4(&mut pkt, ihl);
     recompute_ipv4_checksum(&mut pkt);
+    {
+        // Diagnostic: dump the first few NAT-ed SYNs and self-verify checksums.
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static DUMPED: AtomicUsize = AtomicUsize::new(0);
+        if tcp_payload.len() >= 14
+            && tcp_payload[13] & 0x02 != 0
+            && DUMPED.fetch_add(1, Ordering::Relaxed) < 6
+        {
+            let (ip_ok, tcp_ok) = verify_checksums_v4(&pkt, ihl);
+            let hex: String = pkt.iter().map(|b| format!("{:02x}", b)).collect();
+            info!(ip_csum_ok = ip_ok, tcp_csum_ok = tcp_ok, len = pkt.len(), hex = %hex, "tun: DIAG NAT-ed SYN");
+        }
+    }
     tun_write(&rt.writer, &pkt).await;
 }
 

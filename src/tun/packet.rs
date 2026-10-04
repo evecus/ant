@@ -98,6 +98,28 @@ pub fn recompute_tcp_checksum_v4(pkt: &mut [u8], ihl: usize) {
     tcp[17] = (c & 0xff) as u8;
 }
 
+/// Diagnostic: verify IPv4 header + TCP checksum of a finished packet.
+pub fn verify_checksums_v4(pkt: &[u8], ihl: usize) -> (bool, bool) {
+    if pkt.len() < ihl + 20 {
+        return (false, false);
+    }
+    let ip_ok = internet_checksum(&pkt[..ihl]) == 0;
+    let src = Ipv4Addr::new(pkt[12], pkt[13], pkt[14], pkt[15]);
+    let dst = Ipv4Addr::new(pkt[16], pkt[17], pkt[18], pkt[19]);
+    let tcp = &pkt[ihl..];
+    let mut sum = pseudo_sum_v4(src, dst, 6, tcp.len());
+    let mut i = 0;
+    while i + 1 < tcp.len() {
+        sum += u16::from_be_bytes([tcp[i], tcp[i + 1]]) as u32;
+        i += 2;
+    }
+    if i < tcp.len() {
+        sum += (tcp[i] as u32) << 8;
+    }
+    let tcp_ok = fold_checksum(sum) == 0;
+    (ip_ok, tcp_ok)
+}
+
 pub fn recompute_tcp_checksum_v6(pkt: &mut [u8], tcp_off: usize) {
     if pkt.len() < tcp_off + 20 || pkt.len() < 40 {
         return;
