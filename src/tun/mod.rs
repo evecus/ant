@@ -57,6 +57,12 @@ pub async fn run_tun(
     if !tun_cfg.enable {
         return Ok(());
     }
+    // mihomo server.go: `auto-route` is required by `auto-redirect` — without
+    // auto-route there is nothing to push UDP/DNS into the TUN and the output
+    // redirect (oifname tun) never matches, so the TUN silently does nothing.
+    if tun_cfg.auto_redirect && !tun_cfg.auto_route {
+        bail!("tun: `auto-route` is required by `auto-redirect`");
+    }
 
     let (dev, if_name) = device::create_device(&tun_cfg)
         .await

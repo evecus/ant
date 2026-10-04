@@ -2,17 +2,17 @@
 //! (the topology mihomo uses unless route-address-set is configured).
 //!
 //! TCP is handled by an internal REDIRECT listener, UDP/ICMP keep flowing into
-//! the TUN device via the classic auto-route policy rules (see `route.rs`).
+//! the TUN device via the auto-route policy rules (see `route.rs`); mihomo
+//! hard-errors when auto-redirect is enabled without auto-route (mod.rs).
 //!
-//! Output chain (NAT, mangle prio): local-daddr return, MPTCP drop, then
-//! `oifname <tun> tcp redirect` (locally-originated traffic routed into TUN).
+//! Output chain (NAT, mangle prio): exactly one rule, sing-tun classic —
+//! `oifname <tun> tcp redirect`, with a `meta nfproto` filter when only one
+//! family is enabled.
 //!
 //! Prerouting chain (NAT, dstnat+1): `iifname <tun> return`, DNS hijack
-//! (tcp/udp dport 53 → DNAT to TUN-side DNS), local-daddr return, MPTCP drop,
-//! strict-route reject for a disabled family, then `tcp redirect`.
-//!
-//! Local-address exclude keeps inbound host services reachable (same as sing-tun
-//! `inet4/6_local_address_set`).
+//! (tcp/udp dport 53 with **saddr in the local set** → DNAT to TUN-side DNS),
+//! local-daddr return, MPTCP drop, strict-route reject for a disabled family,
+//! family-filtered `tcp redirect`.
 
 use crate::app::router::Router;
 use crate::outbound::OutboundManager;
@@ -163,8 +163,10 @@ fn delete_nft_table() -> Result<()> {
     Ok(())
 }
 
-/// Collect local address set like sing-tun:
-/// `lo` prefixes + any **global unicast** on other interfaces.
+/// Collect local address set like sing-tun `setupNFTables`:
+/// `lo` prefixes as-is + any **global unicast** on other interfaces, keeping
+/// the interface prefix length (masked network) — not collapsed to /32, so a
+/// /24 LAN subnet excludes forwarded traffic to the whole subnet like sing-tun.
 fn collect_local_addrs(has_v4: bool, has_v6: bool) -> (Vec<String>, Vec<String>) {
     let mut v4 = vec!["127.0.0.0/8".to_string()];
     let mut v6 = vec!["::1/128".to_string()];
@@ -181,15 +183,15 @@ fn collect_local_addrs(has_v4: bool, has_v6: bool) -> (Vec<String>, Vec<String>)
                 let ifname = parts.get(1).copied().unwrap_or("");
                 if let Some(i) = parts.iter().position(|p| *p == "inet") {
                     if let Some(cidr) = parts.get(i + 1) {
-                        if (ifname == "lo" || is_global_unicast_v4(cidr))
-                            && !v4.iter().any(|x| x == *cidr)
-                        {
-                            // store host /32 for global, keep lo as given
-                            if ifname == "lo" {
-                                v4.push((*cidr).to_string());
-                            } else if let Some(ip) = cidr.split('/').next() {
-                                v4.push(format!("{ip}/32"));
-                            }
+                        let entry = if ifname == "lo" {
+                            Some((*cidr).to_string())
+                        } else if is_global_unicast_v4(cidr) {
+                            mask_prefix_v4(cidr)
+                        } else {
+                            None
+                        };
+                        if let Some(e) = entry.filter(|e| !v4.iter().any(|x| x == e)) {
+                            v4.push(e);
                         }
                     }
                 }
@@ -208,12 +210,15 @@ fn collect_local_addrs(has_v4: bool, has_v6: bool) -> (Vec<String>, Vec<String>)
                 let ifname = parts.get(1).copied().unwrap_or("");
                 if let Some(i) = parts.iter().position(|p| *p == "inet6") {
                     if let Some(cidr) = parts.get(i + 1) {
-                        if ifname == "lo" || is_global_unicast_v6(cidr) {
-                            if let Some(ip) = cidr.split('/').next() {
-                                if !v6.iter().any(|x| x.starts_with(ip)) {
-                                    v6.push(format!("{ip}/128"));
-                                }
-                            }
+                        let entry = if ifname == "lo" {
+                            Some((*cidr).to_string())
+                        } else if is_global_unicast_v6(cidr) {
+                            mask_prefix_v6(cidr)
+                        } else {
+                            None
+                        };
+                        if let Some(e) = entry.filter(|e| !v6.iter().any(|x| x == e)) {
+                            v6.push(e);
                         }
                     }
                 }
@@ -225,6 +230,32 @@ fn collect_local_addrs(has_v4: bool, has_v6: bool) -> (Vec<String>, Vec<String>)
         }
     }
     (v4, v6)
+}
+
+/// Mask host bits of an `addr/prefix` string (nft interval sets require the
+/// network address; sing-tun's Go netlink prefixes are equally masked).
+fn mask_prefix_v4(cidr: &str) -> Option<String> {
+    let (ip, pl) = cidr.split_once('/')?;
+    let pl: u8 = pl.parse().ok()?;
+    let a: Ipv4Addr = ip.parse().ok()?;
+    let mask = if pl == 0 {
+        0u32
+    } else {
+        !0u32 << (32 - pl.min(32) as u32)
+    };
+    Some(format!("{}/{}", Ipv4Addr::from(u32::from(a) & mask), pl))
+}
+
+fn mask_prefix_v6(cidr: &str) -> Option<String> {
+    let (ip, pl) = cidr.split_once('/')?;
+    let pl: u8 = pl.parse().ok()?;
+    let a: Ipv6Addr = ip.parse().ok()?;
+    let mask = if pl == 0 {
+        0u128
+    } else {
+        !0u128 << (128 - pl.min(128) as u32)
+    };
+    Some(format!("{}/{}", Ipv6Addr::from(u128::from(a) & mask), pl))
 }
 
 fn is_global_unicast_v4(cidr: &str) -> bool {
@@ -324,19 +355,34 @@ fn build_nft_script(
         ""
     };
 
-    // DNS hijack (prerouting only, like sing-tun classic): tcp/udp dport 53
-    // → DNAT to the TUN-side DNS address. The redirected packet lands in the
-    // TUN device (dst = tun subnet) and the system-stack hijack answers it.
+    // sing-tun nftablesCreateRedirect: when only one family is enabled, the
+    // redirect rule is restricted to that family (same rule, extra exprs) —
+    // the other family must keep flowing normally (redirecting it would land
+    // on a stack that cannot dial).
+    let fam = if p.has_v4 && !p.has_v6 {
+        "meta nfproto ipv4 "
+    } else if !p.has_v4 && p.has_v6 {
+        "meta nfproto ipv6 "
+    } else {
+        ""
+    };
+
+    // DNS hijack (prerouting only, sing-tun classic): tcp/udp dport 53 with a
+    // SOURCE address inside the local set → DNAT to the TUN-side DNS. The
+    // redirected packet lands in the TUN device (dst = tun subnet) and the
+    // system-stack hijack answers it.
     let mut dns4 = String::new();
     let mut dns6 = String::new();
     if p.dns_hijack {
         if let Some(d) = p.dns_v4.filter(|_| p.has_v4) {
             dns4 = format!(
-                "    meta nfproto ipv4 meta l4proto {{ tcp, udp }} th dport 53 dnat ip to {d}:53\n"
+                "    meta nfproto ipv4 ip saddr @local_v4 meta l4proto {{ tcp, udp }} th dport 53 dnat ip to {d}:53\n"
             );
         }
         if let Some(d) = p.dns_v6.filter(|_| p.has_v6) {
-            dns6 = format!("    meta nfproto ipv6 meta l4proto {{ tcp, udp }} th dport 53 dnat ip6 to [{d}]:53\n");
+            dns6 = format!(
+                "    meta nfproto ipv6 ip6 saddr @local_v6 meta l4proto {{ tcp, udp }} th dport 53 dnat ip6 to [{d}]:53\n"
+            );
         }
     }
 
@@ -366,9 +412,7 @@ fn build_nft_script(
 
   chain output {{
     type nat hook output priority -150; policy accept;
-    ip daddr @local_v4 return
-    ip6 daddr @local_v6 return
-{mptcp_rule}    oifname "{tun}" meta l4proto tcp counter redirect to :{port}
+    oifname "{tun}" {fam}meta l4proto tcp counter redirect to :{port}
   }}
 
   chain prerouting {{
@@ -376,7 +420,7 @@ fn build_nft_script(
     iifname "{tun}" return
 {dns4}{dns6}    ip daddr @local_v4 return
     ip6 daddr @local_v6 return
-{mptcp_rule}{reject}    meta l4proto tcp counter redirect to :{port}
+{mptcp_rule}{reject}    {fam}meta l4proto tcp counter redirect to :{port}
   }}
 }}
 "#,

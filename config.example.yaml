@@ -26,7 +26,8 @@ redir-port: 7892
 #     - any:53
 #   auto-route: true      # install split-default routes into TUN
 #   auto-detect-interface: true  # bind outbound to physical default NIC (anti-loop)
-#   auto-redirect: false  # Linux only; internal listener, no redir-port needed
+#   auto-redirect: false  # Linux only; REQUIRES auto-route (startup fails otherwise;
+#                         # internal listener, no redir-port needed)
 #   strict-route: false   # stronger anti-leak on top of auto-route
 #   # route-address:      # custom prefixes instead of 0.0.0.0/1 + 128.0.0.0/1
 #   #   - 0.0.0.0/1

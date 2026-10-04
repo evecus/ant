@@ -73,7 +73,7 @@ tun:
   dns-hijack: ["any:53"]
   auto-route: true
   auto-detect-interface: true
-  auto-redirect: false   # Linux only; requires redir-port
+  auto-redirect: false   # Linux only; REQUIRES auto-route (fails fast otherwise)
   strict-route: false
 ```
 
