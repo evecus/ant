@@ -45,8 +45,12 @@ impl NativeTun {
             writer: Arc::new(Mutex::new(NativeTunWriter {
                 inner: Box::pin(w),
                 vnet_hdr,
-                // Userspace GRO is useful on all platforms (including Windows).
-                gro_enabled: true,
+                // GRO coalescing relies on the kernel honouring virtio_net_hdr
+                // (NEEDS_CSUM + GSO). WinTun has no such header: the stripped
+                // coalesced packet would carry only a pseudo-header checksum
+                // and may exceed MTU, so Windows drops it. sing-tun does no
+                // GRO on Windows either — only enable it with vnet_hdr.
+                gro_enabled: vnet_hdr,
                 gro_flags,
                 tcp_table: TcpGroTable::new(),
                 udp_table: UdpGroTable::new(),

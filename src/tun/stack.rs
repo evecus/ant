@@ -40,6 +40,27 @@ const TCP_NAT_TIMEOUT: Duration = Duration::from_secs(300);
 
 type UdpPacket = (Bytes, SocketAddr);
 
+/// Diagnostic: render TCP flag byte, e.g. "SYN|ACK".
+fn tcp_flags_str(f: u8) -> String {
+    let mut v = Vec::new();
+    for (bit, name) in [
+        (0x02u8, "SYN"),
+        (0x10, "ACK"),
+        (0x01, "FIN"),
+        (0x04, "RST"),
+        (0x08, "PSH"),
+    ] {
+        if f & bit != 0 {
+            v.push(name);
+        }
+    }
+    if v.is_empty() {
+        "-".into()
+    } else {
+        v.join("|")
+    }
+}
+
 struct UdpEntry {
     packet_tx: mpsc::Sender<UdpPacket>,
     last_seen: Instant,
@@ -223,7 +244,9 @@ pub async fn run_system_stack(p: TunStackParams) -> Result<()> {
             loop {
                 tokio::time::sleep(Duration::from_millis(2)).await;
                 let mut g = w.lock().await;
-                let _ = g.flush_gro().await;
+                if let Err(e) = g.flush_gro().await {
+                    warn!(err = %e, "tun: flush_gro/write to device failed");
+                }
             }
         });
     }
@@ -264,6 +287,15 @@ pub async fn run_system_stack(p: TunStackParams) -> Result<()> {
 
     let mut defrag = IpDefragmenter::new();
     let mut reader = reader.lock().await;
+    // Diagnostic counters: packets read from the TUN device, by kind.
+    let mut stat_last = Instant::now();
+    let mut stat_tcp4 = 0u64;
+    let mut stat_udp4 = 0u64;
+    let mut stat_icmp4 = 0u64;
+    let mut stat_other4 = 0u64;
+    let mut stat_v6 = 0u64;
+    let mut stat_prev_total = 0u64;
+    info!("tun: packet loop started, waiting for packets from device");
     // NOTE: holding reader lock for the whole loop is fine (single reader task).
 
     loop {
@@ -281,6 +313,31 @@ pub async fn run_system_stack(p: TunStackParams) -> Result<()> {
         };
         if pkt.len() < 20 {
             continue;
+        }
+        match pkt[0] >> 4 {
+            4 => match pkt[9] {
+                IPPROTO_TCP => stat_tcp4 += 1,
+                IPPROTO_UDP => stat_udp4 += 1,
+                IPPROTO_ICMP => stat_icmp4 += 1,
+                _ => stat_other4 += 1,
+            },
+            6 => stat_v6 += 1,
+            _ => {}
+        }
+        if stat_last.elapsed() >= Duration::from_secs(5) {
+            let total = stat_tcp4 + stat_udp4 + stat_icmp4 + stat_other4 + stat_v6;
+            if total != stat_prev_total {
+                info!(
+                    tcp4 = stat_tcp4,
+                    udp4 = stat_udp4,
+                    icmp4 = stat_icmp4,
+                    other4 = stat_other4,
+                    v6 = stat_v6,
+                    "tun: device rx packet counters (cumulative)"
+                );
+                stat_prev_total = total;
+            }
+            stat_last = Instant::now();
         }
         match pkt[0] >> 4 {
             4 => {
@@ -348,10 +405,11 @@ async fn accept_loop(
         };
         let peer = crate::app::sockopt::canonical(peer);
         let nat_port = peer.port();
-        let Some((_orig_src, orig_dst)) = nat.lookup_back(nat_port).await else {
-            debug!(nat_port, "tun: unknown NAT port, drop");
+        let Some((orig_src, orig_dst)) = nat.lookup_back(nat_port).await else {
+            warn!(nat_port, peer = %peer, "tun: accept: unknown NAT port, drop");
             continue;
         };
+        debug!(peer = %peer, src = %orig_src, dst = %orig_dst, "tun: accept ok");
         let router = router.clone();
         let outbounds = outbounds.clone();
         tokio::spawn(async move {
@@ -370,6 +428,7 @@ async fn handle_tcp(
     outbounds: Arc<OutboundManager>,
 ) -> Result<()> {
     let _ = stream.set_nodelay(true);
+    debug!(peer = %peer, dest = %dest, "tun: handle_tcp start");
     // TCP DNS is rare; if dest is :53, answer via local DNS when route-hijack-style
     // behaviour is desired — caller may still use udp dns-hijack primarily.
     let decided = target::decide(&router, dest, None).await;
@@ -411,7 +470,19 @@ async fn process_ipv4(raw: &[u8], rt: &StackRuntime) {
     let payload = &raw[ihl..];
     match raw[9] {
         IPPROTO_TCP if rt.tcp_port_v4 != 0 => {
+            if payload.len() >= 14 {
+                debug!(
+                    src = %format!("{}:{}", src_ip, u16::from_be_bytes([payload[0], payload[1]])),
+                    dst = %format!("{}:{}", dst_ip, u16::from_be_bytes([payload[2], payload[3]])),
+                    flags = %tcp_flags_str(payload[13]),
+                    len = raw.len(),
+                    "tun: rx tcp4"
+                );
+            }
             handle_tcp_v4(raw, payload, src_ip, dst_ip, rt).await;
+        }
+        IPPROTO_TCP => {
+            warn!("tun: rx tcp4 but v4 TCP listener is not running (tcp_port_v4=0), dropped");
         }
         IPPROTO_UDP => {
             handle_udp(raw, payload, true, rt).await;
@@ -451,6 +522,7 @@ async fn process_ipv6(raw: &[u8], rt: &StackRuntime) {
     let payload = &raw[l4_off..];
     match next {
         IPPROTO_TCP if rt.tcp_port_v6 != 0 => {
+            debug!(src = %src_ip, dst = %dst_ip, len = raw.len(), "tun: rx tcp6");
             handle_tcp_v6(raw, payload, l4_off, src_ip, dst_ip, rt).await;
         }
         IPPROTO_UDP => {
@@ -520,6 +592,13 @@ async fn handle_tcp_v4(
 
     if src_ip == server_addr && src_port == tcp_port {
         if let Some((orig_src, orig_dst)) = rt.tcp_nat.lookup_back(dst_port).await {
+            debug!(
+                nat_port = dst_port,
+                orig_src = %orig_src,
+                orig_dst = %orig_dst,
+                flags = %tcp_flags_str(tcp_payload[13]),
+                "tun: tcp4 reverse (listener -> app)"
+            );
             let mut pkt = raw.to_vec();
             let (ns, nsp) = match orig_dst {
                 SocketAddr::V4(a) => (*a.ip(), a.port()),
@@ -539,11 +618,14 @@ async fn handle_tcp_v4(
             recompute_tcp_checksum_v4(&mut pkt, ihl);
             recompute_ipv4_checksum(&mut pkt);
             tun_write(&rt.writer, &pkt).await;
+        } else {
+            warn!(dst_port, "tun: tcp4 reverse packet but NAT entry not found");
         }
         return;
     }
 
     if !is_global_unicast_v4(dst_ip) {
+        debug!(dst = %dst_ip, "tun: tcp4 dst not global unicast, ignored");
         return;
     }
 
@@ -564,6 +646,13 @@ async fn handle_tcp_v4(
         return;
     };
 
+    debug!(
+        src = %src,
+        dst = %dst,
+        nat_port,
+        to = %format!("{}:{}", server_addr, tcp_port),
+        "tun: tcp4 forward (app -> listener), writing NAT-ed packet to device"
+    );
     let mut pkt = raw.to_vec();
     pkt[12..16].copy_from_slice(&client_addr.octets());
     pkt[16..20].copy_from_slice(&server_addr.octets());
@@ -833,6 +922,6 @@ async fn run_udp_session(
 async fn tun_write(writer: &Arc<Mutex<NativeTunWriter>>, pkt: &[u8]) {
     let mut w = writer.lock().await;
     if let Err(e) = w.write_packet(pkt).await {
-        debug!(err = %e, "tun: write failed");
+        warn!(err = %e, "tun: write failed");
     }
 }
