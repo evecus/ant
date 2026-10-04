@@ -328,11 +328,16 @@ fn detect_windows(exclude: &str) -> Option<String> {
             return None;
         }
 
-        // Cache index for IP_UNICAST_IF binding.
+        // Cache index for IP_UNICAST_IF binding. NOTE: read and write must
+        // NOT overlap — std RwLock is not reentrant, holding the read guard
+        // across set_bind_if_index() deadlocks the calling thread.
         let idx = if_row.InterfaceIndex;
-        match BIND_IF_INDEX.read() {
-            Ok(g) if *g == Some(idx) => {}
-            _ => set_bind_if_index(Some(idx)),
+        let unchanged = BIND_IF_INDEX
+            .read()
+            .map(|g| *g == Some(idx))
+            .unwrap_or(false);
+        if !unchanged {
+            set_bind_if_index(Some(idx));
         }
         Some(alias)
     }
