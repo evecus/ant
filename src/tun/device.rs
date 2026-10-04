@@ -354,7 +354,6 @@ pub fn ensure_firewall_rule() {
         Ok(out) if out.status.success() => {
             info!(program = %prog, "tun: firewall inbound allow rule installed");
             remove_blocking_rules_for_exe(&prog);
-            log_firewall_rules_for_exe(&prog);
         }
         Ok(out) => warn!(
             program = %prog,
@@ -362,39 +361,6 @@ pub fn ensure_firewall_rule() {
             "tun: failed to add firewall rule (inbound TCP may be blocked)"
         ),
         Err(e) => warn!(program = %prog, err = %e, "failed to run netsh advfirewall"),
-    }
-}
-
-/// Diagnostic: list every Windows Firewall rule bound to this executable
-/// (name|direction|action|enabled|profile). An explicit Block rule (e.g. from
-/// a dismissed "allow this app" prompt) overrides our Allow rule and silently
-/// drops the NAT-ed inbound SYNs.
-#[cfg(target_os = "windows")]
-fn log_firewall_rules_for_exe(prog: &str) {
-    const SCRIPT: &str = "[Console]::OutputEncoding=[Text.Encoding]::UTF8; \
-        Get-NetFirewallApplicationFilter -Program '@PROG@' -ErrorAction SilentlyContinue | \
-        Get-NetFirewallRule | ForEach-Object { \
-        '{0}|{1}|{2}|{3}|{4}' -f $_.DisplayName,$_.Direction,$_.Action,$_.Enabled,$_.Profile }";
-    let script = SCRIPT.replace("@PROG@", prog);
-    match Command::new("powershell")
-        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
-        .output()
-    {
-        Ok(out) => {
-            let text = String::from_utf8_lossy(&out.stdout);
-            let mut n = 0;
-            for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
-                n += 1;
-                info!(rule = %line, "tun: DIAG firewall rule for exe (name|dir|action|enabled|profile)");
-            }
-            if n == 0 {
-                info!(
-                    stderr = %String::from_utf8_lossy(&out.stderr).trim(),
-                    "tun: DIAG no firewall rules found for exe"
-                );
-            }
-        }
-        Err(e) => warn!(err = %e, "tun: DIAG failed to run powershell for firewall rule listing"),
     }
 }
 
