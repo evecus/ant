@@ -101,6 +101,8 @@ nftables = "0.6"
 rtnetlink = "0.14"
 netlink-packet-route = "0.19"
 
+redb = "2.4"
+
 [profile.release]
 lto = true
 codegen-units = 1
