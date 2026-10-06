@@ -289,7 +289,8 @@ fn build_info() -> serde_json::Value {
                 "name": name,
                 "type": p.ty,
                 "behavior": p.behavior,
-                "path": p.path.display().to_string(),
+                "path": p.path.as_ref().map(|x| x.display().to_string()).unwrap_or_default(),
+                "url": p.url,
             })
         })
         .collect();
