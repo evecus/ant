@@ -24,10 +24,6 @@ struct Inner {
 }
 
 impl DnsCache {
-    pub fn new(capacity: usize) -> Self {
-        Self::with_store(capacity, None)
-    }
-
     pub fn with_store(capacity: usize, persistent: Option<Arc<AppCache>>) -> Self {
         Self {
             inner: Mutex::new(Inner {
