@@ -4,10 +4,9 @@
 
 log-level: info
 
-# Persist select-group choices and optional ruleset payloads (redb).
-# profile:
-#   store-selected: true
-#   store-selected-file: cache.db
+# Global persistent cache (redb). Default false.
+# cache: false
+# cache-file: cache.db
 # mark: 255
 # bind-address: "::"  # :: | 0.0.0.0 | 127.0.0.1
 # Dashboard: 代理组 / 连接 / 信息  — http://ip:9095/ui
@@ -284,7 +283,7 @@ proxy-groups:
 # Rule providers: type file | http
 # Storage priority:
 #   1. explicit path (highest) — absolute, relative, or file:/abs/path
-#   2. cache: true → redb (profile.store-selected-file)
+#   2. top-level cache: true → redb
 #   3. default file rules/<name>.ars under run dir (-d/--dir or cwd)
 # behavior: domain | ip | ipcidr | classical
 # format (optional): text | yaml | json | ars
@@ -313,12 +312,11 @@ rule-providers:
   #   url: "https://example.com/geoip.ars"
   #   # path omitted + cache: false → rules/geoip.ars
 
-  # Remote into redb (no file on disk)
+  # Remote into redb when top-level cache: true (omit path)
   # ads-remote:
   #   type: http
   #   behavior: domain
   #   url: "https://example.com/ads.yaml"
-  #   cache: true
 
 # Route: DOMAIN / DOMAIN-SUFFIX / DOMAIN-KEYWORD / DOMAIN-REGEX /
 #        IP-CIDR / SRC-IP-CIDR / RULE-SET / MATCH
