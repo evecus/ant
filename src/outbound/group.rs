@@ -24,6 +24,7 @@ pub struct SelectHandle {
     name: String,
     members: Arc<RwLock<Vec<String>>>,
     selected: Arc<RwLock<String>>,
+    cache: Option<Arc<crate::cache::AppCache>>,
 }
 
 impl SelectHandle {
@@ -48,8 +49,13 @@ impl SelectHandle {
             .cloned()
             .unwrap();
         drop(members);
-        *self.selected.write().unwrap() = canon;
-        info!(group = %self.name, selected = %member, "proxy-group select");
+        *self.selected.write().unwrap() = canon.clone();
+        if let Some(cache) = &self.cache {
+            if let Err(e) = cache.put(&self.name, &canon) {
+                warn!(group = %self.name, error = %e, "failed to persist select choice");
+            }
+        }
+        info!(group = %self.name, selected = %canon, "proxy-group select");
         Ok(())
     }
 }
@@ -376,6 +382,7 @@ pub fn build_groups(
     all_proxy_names: &[String],
     providers: &ProviderIndex,
     addrs: RelayAddrMap,
+    select_cache: Option<Arc<crate::cache::AppCache>>,
 ) -> Result<(Vec<SelectHandle>, Vec<GroupStatus>)> {
     let mut selects = Vec::new();
     let mut statuses = Vec::new();
@@ -385,15 +392,26 @@ pub fn build_groups(
         let members = resolve_members(cfg, all_proxy_names, providers)?;
         match ty.as_str() {
             "select" => {
-                let initial = cfg
-                    .selected
-                    .clone()
+                let initial = select_cache
+                    .as_ref()
+                    .and_then(|c| c.get(&cfg.name))
                     .filter(|s| members.iter().any(|m| m.eq_ignore_ascii_case(s)))
+                    .or_else(|| {
+                        cfg.selected
+                            .clone()
+                            .filter(|s| members.iter().any(|m| m.eq_ignore_ascii_case(s)))
+                    })
                     .unwrap_or_else(|| members[0].clone());
+                let initial = members
+                    .iter()
+                    .find(|m| m.eq_ignore_ascii_case(&initial))
+                    .cloned()
+                    .unwrap_or(initial);
                 let handle = SelectHandle {
                     name: cfg.name.clone(),
                     members: Arc::new(RwLock::new(members.clone())),
                     selected: Arc::new(RwLock::new(initial.clone())),
+                    cache: select_cache.clone(),
                 };
                 let group = Arc::new(SelectGroup {
                     handle: handle.clone(),

@@ -81,6 +81,7 @@ impl OutboundManager {
         groups: &[ProxyGroupConfig],
         providers: &std::collections::HashMap<String, crate::config::ProxyProviderConfig>,
         dns: Option<&DnsConfig>,
+        select_cache: Option<std::sync::Arc<crate::cache::AppCache>>,
     ) -> Result<Arc<Self>> {
         // ECH 的 DNS HTTPS RR 查询 upstream 优先级：
         // proxy-nameserver（通常为加密上游）→ dns.nameserver（自定义默认上游）
@@ -191,6 +192,7 @@ impl OutboundManager {
             &all_proxy_names,
             &provider_index,
             addrs,
+            select_cache,
         )?;
         // Fold group dialers into nodes so select(Outbound::Node(group)) works.
         {
