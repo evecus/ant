@@ -433,7 +433,12 @@ fn print_summary(cfg: &Config) {
     }
     if let Ok(list) = cfg.ruleset_list(None) {
         for rs in &list {
-            println!("  rules  {} ({}) <- {}", rs.name, rs.ty, rs.path.display());
+            let src = match &rs.storage {
+                crate::config::RulesetStorage::File(p) => p.display().to_string(),
+                crate::config::RulesetStorage::Db => "redb".into(),
+            };
+            let extra = rs.url.as_ref().map(|u| format!(" url={u}")).unwrap_or_default();
+            println!("  rules  {} ({}) <- {}{}", rs.name, rs.ty, src, extra);
         }
     }
     for line in &cfg.route {

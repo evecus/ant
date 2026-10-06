@@ -14,7 +14,7 @@ use redb::{Database, ReadableTable, TableDefinition};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 const SELECTED: TableDefinition<'_, &str, &str> = TableDefinition::new("selected");
 const RULESETS: TableDefinition<'_, &str, &[u8]> = TableDefinition::new("rulesets");
