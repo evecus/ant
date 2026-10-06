@@ -101,7 +101,7 @@ nftables = "0.6"
 rtnetlink = "0.14"
 netlink-packet-route = "0.19"
 
-redb = "2.4"
+redb = "2"
 
 [profile.release]
 lto = true
