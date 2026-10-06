@@ -310,6 +310,7 @@ rule-providers:
   #   type: http
   #   behavior: ip
   #   url: "https://example.com/geoip.ars"
+  #   update-interval: 5
   #   # path omitted + cache: false → rules/geoip.ars
 
   # Remote into redb when top-level cache: true (omit path)
