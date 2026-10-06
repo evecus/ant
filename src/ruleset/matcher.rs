@@ -1,4 +1,4 @@
-//! Match engine for loaded `.ars` rulesets.
+//! Match engine for rulesets (binary `.ars` or plaintext-compiled).
 
 use super::compiler::domain_to_fst_key;
 use super::loader::LoadedRuleSet;
@@ -136,6 +136,65 @@ impl RuleSet {
             domain_exact,
             domain_suffix,
             keywords: loaded.domain_keywords,
+            regexes,
+            ipv4,
+            ipv6,
+        })
+    }
+
+    /// Build a matcher directly from a plaintext-compiled ruleset (no `.ars` round-trip).
+    pub fn from_compiled(name: &str, compiled: super::compiler::CompiledRuleSet) -> Result<Self> {
+        use super::compiler::{build_domain_fst, build_suffix_fst};
+
+        let domain_exact = {
+            let bytes = build_domain_fst(&compiled.domains)?;
+            if bytes.is_empty() {
+                None
+            } else {
+                let arc: Arc<[u8]> = Arc::from(bytes);
+                Some(Set::new(arc).map_err(|e| anyhow!("domain fst: {e}"))?)
+            }
+        };
+        let domain_suffix = {
+            let bytes = build_suffix_fst(&compiled.domain_suffixes)?;
+            if bytes.is_empty() {
+                None
+            } else {
+                let arc: Arc<[u8]> = Arc::from(bytes);
+                Some(Set::new(arc).map_err(|e| anyhow!("suffix fst: {e}"))?)
+            }
+        };
+
+        let regexes = if compiled.domain_regexes.is_empty() {
+            None
+        } else {
+            match regex::RegexSet::new(&compiled.domain_regexes) {
+                Ok(s) => Some(s),
+                Err(e) => {
+                    tracing::warn!("ruleset {name}: regex set error: {e}");
+                    None
+                }
+            }
+        };
+
+        let ipv4 = IpRanges::build(
+            compiled
+                .ipv4_cidrs
+                .into_iter()
+                .map(|(a, p)| ipv4_cidr_to_range(a, p)),
+        );
+        let ipv6 = IpRanges::build(
+            compiled
+                .ipv6_cidrs
+                .into_iter()
+                .map(|(a, p)| ipv6_cidr_to_range(a, p)),
+        );
+
+        Ok(Self {
+            name: name.to_string(),
+            domain_exact,
+            domain_suffix,
+            keywords: compiled.domain_keywords,
             regexes,
             ipv4,
             ipv6,

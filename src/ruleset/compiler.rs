@@ -1,4 +1,5 @@
-//! Compile mihomo rule-provider YAML/text → intermediate → `.ars` bytes.
+//! Compile mihomo rule-provider YAML/text → intermediate `CompiledRuleSet`
+//! (used for direct matching and optional `.ars` export).
 
 use super::format::*;
 use anyhow::{anyhow, bail, Context, Result};
@@ -418,7 +419,7 @@ fn suffix_to_fst_key(suffix: &str) -> String {
     key
 }
 
-fn build_domain_fst(domains: &[String]) -> Result<Vec<u8>> {
+pub(crate) fn build_domain_fst(domains: &[String]) -> Result<Vec<u8>> {
     if domains.is_empty() {
         return Ok(vec![]);
     }
@@ -438,7 +439,7 @@ fn build_domain_fst(domains: &[String]) -> Result<Vec<u8>> {
     Ok(buf)
 }
 
-fn build_suffix_fst(suffixes: &[String]) -> Result<Vec<u8>> {
+pub(crate) fn build_suffix_fst(suffixes: &[String]) -> Result<Vec<u8>> {
     if suffixes.is_empty() {
         return Ok(vec![]);
     }
