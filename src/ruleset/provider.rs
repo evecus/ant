@@ -17,16 +17,48 @@ pub async fn load_all(
 ) -> Result<HashMap<String, RuleSet>> {
     let mut out = HashMap::new();
     for rs in list {
-        let behavior = match rs.ty.as_str() {
-            "domain" => Some(ProviderBehavior::Domain),
-            "ip" => Some(ProviderBehavior::Ipcidr),
-            "classical" => Some(ProviderBehavior::Classical),
-            _ => None,
-        };
+        let behavior = behavior_of(rs);
         let loaded = load_one(rs, behavior, cache).await?;
         out.insert(rs.name.clone(), loaded);
     }
     Ok(out)
+}
+
+fn behavior_of(rs: &RulesetConfig) -> Option<ProviderBehavior> {
+    match rs.ty.as_str() {
+        "domain" => Some(ProviderBehavior::Domain),
+        "ip" => Some(ProviderBehavior::Ipcidr),
+        "classical" => Some(ProviderBehavior::Classical),
+        _ => None,
+    }
+}
+
+/// Force re-download a remote (`type: http`) ruleset and write to storage.
+/// Returns the freshly parsed matcher.
+pub async fn refresh_remote(
+    rs: &RulesetConfig,
+    cache: Option<&AppCache>,
+) -> Result<RuleSet> {
+    if !rs.provider_type.eq_ignore_ascii_case("http") {
+        bail!("refresh_remote only applies to type: http providers");
+    }
+    let url = rs
+        .url
+        .as_deref()
+        .filter(|u| !u.trim().is_empty())
+        .with_context(|| format!("rule-provider `{}`: missing url", rs.name))?;
+    info!(name = %rs.name, %url, "updating remote ruleset");
+    let data = http_get(url)
+        .await
+        .with_context(|| format!("download ruleset `{}` from {url}", rs.name))?;
+    write_storage(rs, &data, cache)?;
+    info!(
+        name = %rs.name,
+        bytes = data.len(),
+        dest = storage_label(&rs.storage),
+        "ruleset updated and stored"
+    );
+    parse_bytes(&rs.name, &data, behavior_of(rs), rs.format.as_deref())
 }
 
 async fn load_one(

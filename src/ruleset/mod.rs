@@ -14,7 +14,7 @@ pub use compiler::{
     compile_mihomo_ruleset, compile_singbox_json, write_ars, ProviderBehavior,
 };
 pub use matcher::RuleSet;
-pub use provider::load_all as load_all_providers;
+pub use provider::{load_all as load_all_providers, refresh_remote};
 
 use anyhow::{bail, Context, Result};
 use std::path::Path;
