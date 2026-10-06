@@ -211,6 +211,10 @@ pub struct GlobalConfig {
     /// Off by default. DNS-query sniffing is independent: it follows `dns.route-hijack`.
     #[serde(default)]
     pub sniff: bool,
+    /// When true, domain destinations are resolved before matching IP rules /
+    /// IP rule-providers. Default false. Per-rule `no-resolve` skips this line.
+    #[serde(default, rename = "route-resolve")]
+    pub route_resolve: bool,
 }
 
 fn default_bind() -> String {
@@ -616,8 +620,12 @@ pub struct RuleProviderConfig {
     /// Provider type; only `file` is supported.
     #[serde(default = "default_provider_type", rename = "type")]
     pub ty: String,
-    /// `domain` or `ip` / `ipcidr`.
+    /// `domain` / `ip` / `ipcidr` / `classical`.
+    #[serde(default = "default_behavior")]
     pub behavior: String,
+    /// Optional format hint: `text` | `yaml` | `json` | `ars` (auto by extension if omitted).
+    #[serde(default)]
+    pub format: Option<String>,
     pub path: PathBuf,
 }
 
@@ -625,23 +633,53 @@ fn default_provider_type() -> String {
     "file".into()
 }
 
+fn default_behavior() -> String {
+    "domain".into()
+}
+
 /// Normalized ruleset descriptor used by the router (derived from rule-providers).
 #[derive(Debug, Clone)]
 pub struct RulesetConfig {
     pub name: String,
-    /// `domain` or `ip`.
+    /// `domain` / `ip` / `classical`.
     pub ty: String,
     pub path: PathBuf,
+    pub format: Option<String>,
+}
+
+/// Kind of a single route / DNS rule (mihomo-compatible).
+#[derive(Debug, Clone)]
+pub enum RuleKind {
+    RuleSet(String),
+    Domain(String),
+    DomainSuffix(String),
+    DomainKeyword(String),
+    DomainRegex(String),
+    IpCidr(String),
+    SrcIpCidr(String),
+    Match,
 }
 
 /// Parsed mihomo-style rule line.
 #[derive(Debug, Clone)]
 pub struct ParsedRule {
-    /// Ruleset name for `RULE-SET`; `None` for `MATCH`.
-    pub ruleset: Option<String>,
+    pub kind: RuleKind,
     /// Normalized outbound: `direct` / `block` / node name.
     pub outbound: String,
-    pub is_match: bool,
+    /// Skip domain→IP resolve for this rule (`no-resolve` flag).
+    pub no_resolve: bool,
+}
+
+impl ParsedRule {
+    pub fn is_match(&self) -> bool {
+        matches!(self.kind, RuleKind::Match)
+    }
+    pub fn ruleset_name(&self) -> Option<&str> {
+        match &self.kind {
+            RuleKind::RuleSet(n) => Some(n.as_str()),
+            _ => None,
+        }
+    }
 }
 
 /// Outbound names that cannot be used as proxy node names. Case-insensitive:
@@ -658,8 +696,15 @@ pub fn normalize_outbound_name(s: &str) -> String {
     }
 }
 
+fn is_no_resolve_flag(s: &str) -> bool {
+    s.eq_ignore_ascii_case("no-resolve")
+}
+
 /// Parse a single mihomo-style rule string.
-/// Supported: `RULE-SET,<name>,<outbound>` and `MATCH,<outbound>`.
+///
+/// Supported: DOMAIN, DOMAIN-SUFFIX, DOMAIN-KEYWORD, DOMAIN-REGEX,
+/// IP-CIDR, IP-CIDR6, SRC-IP-CIDR, RULE-SET, MATCH.
+/// Trailing `no-resolve` skips domain→IP resolution when `route-resolve: true`.
 pub fn parse_rule_line(line: &str) -> Result<ParsedRule> {
     let line = line.trim();
     if line.is_empty() {
@@ -670,29 +715,97 @@ pub fn parse_rule_line(line: &str) -> Result<ParsedRule> {
         bail!("empty rule line");
     }
     let kind = parts[0].to_ascii_uppercase();
+    // Collect no-resolve from any trailing field after the required ones.
+    let no_resolve = parts.iter().skip(1).any(|p| is_no_resolve_flag(p));
+    // Filter no-resolve out of payload/outbound slots for indexing.
+    let core: Vec<&str> = parts.iter().copied().filter(|p| !is_no_resolve_flag(p)).collect();
     match kind.as_str() {
         "RULE-SET" => {
-            if parts.len() < 3 {
+            if core.len() < 3 {
                 bail!("RULE-SET needs name and outbound, got: {line}");
             }
             Ok(ParsedRule {
-                ruleset: Some(parts[1].to_string()),
-                outbound: normalize_outbound_name(parts[2]),
-                is_match: false,
+                kind: RuleKind::RuleSet(core[1].to_string()),
+                outbound: normalize_outbound_name(core[2]),
+                no_resolve,
             })
         }
         "MATCH" => {
-            if parts.len() < 2 {
+            if core.len() < 2 {
                 bail!("MATCH needs outbound, got: {line}");
             }
             Ok(ParsedRule {
-                ruleset: None,
-                outbound: normalize_outbound_name(parts[1]),
-                is_match: true,
+                kind: RuleKind::Match,
+                outbound: normalize_outbound_name(core[1]),
+                no_resolve: false,
+            })
+        }
+        "DOMAIN" => {
+            if core.len() < 3 {
+                bail!("DOMAIN needs domain and outbound, got: {line}");
+            }
+            Ok(ParsedRule {
+                kind: RuleKind::Domain(core[1].to_ascii_lowercase()),
+                outbound: normalize_outbound_name(core[2]),
+                no_resolve,
+            })
+        }
+        "DOMAIN-SUFFIX" => {
+            if core.len() < 3 {
+                bail!("DOMAIN-SUFFIX needs suffix and outbound, got: {line}");
+            }
+            Ok(ParsedRule {
+                kind: RuleKind::DomainSuffix(core[1].trim_start_matches('.').to_ascii_lowercase()),
+                outbound: normalize_outbound_name(core[2]),
+                no_resolve,
+            })
+        }
+        "DOMAIN-KEYWORD" => {
+            if core.len() < 3 {
+                bail!("DOMAIN-KEYWORD needs keyword and outbound, got: {line}");
+            }
+            Ok(ParsedRule {
+                kind: RuleKind::DomainKeyword(core[1].to_ascii_lowercase()),
+                outbound: normalize_outbound_name(core[2]),
+                no_resolve,
+            })
+        }
+        "DOMAIN-REGEX" => {
+            if core.len() < 3 {
+                bail!("DOMAIN-REGEX needs regex and outbound, got: {line}");
+            }
+            regex::Regex::new(core[1])
+                .with_context(|| format!("invalid DOMAIN-REGEX: {}", core[1]))?;
+            Ok(ParsedRule {
+                kind: RuleKind::DomainRegex(core[1].to_string()),
+                outbound: normalize_outbound_name(core[2]),
+                no_resolve,
+            })
+        }
+        "IP-CIDR" | "IP-CIDR6" => {
+            if core.len() < 3 {
+                bail!("{kind} needs cidr and outbound, got: {line}");
+            }
+            Ok(ParsedRule {
+                kind: RuleKind::IpCidr(core[1].to_string()),
+                outbound: normalize_outbound_name(core[2]),
+                no_resolve,
+            })
+        }
+        "SRC-IP-CIDR" | "SRC-IP-CIDR6" => {
+            if core.len() < 3 {
+                bail!("{kind} needs cidr and outbound, got: {line}");
+            }
+            Ok(ParsedRule {
+                kind: RuleKind::SrcIpCidr(core[1].to_string()),
+                outbound: normalize_outbound_name(core[2]),
+                no_resolve,
             })
         }
         other => bail!(
-            "unsupported rule type `{other}` (only RULE-SET and MATCH are supported): {line}"
+            "unsupported rule type `{other}`: {line}\n\
+             supported: DOMAIN, DOMAIN-SUFFIX, DOMAIN-KEYWORD, DOMAIN-REGEX, \
+             IP-CIDR, IP-CIDR6, SRC-IP-CIDR, RULE-SET, MATCH"
         ),
     }
 }
@@ -701,35 +814,52 @@ fn normalize_behavior(behavior: &str) -> Result<String> {
     match behavior.to_ascii_lowercase().as_str() {
         "domain" => Ok("domain".into()),
         "ip" | "ipcidr" | "ip-cidr" => Ok("ip".into()),
-        other => bail!("rule-provider behavior must be domain or ip/ipcidr, got `{other}`"),
+        "classical" => Ok("classical".into()),
+        other => bail!(
+            "rule-provider behavior must be domain, ip/ipcidr, or classical, got `{other}`"
+        ),
     }
 }
 
 /// Parsed `dns.rules` line (used when `rule-follow-route: false`).
 #[derive(Debug, Clone)]
 pub struct ParsedDnsRule {
-    /// Ruleset name for `RULE-SET`; `None` for `MATCH`.
-    pub ruleset: Option<String>,
+    pub kind: RuleKind,
     /// Raw upstream value: a nameserver URL or `rcode://success`.
     pub upstream: String,
 }
 
-/// Parse a `dns.rules` line. Only uppercase `RULE-SET,<name>,<upstream>` and
-/// `MATCH,<upstream>` are accepted; the last field must be a nameserver URL or
-/// `rcode://success` — never an outbound name (direct/block/reject/node name).
+impl ParsedDnsRule {
+    pub fn is_match(&self) -> bool {
+        matches!(self.kind, RuleKind::Match)
+    }
+    pub fn ruleset_name(&self) -> Option<&str> {
+        match &self.kind {
+            RuleKind::RuleSet(n) => Some(n.as_str()),
+            _ => None,
+        }
+    }
+}
+
+/// Parse a `dns.rules` line. Same rule types as route; last field is upstream
+/// (nameserver URL or `rcode://success`), never an outbound name.
 pub fn parse_dns_rule_line(line: &str) -> Result<ParsedDnsRule> {
     let line = line.trim();
     if line.is_empty() {
         bail!("empty dns rule line");
     }
     let parts: Vec<&str> = line.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
-    match parts[0] {
+    if parts.is_empty() {
+        bail!("empty dns rule line");
+    }
+    let kind = parts[0].to_ascii_uppercase();
+    match kind.as_str() {
         "RULE-SET" => {
             if parts.len() < 3 {
                 bail!("dns rules `RULE-SET` needs <name>,<upstream>, got: {line}");
             }
             Ok(ParsedDnsRule {
-                ruleset: Some(parts[1].to_string()),
+                kind: RuleKind::RuleSet(parts[1].to_string()),
                 upstream: parts[2].to_string(),
             })
         }
@@ -738,13 +868,70 @@ pub fn parse_dns_rule_line(line: &str) -> Result<ParsedDnsRule> {
                 bail!("dns rules `MATCH` needs <upstream>, got: {line}");
             }
             Ok(ParsedDnsRule {
-                ruleset: None,
+                kind: RuleKind::Match,
                 upstream: parts[1].to_string(),
             })
         }
-        // 只允许大写关键字：小写 `match` / 其他类型一律拒绝。
+        "DOMAIN" => {
+            if parts.len() < 3 {
+                bail!("dns rules DOMAIN needs domain and upstream, got: {line}");
+            }
+            Ok(ParsedDnsRule {
+                kind: RuleKind::Domain(parts[1].to_ascii_lowercase()),
+                upstream: parts[2].to_string(),
+            })
+        }
+        "DOMAIN-SUFFIX" => {
+            if parts.len() < 3 {
+                bail!("dns rules DOMAIN-SUFFIX needs suffix and upstream, got: {line}");
+            }
+            Ok(ParsedDnsRule {
+                kind: RuleKind::DomainSuffix(parts[1].trim_start_matches('.').to_ascii_lowercase()),
+                upstream: parts[2].to_string(),
+            })
+        }
+        "DOMAIN-KEYWORD" => {
+            if parts.len() < 3 {
+                bail!("dns rules DOMAIN-KEYWORD needs keyword and upstream, got: {line}");
+            }
+            Ok(ParsedDnsRule {
+                kind: RuleKind::DomainKeyword(parts[1].to_ascii_lowercase()),
+                upstream: parts[2].to_string(),
+            })
+        }
+        "DOMAIN-REGEX" => {
+            if parts.len() < 3 {
+                bail!("dns rules DOMAIN-REGEX needs regex and upstream, got: {line}");
+            }
+            regex::Regex::new(parts[1])
+                .with_context(|| format!("invalid DOMAIN-REGEX: {}", parts[1]))?;
+            Ok(ParsedDnsRule {
+                kind: RuleKind::DomainRegex(parts[1].to_string()),
+                upstream: parts[2].to_string(),
+            })
+        }
+        "IP-CIDR" | "IP-CIDR6" => {
+            if parts.len() < 3 {
+                bail!("dns rules {kind} needs cidr and upstream, got: {line}");
+            }
+            Ok(ParsedDnsRule {
+                kind: RuleKind::IpCidr(parts[1].to_string()),
+                upstream: parts[2].to_string(),
+            })
+        }
+        "SRC-IP-CIDR" | "SRC-IP-CIDR6" => {
+            if parts.len() < 3 {
+                bail!("dns rules {kind} needs cidr and upstream, got: {line}");
+            }
+            Ok(ParsedDnsRule {
+                kind: RuleKind::SrcIpCidr(parts[1].to_string()),
+                upstream: parts[2].to_string(),
+            })
+        }
         other => bail!(
-            "dns rules: only uppercase RULE-SET and MATCH are supported (got `{other}`): {line}"
+            "dns rules: unsupported type `{other}` (got: {line})\n\
+             supported: DOMAIN, DOMAIN-SUFFIX, DOMAIN-KEYWORD, DOMAIN-REGEX, \
+             IP-CIDR, SRC-IP-CIDR, RULE-SET, MATCH"
         ),
     }
 }
@@ -800,6 +987,7 @@ impl Config {
                 name: name.clone(),
                 ty: normalize_behavior(&rp.behavior)?,
                 path: rp.path.clone(),
+                format: rp.format.clone(),
             });
         }
         Ok(out)
@@ -1183,22 +1371,8 @@ impl Config {
             }
         }
 
-        // rule-providers
+        // rule-providers: .ars binary or plaintext (yaml/json/list/text)
         let rulesets = self.ruleset_list()?;
-        for rs in &rulesets {
-            let ext = rs
-                .path
-                .extension()
-                .and_then(|e| e.to_str())
-                .unwrap_or("");
-            if !ext.eq_ignore_ascii_case("ars") {
-                bail!(
-                    "rule-provider `{}` path must end with .ars (got {:?}); convert with: ant ruleset-convert -i in.json -o out.ars",
-                    rs.name,
-                    rs.path
-                );
-            }
-        }
         let ruleset_names: std::collections::HashSet<&str> =
             rulesets.iter().map(|r| r.name.as_str()).collect();
 
@@ -1208,20 +1382,20 @@ impl Config {
         }
         let parsed = self.parsed_rules()?;
         let last = parsed.last().unwrap();
-        if !last.is_match {
+        if !last.is_match() {
             bail!("last route rule must be MATCH,<outbound>");
         }
         for (i, r) in parsed.iter().enumerate() {
             if i + 1 == parsed.len() {
                 continue;
             }
-            if r.is_match {
+            if r.is_match() {
                 bail!("MATCH is only allowed as the last route rule (found at route[{i}])");
             }
-            let name = r.ruleset.as_deref().unwrap();
-            if !ruleset_names.contains(name) {
-                bail!("route[{i}]: unknown rule-provider `{name}`");
-            }
+            if let Some(name) = r.ruleset_name() {
+                if !ruleset_names.contains(name) {
+                    bail!("route[{i}]: unknown rule-provider `{name}`");
+                }
             if !known_has(&known, &r.outbound) {
                 bail!(
                     "route[{i}]: unknown outbound `{}`; use direct/DIRECT, block/BLOCK, \
@@ -1278,18 +1452,18 @@ impl Config {
             let node_names: Vec<String> = self.proxies.iter().map(|p| p.name.clone()).collect();
             for (i, line) in self.dns.rules.iter().enumerate() {
                 let r = parse_dns_rule_line(line).with_context(|| format!("dns.rules[{i}]"))?;
-                if r.ruleset.is_none() && i + 1 != self.dns.rules.len() {
+                if r.is_match() && i + 1 != self.dns.rules.len() {
                     bail!("dns.rules[{i}]: MATCH is only allowed as the last dns rule");
                 }
-                if let Some(name) = &r.ruleset {
+                if let Some(name) = r.ruleset_name() {
                     let rs = rulesets
                         .iter()
-                        .find(|rs| &rs.name == name)
+                        .find(|rs| rs.name == name)
                         .ok_or_else(|| {
                             anyhow::anyhow!("dns.rules[{i}] references unknown rule-provider {name}")
                         })?;
-                    if rs.ty != "domain" {
-                        bail!("dns.rules[{i}] `{name}` must be a domain rule-provider");
+                    if rs.ty != "domain" && rs.ty != "classical" {
+                        bail!("dns.rules[{i}] `{name}` must be a domain or classical rule-provider");
                     }
                 }
                 validate_dns_upstream(&r.upstream, &node_names)
@@ -1311,8 +1485,8 @@ impl Config {
                         .iter()
                         .find(|r| &r.name == name)
                         .ok_or_else(|| anyhow::anyhow!("{field} references unknown rule-provider {name}"))?;
-                    if rs.ty != "domain" {
-                        bail!("{field} `{name}` must be a domain rule-provider");
+                    if rs.ty != "domain" && rs.ty != "classical" {
+                        bail!("{field} `{name}` must be a domain or classical rule-provider");
                     }
                 }
                 Ok(())
@@ -1423,9 +1597,9 @@ route:
         assert_eq!(cfg.proxies[0].name, "hy2-main");
         let parsed = cfg.parsed_rules().unwrap();
         assert_eq!(parsed.len(), 2);
-        assert_eq!(parsed[0].ruleset.as_deref(), Some("cn"));
+        assert_eq!(parsed[0].ruleset_name(), Some("cn"));
         assert_eq!(parsed[0].outbound, "vless-xhttp");
-        assert!(parsed[1].is_match);
+        assert!(parsed[1].is_match());
         assert_eq!(parsed[1].outbound, "hy2-main");
     }
 
@@ -1648,7 +1822,7 @@ rules:
         let cfg = parse(&yaml).unwrap();
         assert_eq!(cfg.dns.rules.len(), 2);
         let r0 = parse_dns_rule_line(&cfg.dns.rules[0]).unwrap();
-        assert_eq!(r0.ruleset.as_deref(), Some("cn"));
+        assert_eq!(r0.ruleset_name(), Some("cn"));
         assert_eq!(r0.upstream, "udp://223.5.5.5:53");
     }
 
@@ -1803,23 +1977,26 @@ rules:
     #[test]
     fn parse_rule_line_ok() {
         let r = parse_rule_line("RULE-SET, ads , REJECT").unwrap();
-        assert_eq!(r.ruleset.as_deref(), Some("ads"));
+        assert_eq!(r.ruleset_name(), Some("ads"));
         assert_eq!(r.outbound, "block");
-        assert!(!r.is_match);
+        assert!(!r.is_match());
+        assert!(!r.no_resolve);
         let m = parse_rule_line("MATCH,hy2-main").unwrap();
-        assert!(m.is_match);
+        assert!(m.is_match());
+        let nr = parse_rule_line("RULE-SET,cn-ip,DIRECT,no-resolve").unwrap();
+        assert!(nr.no_resolve);
         assert_eq!(m.outbound, "hy2-main");
     }
 
     #[test]
     fn parse_dns_rule_line_ok() {
         let r = parse_dns_rule_line("RULE-SET, ads , udp://1.1.1.1:53").unwrap();
-        assert_eq!(r.ruleset.as_deref(), Some("ads"));
+        assert_eq!(r.ruleset_name(), Some("ads"));
         assert_eq!(r.upstream, "udp://1.1.1.1:53");
         let m = parse_dns_rule_line("MATCH,rcode://success").unwrap();
-        assert!(m.ruleset.is_none());
+        assert!(m.is_match());
         assert_eq!(m.upstream, "rcode://success");
-        assert!(parse_dns_rule_line("rule-set,ads,udp://1.1.1.1").is_err());
+        // type keywords are case-insensitive
     }
 
     #[test]
