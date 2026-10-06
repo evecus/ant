@@ -1396,6 +1396,7 @@ impl Config {
                 if !ruleset_names.contains(name) {
                     bail!("route[{i}]: unknown rule-provider `{name}`");
                 }
+            }
             if !known_has(&known, &r.outbound) {
                 bail!(
                     "route[{i}]: unknown outbound `{}`; use direct/DIRECT, block/BLOCK, \
