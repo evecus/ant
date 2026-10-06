@@ -8,11 +8,13 @@ mod format;
 mod compiler;
 mod loader;
 mod matcher;
+mod provider;
 
 pub use compiler::{
     compile_mihomo_ruleset, compile_singbox_json, write_ars, ProviderBehavior,
 };
 pub use matcher::RuleSet;
+pub use provider::load_all as load_all_providers;
 
 use anyhow::{bail, Context, Result};
 use std::path::Path;
