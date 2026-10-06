@@ -1,7 +1,8 @@
-//! In-memory DNS response cache with LRU eviction.
+//! DNS response cache with LRU eviction; optional redb persistence when `cache: true`.
 
+use crate::cache::AppCache;
 use std::collections::{HashMap, VecDeque};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 #[derive(Clone)]
@@ -13,6 +14,7 @@ struct Entry {
 
 pub struct DnsCache {
     inner: Mutex<Inner>,
+    persistent: Option<Arc<AppCache>>,
 }
 
 struct Inner {
@@ -23,12 +25,17 @@ struct Inner {
 
 impl DnsCache {
     pub fn new(capacity: usize) -> Self {
+        Self::with_store(capacity, None)
+    }
+
+    pub fn with_store(capacity: usize, persistent: Option<Arc<AppCache>>) -> Self {
         Self {
             inner: Mutex::new(Inner {
                 map: HashMap::new(),
                 order: VecDeque::new(),
                 capacity: capacity.max(1),
             }),
+            persistent,
         }
     }
 
@@ -36,40 +43,29 @@ impl DnsCache {
         let key = (domain.to_ascii_lowercase(), qtype);
         let mut g = self.inner.lock().ok()?;
         let now = Instant::now();
-        let entry = g.map.get(&key)?;
-        if entry.expires <= now {
+        if let Some(entry) = g.map.get(&key) {
+            if entry.expires > now {
+                let body = entry.body.clone();
+                if let Some(pos) = g.order.iter().position(|k| k == &key) {
+                    g.order.remove(pos);
+                }
+                g.order.push_back(key);
+                return Some(body);
+            }
             g.map.remove(&key);
             g.order.retain(|k| k != &key);
-            return None;
         }
-        let body = entry.body.clone();
-        // move to most-recently-used
-        if let Some(pos) = g.order.iter().position(|k| k == &key) {
-            g.order.remove(pos);
-        }
-        g.order.push_back(key);
-        Some(body)
-    }
+        drop(g);
 
-    pub fn put(&self, domain: &str, qtype: u16, mut body: Vec<u8>, ttl: Duration) {
-        if domain.is_empty() || body.len() < 12 {
-            return;
-        }
-        // Zero transaction ID so any query ID can be patched in.
-        body[0] = 0;
-        body[1] = 0;
-        let key = (domain.to_ascii_lowercase(), qtype);
+        // Memory miss → try redb
+        let store = self.persistent.as_ref()?;
+        let body = store.dns_get(domain, qtype)?;
+        // Re-insert into memory with a short TTL floor (actual expiry already checked in store)
+        let mut g = self.inner.lock().ok()?;
         let entry = Entry {
-            body,
-            expires: Instant::now() + ttl,
+            body: body.clone(),
+            expires: Instant::now() + Duration::from_secs(30),
         };
-        let mut g = match self.inner.lock() {
-            Ok(g) => g,
-            Err(_) => return,
-        };
-        if g.map.contains_key(&key) {
-            g.order.retain(|k| k != &key);
-        }
         g.map.insert(key.clone(), entry);
         g.order.push_back(key);
         while g.map.len() > g.capacity {
@@ -79,81 +75,101 @@ impl DnsCache {
                 break;
             }
         }
+        Some(body)
+    }
+
+    pub fn put(&self, domain: &str, qtype: u16, mut body: Vec<u8>, ttl: Duration) {
+        if domain.is_empty() || body.len() < 12 {
+            return;
+        }
+        body[0] = 0;
+        body[1] = 0;
+        let key = (domain.to_ascii_lowercase(), qtype);
+        let entry = Entry {
+            body: body.clone(),
+            expires: Instant::now() + ttl,
+        };
+        if let Ok(mut g) = self.inner.lock() {
+            if g.map.contains_key(&key) {
+                g.order.retain(|k| k != &key);
+            }
+            g.map.insert(key.clone(), entry);
+            g.order.push_back(key);
+            while g.map.len() > g.capacity {
+                if let Some(old) = g.order.pop_front() {
+                    g.map.remove(&old);
+                } else {
+                    break;
+                }
+            }
+        }
+        if let Some(store) = &self.persistent {
+            let _ = store.dns_put(domain, qtype, &body, ttl);
+        }
     }
 }
 
 /// Patch transaction ID of a cached response to match the query.
-pub fn apply_query_id(resp: &mut [u8], query: &[u8]) {
-    if resp.len() >= 2 && query.len() >= 2 {
-        resp[0] = query[0];
-        resp[1] = query[1];
+pub fn apply_query_id(response: &mut [u8], query: &[u8]) {
+    if response.len() >= 2 && query.len() >= 2 {
+        response[0] = query[0];
+        response[1] = query[1];
     }
 }
 
-/// Minimum TTL among answer RRs (or `default_secs` if none).
-pub fn response_ttl_secs(msg: &[u8], default_secs: u32) -> u32 {
-    let Some(mut i) = question_end(msg) else {
-        return default_secs;
-    };
-    if msg.len() < 12 {
-        return default_secs;
+/// Best-effort min TTL from answer RRs (fallback when none found).
+pub fn response_ttl_secs(resp: &[u8], fallback: u32) -> u32 {
+    if resp.len() < 12 {
+        return fallback;
     }
-    let ancount = u16::from_be_bytes([msg[6], msg[7]]) as usize;
+    let ancount = u16::from_be_bytes([resp[6], resp[7]]) as usize;
+    let mut i = 12usize;
+    // skip question
+    while i < resp.len() {
+        if resp[i] == 0 {
+            i += 5; // null + type + class
+            break;
+        }
+        if resp[i] >= 0xc0 {
+            i += 2 + 4;
+            break;
+        }
+        let l = resp[i] as usize;
+        i += 1 + l;
+    }
     let mut min_ttl = u32::MAX;
     for _ in 0..ancount {
-        let Some(ni) = skip_name(msg, i) else {
-            break;
-        };
-        i = ni;
-        if i + 10 > msg.len() {
+        if i + 10 > resp.len() {
             break;
         }
-        let ttl = u32::from_be_bytes([msg[i + 4], msg[i + 5], msg[i + 6], msg[i + 7]]);
-        let rdlen = u16::from_be_bytes([msg[i + 8], msg[i + 9]]) as usize;
+        // name
+        if resp[i] >= 0xc0 {
+            i += 2;
+        } else {
+            while i < resp.len() && resp[i] != 0 {
+                if resp[i] >= 0xc0 {
+                    i += 1;
+                    break;
+                }
+                let l = resp[i] as usize;
+                i += 1 + l;
+            }
+            if i < resp.len() && resp[i] == 0 {
+                i += 1;
+            }
+        }
+        if i + 10 > resp.len() {
+            break;
+        }
+        // type(2) class(2) ttl(4) rdlen(2)
+        let ttl = u32::from_be_bytes([resp[i + 4], resp[i + 5], resp[i + 6], resp[i + 7]]);
+        min_ttl = min_ttl.min(ttl);
+        let rdlen = u16::from_be_bytes([resp[i + 8], resp[i + 9]]) as usize;
         i += 10 + rdlen;
-        if ttl < min_ttl {
-            min_ttl = ttl;
-        }
     }
-    if min_ttl == u32::MAX {
-        default_secs
+    if min_ttl == u32::MAX || min_ttl == 0 {
+        fallback
     } else {
-        min_ttl.clamp(1, 86400)
-    }
-}
-
-fn question_end(msg: &[u8]) -> Option<usize> {
-    if msg.len() < 12 {
-        return None;
-    }
-    let mut i = 12usize;
-    let qd = u16::from_be_bytes([msg[4], msg[5]]) as usize;
-    for _ in 0..qd {
-        i = skip_name(msg, i)?;
-        if i + 4 > msg.len() {
-            return None;
-        }
-        i += 4;
-    }
-    Some(i)
-}
-
-fn skip_name(msg: &[u8], mut i: usize) -> Option<usize> {
-    loop {
-        if i >= msg.len() {
-            return None;
-        }
-        let len = msg[i] as usize;
-        if len == 0 {
-            return Some(i + 1);
-        }
-        if len & 0xC0 == 0xC0 {
-            return if i + 2 <= msg.len() {
-                Some(i + 2)
-            } else {
-                None
-            };
-        }
-        i += 1 + len;
+        min_ttl
     }
 }

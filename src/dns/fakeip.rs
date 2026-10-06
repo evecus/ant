@@ -3,10 +3,12 @@
 //! only domains hitting a fakeip-filter ruleset get fake addresses.
 
 use anyhow::{bail, Result};
+use crate::cache::AppCache;
 use ipnet::IpNet;
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
+use tracing::debug;
 
 pub struct FakeIpPool {
     v4: Option<V4Range>,
@@ -14,6 +16,7 @@ pub struct FakeIpPool {
     by_domain4: Mutex<HashMap<String, Ipv4Addr>>,
     by_domain6: Mutex<HashMap<String, Ipv6Addr>>,
     by_ip: Mutex<HashMap<IpAddr, String>>,
+    persistent: Option<Arc<AppCache>>,
 }
 
 struct V4Range {
@@ -47,7 +50,39 @@ impl FakeIpPool {
             by_domain4: Mutex::new(HashMap::new()),
             by_domain6: Mutex::new(HashMap::new()),
             by_ip: Mutex::new(HashMap::new()),
+            persistent: None,
         })
+    }
+
+    /// Attach redb store and preload existing mappings.
+    pub fn with_store(mut self, store: Option<Arc<AppCache>>) -> Self {
+        if let Some(ref s) = store {
+            let loaded = s.fakeip_load_all();
+            let mut n = 0usize;
+            for (domain, ip_s) in loaded {
+                if let Ok(ip) = ip_s.parse::<IpAddr>() {
+                    match ip {
+                        IpAddr::V4(v4) => {
+                            if let Ok(mut m) = self.by_domain4.lock() {
+                                m.insert(domain.clone(), v4);
+                            }
+                        }
+                        IpAddr::V6(v6) => {
+                            if let Ok(mut m) = self.by_domain6.lock() {
+                                m.insert(domain.clone(), v6);
+                            }
+                        }
+                    }
+                    if let Ok(mut m) = self.by_ip.lock() {
+                        m.insert(ip, domain);
+                    }
+                    n += 1;
+                }
+            }
+            debug!(count = n, "fakeip loaded from redb");
+        }
+        self.persistent = store;
+        self
     }
 
     pub fn has_v4(&self) -> bool {
@@ -118,6 +153,12 @@ impl FakeIpPool {
             }
             by_ip.insert(IpAddr::V4(ip), domain.to_string());
             map.insert(domain.to_string(), ip);
+            drop(by_ip);
+            drop(map);
+            drop(next);
+            if let Some(store) = &self.persistent {
+                let _ = store.fakeip_put(domain, &ip.to_string());
+            }
             return Some(ip);
         }
         None
@@ -141,6 +182,12 @@ impl FakeIpPool {
             }
             by_ip.insert(IpAddr::V6(ip), domain.to_string());
             map.insert(domain.to_string(), ip);
+            drop(by_ip);
+            drop(map);
+            drop(next);
+            if let Some(store) = &self.persistent {
+                let _ = store.fakeip_put(domain, &ip.to_string());
+            }
             return Some(ip);
         }
         None
