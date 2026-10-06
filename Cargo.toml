@@ -42,7 +42,6 @@ quinn = { version = "0.11.7", default-features = false, features = ["runtime-tok
 fst = "0.4"
 
 # QUIC 出站（tuic / hysteria2）UDP 会话路由：分片锁，dispatch 路径无全局锁竞争
-dashmap = "5"
 
 # AnyTLS 出站：认证 token = md5 系列（RustCrypto 纯 Rust，与 sha2 同族）
 md-5 = "0.10"
