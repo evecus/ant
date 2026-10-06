@@ -4,6 +4,7 @@ mod group;
 mod ech;
 mod hpke;
 mod hysteria2;
+mod naive;
 mod tuic;
 mod vless;
 mod vmess;
@@ -20,6 +21,7 @@ mod xhttp_h2;
 pub use anytls::AnyTlsOutbound;
 pub use direct::DirectOutbound;
 pub use hysteria2::Hysteria2Outbound;
+pub use naive::NaiveOutbound;
 pub use shadowsocks::{validate_method as validate_ss_method, ShadowsocksOutbound};
 pub use socks::SocksOutbound;
 pub use trojan::TrojanOutbound;
@@ -114,6 +116,7 @@ impl OutboundManager {
                 "hysteria2" => Arc::new(Hysteria2Outbound::new(cfg).await?),
                 "tuic" => Arc::new(TuicOutbound::new(cfg).await?),
                 "anytls" => Arc::new(AnyTlsOutbound::new(cfg)?),
+                "naive" => Arc::new(NaiveOutbound::new(cfg)?),
                 "vless" => Arc::new(VlessOutbound::new_with_ech_dns(cfg, &ech_dns).await?),
                 "vmess" => Arc::new(VmessOutbound::new(cfg)?),
                 "socks5" | "socks" | "socks4" | "socks4a" => Arc::new(SocksOutbound::new(cfg)?),
@@ -172,6 +175,7 @@ impl OutboundManager {
                     "hysteria2" => Arc::new(Hysteria2Outbound::new(cfg).await?),
                     "tuic" => Arc::new(TuicOutbound::new(cfg).await?),
                     "anytls" => Arc::new(AnyTlsOutbound::new(cfg)?),
+                    "naive" => Arc::new(NaiveOutbound::new(cfg)?),
                     "vless" => Arc::new(VlessOutbound::new_with_ech_dns(cfg, &ech_dns).await?),
                     "vmess" => Arc::new(VmessOutbound::new(cfg)?),
                     "socks5" | "socks" | "socks4" | "socks4a" => Arc::new(SocksOutbound::new(cfg)?),

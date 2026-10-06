@@ -219,8 +219,10 @@ impl SharedPadding {
 
 // ── 帧编解码原语（仅客户端需要的部分）───────────────────────────────────────
 
+/// 出站目标：域名 + 端口，或已解析的 SocketAddr。
+/// naive 出站复用（UoT v2 / CONNECT authority）。
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum Target {
+pub(crate) enum Target {
     Domain(String, u16),
     Socket(SocketAddr),
 }
@@ -346,7 +348,9 @@ fn encode_socks_addr(target: &Target) -> Vec<u8> {
 
 /// UoT v2 request header: `[isConnect=0][SOCKS5 ATYP target][PORT]`
 /// (connectionless mode — every packet carries its own address).
-fn build_uot_request(target: &Target) -> Vec<u8> {
+///
+/// `pub(crate)`：naive 出站的 UDP 走同一套 UoT v2 封装。
+pub(crate) fn build_uot_request(target: &Target) -> Vec<u8> {
     let mut buf = vec![0u8];
     write_socks_addr_to(&mut buf, target);
     buf
@@ -354,7 +358,7 @@ fn build_uot_request(target: &Target) -> Vec<u8> {
 
 /// One UoT v2 UDP packet (connectionless mode):
 /// `[sing ATYP][ADDR][PORT][LEN 2B BE][DATA]`.
-fn build_uot_packet(target: &Target, data: &[u8]) -> Vec<u8> {
+pub(crate) fn build_uot_packet(target: &Target, data: &[u8]) -> Vec<u8> {
     let mut buf = Vec::new();
     match target {
         Target::Domain(host, port) => {
@@ -1081,7 +1085,8 @@ impl AnyTlsClient {
 
 /// rustls client config: webpki roots by default; `skip-cert-verify` and/or a
 /// sha256 cert `fingerprint` pin switch to the shared custom verifier.
-fn build_tls_config(
+/// `pub(crate)`：naive 出站复用同一套验证逻辑（skip-cert-verify / fingerprint）。
+pub(crate) fn build_tls_config(
     skip: bool,
     fingerprint: &Option<String>,
     alpn: &[String],
@@ -1106,7 +1111,8 @@ fn build_tls_config(
     Ok(config)
 }
 
-async fn resolve_server(host: &str, port: u16) -> Result<SocketAddr> {
+/// `pub(crate)`：naive 出站复用（bootstrap DNS 优先，避免解析回环）。
+pub(crate) async fn resolve_server(host: &str, port: u16) -> Result<SocketAddr> {
     if let Ok(ip) = host.parse::<IpAddr>() {
         return Ok(SocketAddr::new(ip, port));
     }
@@ -1155,7 +1161,7 @@ impl OutboundDialer for AnyTlsOutbound {
     }
 }
 
-fn uot_magic_target() -> Target {
+pub(crate) fn uot_magic_target() -> Target {
     Target::Domain(UOT_MAGIC_ADDRESS.to_string(), UOT_MAGIC_PORT)
 }
 
@@ -1221,7 +1227,12 @@ impl UdpSession for AnyTlsUdpSession {
 
 /// Downlink UoT reader: parses UDP packets from the session stream and
 /// forwards them to the UdpSession's receive channel.
-async fn uot_read_loop(mut rh: ReadHalf<AnyTlsStream>, tx: mpsc::Sender<(Vec<u8>, SocketAddr)>) {
+///
+/// 泛型化以便 naive 出站复用（它的隧道流是 `NaiveStream` 而非 AnyTLS 流）。
+pub(crate) async fn uot_read_loop<R: AsyncRead + Unpin + Send + 'static>(
+    mut rh: R,
+    tx: mpsc::Sender<(Vec<u8>, SocketAddr)>,
+) {
     while let Ok((target, data)) = read_uot_packet(&mut rh).await {
         // Domain replies carry no routable IP; report 0.0.0.0:0 like
         // the hysteria2 / tuic outbounds do.

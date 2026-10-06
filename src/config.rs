@@ -1200,6 +1200,33 @@ impl Config {
                         bail!("hysteria2 node `{label}` requires password");
                     }
                 }
+                // `tuic` / `anytls` 之前漏了这两个分支，节点会被 `other` 分支当成
+                // 不支持的类型拒掉（尽管 OutboundManager 已经能构造它们）。
+                "tuic" => {
+                    if p.uuid.as_ref().map(|s| s.is_empty()).unwrap_or(true) {
+                        bail!("tuic node `{label}` requires uuid");
+                    }
+                    if p.password.as_ref().map(|s| s.is_empty()).unwrap_or(true) {
+                        bail!("tuic node `{label}` requires password");
+                    }
+                }
+                "anytls" => {
+                    if p.password.as_ref().map(|s| s.is_empty()).unwrap_or(true) {
+                        bail!("anytls node `{label}` requires password");
+                    }
+                }
+                "naive" => {
+                    // NaiveProxy 必然是 TLS + HTTP/2 CONNECT，且必须有 Basic 认证。
+                    if !p.tls {
+                        bail!("naive node `{label}`: `tls: false` is invalid (naive is always TLS)");
+                    }
+                    if p.username.as_ref().map(|s| s.is_empty()).unwrap_or(true) {
+                        bail!("naive node `{label}` requires username");
+                    }
+                    if p.password.as_ref().map(|s| s.is_empty()).unwrap_or(true) {
+                        bail!("naive node `{label}` requires password");
+                    }
+                }
                 "vless" => {
                     let _ = p.vless_uuid().with_context(|| format!("node `{label}`"))?;
                     let net = p.network.to_lowercase();
@@ -1318,7 +1345,7 @@ impl Config {
                         }
                     }
                 }
-                other => bail!("proxy node `{label}`: unsupported type={other}; use hysteria2, vless, vmess, trojan, shadowsocks, socks5, socks4 or socks4a"),
+                other => bail!("proxy node `{label}`: unsupported type={other}; use hysteria2, tuic, anytls, naive, vless, vmess, trojan, shadowsocks, socks5, socks4 or socks4a"),
             }
         }
         let names: Vec<&str> = self.proxies.iter().map(|p| p.name.as_str()).collect();
