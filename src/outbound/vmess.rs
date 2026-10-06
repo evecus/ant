@@ -1721,7 +1721,6 @@ mod tests {
         let auth_id = &hs[..16];
         let enc_len = &hs[16..34];
         let conn_nonce = &hs[34..42];
-        let enc_hdr = &hs[42..];
 
         let len_key = kdf(user_key, KDF_SALT_HEADER_LEN_KEY, &[auth_id, conn_nonce]);
         let len_iv = kdf(user_key, KDF_SALT_HEADER_LEN_IV, &[auth_id, conn_nonce]);
@@ -1888,22 +1887,24 @@ mod tests {
         let server = tokio::spawn(async move {
             let (tcp, _) = listener.accept().await.unwrap();
             let mut ws = tokio_tungstenite::accept_async(tcp).await.unwrap();
-            // 1. 第一帧 = 握手
-            let hs = match ws.next().await.unwrap().unwrap() {
-                Message::Binary(b) => b,
-                other => panic!("unexpected frame {other:?}"),
-            };
-            let mut sess = server_accept(&hs, &user_key).unwrap();
-            assert_eq!(sess.target, "example.com:443");
-            ws.send(Message::Binary(sess.response.clone())).await.unwrap();
-            ws.flush().await.unwrap();
-
-            // 2. 第二帧 = 上行 chunk
+            // 1. 第一帧 = 握手（VmessStreamIo 会把它与首段负载合并成一帧）
             let frame = match ws.next().await.unwrap().unwrap() {
                 Message::Binary(b) => b,
                 other => panic!("unexpected frame {other:?}"),
             };
-            let mut raw = BytesMut::from(frame.as_slice());
+            let (mut sess, consumed) = server_accept(&frame, &user_key).unwrap();
+            assert_eq!(sess.target, "example.com:443");
+            assert_eq!(sess.cmd, CMD_TCP);
+            assert!(
+                frame.len() > consumed,
+                "ws: 握手必须与首段负载在同一帧（{} vs {consumed}）",
+                frame.len()
+            );
+            ws.send(Message::Binary(sess.response.clone())).await.unwrap();
+            ws.flush().await.unwrap();
+
+            // 2. 同一帧里剩下的就是上行 chunk
+            let mut raw = BytesMut::from(&frame[consumed..]);
             let got = sess.decoder.try_decode(&mut raw).unwrap().expect("decode");
             assert_eq!(&got[..], b"hello");
 
@@ -1911,6 +1912,7 @@ mod tests {
             let out = sess.encoder.encode(b"world").unwrap();
             ws.send(Message::Binary(out.to_vec())).await.unwrap();
             ws.flush().await.unwrap();
+            sess.target
         });
 
         let cfg: ProxyConfig = serde_yaml::from_str(&format!(
@@ -1924,10 +1926,12 @@ mod tests {
             .unwrap();
         s.write_all(b"hello").await.unwrap();
         s.flush().await.unwrap();
+        // 先等服务端结束：若服务端 panic 能第一时间看到真实原因，
+        // 而不是被 ws 掉线的 ResetWithoutClosingHandshake 掩盖。
+        assert_eq!(server.await.unwrap(), "example.com:443");
         let mut buf = [0u8; 16];
         let n = s.read(&mut buf).await.unwrap();
         assert_eq!(&buf[..n], b"world");
-        server.await.unwrap();
     }
 
     /// 配置：network / cipher / utls 组合的解析与 fail-fast。
@@ -2061,9 +2065,10 @@ mod tests {
             Some("dns.example"),
             "8.8.8.8:53".parse().unwrap(),
         );
-        let sess = server_accept(&hs, &test_user_key()).unwrap();
+        let (sess, consumed) = server_accept(&hs, &test_user_key()).unwrap();
+        assert_eq!(consumed, hs.len());
         assert_eq!(sess.target, "dns.example:53");
+        assert_eq!(sess.cmd, CMD_UDP, "UDP 目标写在请求头里（非 packetaddr）");
         assert_eq!(sess.security, SECURITY_AES128_GCM);
         assert_eq!(sess.response.len(), 38);
-    }
-}
+    }}
