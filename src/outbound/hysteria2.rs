@@ -21,7 +21,6 @@ use hy2_h3::{
     open_h3_control_streams, parse_headers_from_qpack, put_literal_header, random_padding,
     read_h3_frame, read_varint_async, write_h3_frame, H3_FRAME_DATA, H3_FRAME_HEADERS,
 };
-use dashmap::DashMap;
 use quinn::{ClientConfig, Connection, Endpoint, RecvStream, SendStream, TransportConfig};
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
@@ -30,7 +29,7 @@ use std::io;
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU16, AtomicU32, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::task::{Context as TaskContext, Poll};
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, ReadBuf};
@@ -93,11 +92,8 @@ struct Hy2Conn {
     quic: Connection,
     support_udp: bool,
     /// session_id → per-session inbound channel + fragment reassembler.
-    ///
-    /// DashMap sharded lock (aligned with the tuic outbound): the datagram
-    /// dispatch path takes only a short shard lock, never a global mutex, so
-    /// the single reader is never blocked by other sessions.
-    sessions: DashMap<u32, UdpSessionEntry>,
+    /// Brief `StdMutex` critical section on the shared datagram reader path.
+    sessions: Arc<StdMutex<std::collections::HashMap<u32, UdpSessionEntry>>>,
     udp_mtu: usize,
 }
 
@@ -257,7 +253,7 @@ impl Hysteria2Outbound {
         let conn = Arc::new(Hy2Conn {
             quic: quic.clone(),
             support_udp: auth.udp_enabled,
-            sessions: DashMap::new(),
+            sessions: Arc::new(StdMutex::new(std::collections::HashMap::new())),
             udp_mtu: mtu,
         });
 
@@ -414,14 +410,15 @@ impl Hysteria2Outbound {
 
 /// Route one inbound QUIC datagram to its UDP session (synchronous, no await).
 ///
-/// Decode first, then take the shard lock briefly (DashMap); `try_send` drops
+/// Decode first, then take the sessions lock briefly; `try_send` drops
 /// the packet when the session's queue is full instead of blocking the reader.
 fn route_incoming_datagram(conn: &Hy2Conn, pkt: Bytes) {
     let mut buf: BytesMut = pkt.into();
     let Ok(decoded) = HysUdpPacket::decode(&mut buf) else {
         return;
     };
-    let Some(mut entry) = conn.sessions.get_mut(&decoded.session_id) else {
+    let mut sessions = conn.sessions.lock().unwrap();
+    let Some(entry) = sessions.get_mut(&decoded.session_id) else {
         tracing::debug!("hy2 udp session not found: {}", decoded.session_id);
         return;
     };
@@ -450,7 +447,7 @@ impl OutboundDialer for Hysteria2Outbound {
         }
         let session_id = self.next_session_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = mpsc::channel(64);
-        conn.sessions.insert(
+        conn.sessions.lock().unwrap().insert(
             session_id,
             UdpSessionEntry {
                 tx,
@@ -507,8 +504,7 @@ impl UdpSession for Hy2UdpSession {
 
 impl Drop for Hy2UdpSession {
     fn drop(&mut self) {
-        // DashMap removal is synchronous and lock-free — safe in Drop.
-        self.conn.sessions.remove(&self.session_id);
+        self.conn.sessions.lock().unwrap().remove(&self.session_id);
     }
 }
 

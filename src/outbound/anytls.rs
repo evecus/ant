@@ -36,7 +36,6 @@ use crate::config::ProxyConfig;
 use anyhow::{anyhow, bail, Context, Result};
 use async_trait::async_trait;
 use bytes::Bytes;
-use dashmap::DashMap;
 use md5::Md5;
 use rand::Rng;
 use rustls::pki_types::ServerName;
@@ -46,7 +45,7 @@ use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, AtomicUsize, Ordering};
-use std::sync::{Arc, RwLock, Weak};
+use std::sync::{Arc, Mutex as StdMutex, RwLock, Weak};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf, ReadHalf, WriteHalf};
 use tokio::sync::{mpsc, Mutex as TokioMutex, Notify};
@@ -446,7 +445,7 @@ struct AnyTlsSession {
     /// Frames for the write task
     write_tx: mpsc::UnboundedSender<WriteMsg>,
     /// Active stream data channels: sid → inbound PSH payloads
-    streams: DashMap<u32, mpsc::UnboundedSender<Bytes>>,
+    streams: StdMutex<HashMap<u32, mpsc::UnboundedSender<Bytes>>>,
     next_stream_id: AtomicU32,
     /// Padding write-unit counter (pkt starts at 1, anytls-go alignment)
     pkt_counter: AtomicU32,
@@ -479,7 +478,7 @@ impl AnyTlsSession {
 
         let session = Arc::new(Self {
             write_tx,
-            streams: DashMap::new(),
+            streams: StdMutex::new(HashMap::new()),
             next_stream_id: AtomicU32::new(0),
             pkt_counter: AtomicU32::new(0),
             peer_version: AtomicU8::new(1),
@@ -560,7 +559,7 @@ impl AnyTlsSession {
         }
 
         let (data_tx, data_rx) = mpsc::unbounded_channel::<Bytes>();
-        self.streams.insert(sid, data_tx);
+        self.streams.lock().unwrap().insert(sid, data_tx);
 
         // SYN joins the buffer; the next write_data (target address) triggers
         // the Flush that puts everything on the wire.
@@ -579,7 +578,7 @@ impl AnyTlsSession {
         if !self.is_closed() {
             let _ = self.write_control(CMD_FIN, sid, &[]);
         }
-        self.streams.remove(&sid);
+        self.streams.lock().unwrap().remove(&sid);
     }
 
     /// A client stream went away (drop / shutdown). When the last one closes,
@@ -684,13 +683,13 @@ async fn recv_loop(mut reader: ReadHalf<BoxedStream>, session: Arc<AnyTlsSession
             CMD_PSH => {
                 if data_len > 0 {
                     let buf = read_body!();
-                    if let Some(tx) = session.streams.get(&sid) {
+                    if let Some(tx) = session.streams.lock().unwrap().get(&sid) {
                         let _ = tx.send(Bytes::from(buf));
                     }
                 }
             }
             CMD_FIN => {
-                session.streams.remove(&sid);
+                session.streams.lock().unwrap().remove(&sid);
             }
             CMD_WASTE | CMD_SYN => {
                 // Waste = padding, drop; SYN never comes from a server here
@@ -733,7 +732,7 @@ async fn recv_loop(mut reader: ReadHalf<BoxedStream>, session: Arc<AnyTlsSession
                     // Removing the sender closes the channel: the stream's
                     // poll_read observes EOF/Reset. Sending FIN back is
                     // unnecessary (the server already knows).
-                    session.streams.remove(&sid);
+                    session.streams.lock().unwrap().remove(&sid);
                 }
             }
             CMD_HEART_REQUEST => {

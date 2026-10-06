@@ -4,14 +4,13 @@ use crate::config::ProxyConfig;
 use anyhow::{anyhow, bail, Context, Result};
 use async_trait::async_trait;
 use bytes::{BufMut, Bytes, BytesMut};
-use dashmap::DashMap;
 use quinn::{ClientConfig, Connection, Endpoint, RecvStream, SendStream, TransportConfig};
 use std::collections::HashMap;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU16, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::task::{Context as TaskContext, Poll};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
@@ -275,7 +274,7 @@ fn addr_from_datagram(data: &[u8]) -> Option<SocketAddr> {
     }
 }
 
-// ── UDP datagram 路由（dashmap 分片锁）──────────────────────────────────────
+// ── UDP datagram 路由（Mutex<HashMap>）──────────────────────────────────────
 
 /// One registered UDP session: inbound queue + fragment reassembly state.
 struct SessionSink {
@@ -293,25 +292,27 @@ struct FragGroup {
 }
 
 /// Routes inbound QUIC datagrams to UDP sessions by SessionID (offset 2-3 of
-/// the Packet frame). DashMap sharded lock: the dispatch path never contends
-/// on a global mutex.
+/// the Packet frame). Brief mutex on the shared datagram reader path.
 struct DatagramRouter {
-    sessions: DashMap<u16, SessionSink>,
+    sessions: StdMutex<HashMap<u16, SessionSink>>,
 }
 
 impl DatagramRouter {
     fn new() -> Self {
         Self {
-            sessions: DashMap::new(),
+            sessions: StdMutex::new(HashMap::new()),
         }
     }
 
     fn register(&self, session_id: u16, tx: mpsc::Sender<(Bytes, SocketAddr)>) {
-        self.sessions.insert(session_id, SessionSink { tx, reasm: HashMap::new() });
+        self.sessions
+            .lock()
+            .unwrap()
+            .insert(session_id, SessionSink { tx, reasm: HashMap::new() });
     }
 
     fn unregister(&self, session_id: u16) {
-        self.sessions.remove(&session_id);
+        self.sessions.lock().unwrap().remove(&session_id);
     }
 
     /// Synchronous (no `.await`) — safe to call from the shared reader task.
@@ -324,7 +325,8 @@ impl DatagramRouter {
         // Zero-copy slice: `data` is a reference-counted quinn datagram buffer.
         let payload = data.slice(doff..doff + dlen);
 
-        let Some(mut sink) = self.sessions.get_mut(&sid) else {
+        let mut sessions = self.sessions.lock().unwrap();
+        let Some(sink) = sessions.get_mut(&sid) else {
             return;
         };
 
@@ -566,7 +568,7 @@ impl TuicOutbound {
 
         // ── Single datagram reader / router ─────────────────────────────────
         // One task reads every QUIC datagram and routes it by SessionID
-        // (frame offset 2-3). Dispatch is synchronous (DashMap + try_send).
+        // (frame offset 2-3). Dispatch is synchronous (Mutex + try_send).
         {
             let c = conn.clone();
             tokio::spawn(async move {
