@@ -8,7 +8,7 @@ use crate::ruleset::{self, RuleSet};
 use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::net::IpAddr;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outbound {
@@ -67,7 +67,7 @@ enum DnsRoute {
 }
 
 pub struct Router {
-    rulesets: HashMap<String, RuleSet>,
+    rulesets: RwLock<HashMap<String, RuleSet>>,
     routes: Vec<RouteEntry>,
     final_outbound: Outbound,
     fakeip: bool,
@@ -234,7 +234,7 @@ impl Router {
         };
 
         Ok(Arc::new(Router {
-            rulesets,
+            rulesets: RwLock::new(rulesets),
             routes,
             final_outbound,
             fakeip,
@@ -298,10 +298,13 @@ impl Router {
             return false;
         }
         let d = domain.trim_end_matches('.').to_ascii_lowercase();
-        let hit = self
-            .fakeip_filter
-            .iter()
-            .any(|name| self.rulesets.get(name).is_some_and(|rs| rs.match_domain(&d)));
+        let guard = self.rulesets.read().ok();
+        let hit = self.fakeip_filter.iter().any(|name| {
+            guard
+                .as_ref()
+                .and_then(|g| g.get(name.as_str()))
+                .is_some_and(|rs| rs.match_domain(&d))
+        });
         if self.fakeip_whitelist {
             hit
         } else {
@@ -336,6 +339,57 @@ impl Router {
             return None;
         }
         pool.domain_of(ip)
+    }
+
+    /// Replace a loaded ruleset (used by remote auto-update).
+    pub fn replace_ruleset(&self, name: &str, rs: RuleSet) {
+        if let Ok(mut g) = self.rulesets.write() {
+            g.insert(name.to_string(), rs);
+            tracing::info!(name, "ruleset hot-reloaded");
+        }
+    }
+
+    /// Background loop: re-download `type: http` providers with `update-interval` > 0.
+    /// Interval unit is **hours**.
+    pub fn spawn_ruleset_updater(
+        self: &Arc<Self>,
+        list: Vec<crate::config::RulesetConfig>,
+        cache: Option<Arc<crate::cache::AppCache>>,
+    ) {
+        for rs in list {
+            if !rs.provider_type.eq_ignore_ascii_case("http") {
+                continue;
+            }
+            if rs.update_interval == 0 {
+                continue;
+            }
+            if rs.url.as_ref().map(|u| u.trim().is_empty()).unwrap_or(true) {
+                continue;
+            }
+            let hours = rs.update_interval;
+            let router = Arc::clone(self);
+            let cache = cache.clone();
+            let cfg = rs;
+            tokio::spawn(async move {
+                let period = std::time::Duration::from_secs(hours.saturating_mul(3600));
+                tracing::info!(
+                    name = %cfg.name,
+                    hours,
+                    "ruleset auto-update scheduled"
+                );
+                loop {
+                    tokio::time::sleep(period).await;
+                    match crate::ruleset::refresh_remote(&cfg, cache.as_deref()).await {
+                        Ok(loaded) => router.replace_ruleset(&cfg.name, loaded),
+                        Err(e) => tracing::warn!(
+                            name = %cfg.name,
+                            error = %e,
+                            "ruleset auto-update failed"
+                        ),
+                    }
+                }
+            });
+        }
     }
 
     pub fn route_resolve(&self) -> bool {
@@ -408,7 +462,11 @@ impl Router {
         match kind {
             RuleKind::Match => true,
             RuleKind::RuleSet(name) => {
-                let Some(rs) = self.rulesets.get(name) else {
+                let guard = match self.rulesets.read() {
+                    Ok(g) => g,
+                    Err(_) => return false,
+                };
+                let Some(rs) = guard.get(name) else {
                     return false;
                 };
                 if let Some(d) = domain {
@@ -567,7 +625,7 @@ mod tests {
         let mut rulesets = HashMap::new();
         rulesets.insert("cn".to_string(), cn);
         Router {
-            rulesets,
+            rulesets: RwLock::new(rulesets),
             routes: vec![],
             final_outbound: Outbound::Node("main".into()),
             fakeip: true,
@@ -624,7 +682,7 @@ mod tests {
         let mut rulesets = HashMap::new();
         rulesets.insert("cn".to_string(), cn);
         let r = Router {
-            rulesets,
+            rulesets: RwLock::new(rulesets),
             routes: vec![],
             final_outbound: Outbound::Node("main".into()),
             fakeip: false,
@@ -661,7 +719,7 @@ mod tests {
         let mut rulesets = HashMap::new();
         rulesets.insert("cn".to_string(), cn);
         let r = Router {
-            rulesets,
+            rulesets: RwLock::new(rulesets),
             routes: vec![
                 RouteEntry {
                     kind: crate::config::RuleKind::RuleSet("cn".into()),
