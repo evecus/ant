@@ -228,6 +228,39 @@ proxies:
     # xhttp-mode: auto                        # auto | stream-one | packet-up | stream-up
     skip-cert-verify: false
 
+  # Shadowsocks outbound. `cipher` (alias: `method`) selects the cipher:
+  #   aes-128-gcm | aes-256-gcm | chacha20-ietf-poly1305
+  #   2022-blake3-aes-128-gcm | 2022-blake3-aes-256-gcm |
+  #   2022-blake3-chacha20-poly1305   (password = base64 PSK, 16/32 bytes)
+  #   none                            (plaintext, testing only)
+  # Transports: tcp / ws / xhttp. Dial sockets carry the global `mark` /
+  # bound interface like every other outbound (no TUN loop).
+  # NOTE: TLS is **off by default** for shadowsocks — even though the shared
+  # `tls` field defaults to true globally, SS only enables TLS when `sni`
+  # (or `servername`) / `client-fingerprint` is given. UDP is native SS UDP
+  # relay and therefore only available with `network: tcp`.
+  - name: ss-tcp
+    type: shadowsocks                         # alias: ss
+    server: example.com
+    port: 8388
+    cipher: aes-256-gcm                       # alias: method
+    password: your-password
+    network: tcp                              # tcp | ws | xhttp
+
+  # Shadowsocks over WebSocket + TLS (+ optional uTLS browser fingerprint).
+  - name: ss-ws
+    type: ss
+    server: example.com
+    port: 443
+    cipher: 2022-blake3-aes-128-gcm
+    password: base64-psk-16-bytes
+    network: ws
+    sni: example.com                          # presence of sni turns TLS on
+    ws-path: /path
+    ws-host: example.com
+    # client-fingerprint: chrome              # uTLS browser fingerprint
+    skip-cert-verify: false
+
   - name: trojan-tls
     type: trojan
     server: example.com

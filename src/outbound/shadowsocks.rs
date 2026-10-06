@@ -1447,3 +1447,247 @@ async fn resolve_server(host: &str, port: u16) -> Result<SocketAddr> {
     }
     crate::dns::resolve_host_via_bootstrap(host, port).await
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    /// 参考向量由 Python（hashlib/hmac + cryptography + blake3）独立算出，
+    /// 用于钉住 EVP_BytesToKey / HKDF-SHA1 / AEAD / BLAKE3-derive_key / AES-ECB。
+    const PW: &[u8] = b"password";
+    const EVP16: &str = "5f4dcc3b5aa765d61d8327deb882cf99";
+    const EVP32: &str = "5f4dcc3b5aa765d61d8327deb882cf992b95990a9151374abd8ff8c5a7a0fe08";
+    const SUBKEY: &str = "ee187aed3f87574907a39db98606f60a526114831288097cac66054b33a9464f";
+    const GCM_LEN: &str = "7eaadaf7882df11c47f841d64ec3be97d9f0";
+    const GCM_ADDR: &str = "f62bba0d4b25261b49e432d754aa720ec3266a58b37161a363b48c93242fa7";
+    const CHACHA_LEN: &str = "ad47ac9c0937f236912a6ebec32771677b50";
+    const CHACHA_ADDR: &str = "83c3ce5d825d5be9428b2bc98d01ee98e2b54eb61697fa4594661ba787afdf";
+    const SS2022_KEY16: &str = "7e504e78da28b14d4fb48f08430baf79";
+    const SS2022_KEY32: &str = "737830d9fbd404049ef33f7dd0dfda0d93a3d618f4e1392e7a4330e48177a14f";
+    const SS2022_HDR: &str = "fde82efc52b676bfd4da36241286ddb9";
+
+    /// `example.com:80` 的 SOCKS5 地址字节。
+    fn example_addr() -> Vec<u8> {
+        let mut v = vec![0x03u8, 0x0b];
+        v.extend_from_slice(b"example.com");
+        v.extend_from_slice(&80u16.to_be_bytes());
+        v
+    }
+
+    #[test]
+    fn evp_bytes_to_key_matches_reference() {
+        assert_eq!(hex::encode(evp_bytes_to_key(PW, 16)), EVP16);
+        assert_eq!(hex::encode(evp_bytes_to_key(PW, 32)), EVP32);
+    }
+
+    #[test]
+    fn hkdf_sha1_subkey_matches_reference() {
+        let master = evp_bytes_to_key(PW, 32);
+        let salt: Vec<u8> = (0u8..32).collect();
+        assert_eq!(hex::encode(hkdf_sha1(&master, &salt, 32)), SUBKEY);
+    }
+
+    #[test]
+    fn aead_chunks_match_reference() {
+        let subkey = hex::decode(SUBKEY).unwrap();
+        let addr = example_addr();
+
+        let mut c = AeadCipher::new(Method::Aes256Gcm, subkey.clone());
+        let mut len_part = (addr.len() as u16).to_be_bytes().to_vec();
+        c.seal(&mut len_part).unwrap();
+        assert_eq!(hex::encode(&len_part), GCM_LEN);
+        let mut payload = addr.clone();
+        c.seal(&mut payload).unwrap();
+        assert_eq!(hex::encode(&payload), GCM_ADDR);
+
+        let mut c = AeadCipher::new(Method::ChaCha20Poly1305, subkey);
+        let mut len_part = (addr.len() as u16).to_be_bytes().to_vec();
+        c.seal(&mut len_part).unwrap();
+        assert_eq!(hex::encode(&len_part), CHACHA_LEN);
+        let mut payload = addr;
+        c.seal(&mut payload).unwrap();
+        assert_eq!(hex::encode(&payload), CHACHA_ADDR);
+    }
+
+    #[test]
+    fn ss2022_key_and_header_match_reference() {
+        let psk16: Vec<u8> = (0u8..16).collect();
+        let salt16: Vec<u8> = (100u8..116).collect();
+        assert_eq!(
+            hex::encode(ss2022_session_key(&psk16, &salt16, 16)),
+            SS2022_KEY16
+        );
+        let psk32: Vec<u8> = (0u8..32).collect();
+        let salt32: Vec<u8> = (200u8..232).collect();
+        assert_eq!(
+            hex::encode(ss2022_session_key(&psk32, &salt32, 32)),
+            SS2022_KEY32
+        );
+
+        let mut hdr = [0u8; 16];
+        hdr[..8].copy_from_slice(&0x1122_3344_5566_7788u64.to_be_bytes());
+        hdr[8..].copy_from_slice(&1u64.to_be_bytes());
+        aes_ecb_encrypt_block(&mut hdr, &psk16);
+        assert_eq!(hex::encode(hdr), SS2022_HDR);
+    }
+
+    #[test]
+    fn socks_addr_roundtrip() {
+        let v4: SocketAddr = "8.8.8.8:53".parse().unwrap();
+        let enc = encode_target(v4, None);
+        assert_eq!(socks_addr_to_socket(&enc), Some(v4));
+
+        let v6: SocketAddr = "[2001:4860:4860::8888]:443".parse().unwrap();
+        let enc = encode_target(v6, None);
+        assert_eq!(socks_addr_to_socket(&enc), Some(v6));
+
+        // host_hint 是域名时走 ATYP_DOMAIN
+        let enc = encode_target(v4, Some("dns.google"));
+        assert_eq!(enc[0], ATYP_DOMAIN);
+        assert_eq!(&enc[2..12], b"dns.google");
+        assert_eq!(socks_addr_to_socket(&enc), None);
+
+        // 切分：地址头 + 剩余 payload
+        let mut pkt = enc.clone();
+        pkt.extend_from_slice(b"payload");
+        let (a, p) = split_socks_addr(&pkt).unwrap();
+        assert_eq!(a, enc.as_slice());
+        assert_eq!(p, b"payload");
+    }
+
+    /// 传统 AEAD（aes-256-gcm）TCP：握手 + 双向分帧，对端用独立解码验证。
+    #[tokio::test]
+    async fn tcp_stream_roundtrip() {
+        let master = evp_bytes_to_key(PW, 32);
+        let m = SsMethod {
+            method: Method::Aes256Gcm,
+            key_material: master.clone(),
+        };
+        let addr = example_addr();
+        let (client, mut server) = tokio::io::duplex(8192);
+        let mut stream = wrap_ss(client, &m, addr.clone()).await.unwrap();
+
+        // 服务端读 salt 后派生子密钥
+        let mut salt = vec![0u8; 32];
+        server.read_exact(&mut salt).await.unwrap();
+        let mut dec = AeadCipher::new(Method::Aes256Gcm, hkdf_sha1(&master, &salt, 32));
+
+        let mut len_part = vec![0u8; 2 + TAG_LEN];
+        server.read_exact(&mut len_part).await.unwrap();
+        dec.open(&mut len_part).unwrap();
+        let n = u16::from_be_bytes([len_part[0], len_part[1]]) as usize;
+        assert_eq!(n, addr.len());
+        let mut payload = vec![0u8; n + TAG_LEN];
+        server.read_exact(&mut payload).await.unwrap();
+        dec.open(&mut payload).unwrap();
+        assert_eq!(payload, addr);
+
+        // 上行后续数据
+        stream.write_all(b"hello").await.unwrap();
+        stream.flush().await.unwrap();
+        let mut len_part = vec![0u8; 2 + TAG_LEN];
+        server.read_exact(&mut len_part).await.unwrap();
+        dec.open(&mut len_part).unwrap();
+        assert_eq!(u16::from_be_bytes([len_part[0], len_part[1]]), 5);
+        let mut payload = vec![0u8; 5 + TAG_LEN];
+        server.read_exact(&mut payload).await.unwrap();
+        dec.open(&mut payload).unwrap();
+        assert_eq!(payload, b"hello");
+
+        // 下行：服务端 salt + 一块，客户端应解出明文
+        let ssalt = vec![7u8; 32];
+        server.write_all(&ssalt).await.unwrap();
+        let mut enc = AeadCipher::new(Method::Aes256Gcm, hkdf_sha1(&master, &ssalt, 32));
+        let mut len_part = 4u16.to_be_bytes().to_vec();
+        enc.seal(&mut len_part).unwrap();
+        let mut payload = b"pong".to_vec();
+        enc.seal(&mut payload).unwrap();
+        server.write_all(&len_part).await.unwrap();
+        server.write_all(&payload).await.unwrap();
+
+        let mut out = vec![0u8; 4];
+        stream.read_exact(&mut out).await.unwrap();
+        assert_eq!(out, b"pong");
+    }
+
+    async fn udp_session(method: Method, key_material: Vec<u8>) -> SsUdpSession {
+        let sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let server: SocketAddr = "127.0.0.1:12345".parse().unwrap();
+        sock.connect(server).await.unwrap();
+        SsUdpSession {
+            sock: Arc::new(sock),
+            server,
+            m: SsMethod {
+                method,
+                key_material,
+            },
+            session_id: 0x1122_3344_5566_7788,
+            packet_id: AtomicU64::new(1),
+            addrs: Mutex::new(HashMap::new()),
+        }
+    }
+
+    #[tokio::test]
+    async fn udp_traditional_roundtrip() {
+        for method in [Method::Aes128Gcm, Method::ChaCha20Poly1305, Method::None] {
+            let s = udp_session(method, evp_bytes_to_key(PW, method.key_len())).await;
+            let dst: SocketAddr = "8.8.8.8:53".parse().unwrap();
+            let wire = s.seal_packet(&encode_target(dst, None), b"dns-query").unwrap();
+            let (addr, payload) = s.open_packet(&wire).unwrap();
+            assert_eq!(payload, b"dns-query");
+            assert_eq!(socks_addr_to_socket(&addr), Some(dst));
+        }
+    }
+
+    /// AEAD-2022 的上下行报文格式不对称：上行是 `[type=0][ts][paddingLen][addr][payload]`，
+    /// 下行是 `[type=1][ts][clientSessionId][paddingLen][padding][addr][payload]`，
+    /// 因此这里按服务端响应的格式封包再验 `open_packet`。
+    #[tokio::test]
+    async fn udp_2022_server_response_parsed() {
+        let dst: SocketAddr = "1.1.1.1:53".parse().unwrap();
+        let addr = encode_target(dst, None);
+        let sid = 0x1122_3344_5566_7788u64;
+
+        let psk16: Vec<u8> = (200u8..216).collect();
+        let s = udp_session(Method::Ss2022Aes128Gcm, psk16.clone()).await;
+        let mut body = Vec::new();
+        body.push(SS2022_HEADER_TYPE_SERVER);
+        body.extend_from_slice(&now_secs().to_be_bytes());
+        body.extend_from_slice(&sid.to_be_bytes());
+        body.extend_from_slice(&0u16.to_be_bytes());
+        body.extend_from_slice(&addr);
+        body.extend_from_slice(b"reply");
+        let wire = ss2022_udp_seal_aes(&psk16, sid, 7, &mut body).unwrap();
+        let (a, p) = s.open_packet(&wire).unwrap();
+        assert_eq!(p, b"reply");
+        assert_eq!(socks_addr_to_socket(&a), Some(dst));
+
+        let psk32: Vec<u8> = (0u8..32).collect();
+        let s = udp_session(Method::Ss2022ChaCha20Poly1305, psk32.clone()).await;
+        let mut body = Vec::new();
+        body.push(SS2022_HEADER_TYPE_SERVER);
+        body.extend_from_slice(&now_secs().to_be_bytes());
+        body.extend_from_slice(&sid.to_be_bytes());
+        body.extend_from_slice(&0u16.to_be_bytes());
+        body.extend_from_slice(&addr);
+        body.extend_from_slice(b"reply32");
+        let nonce = [9u8; SS2022_CHACHA_NONCE_LEN];
+        let wire = ss2022_udp_seal_chacha(&psk32, sid, 9, &nonce, &mut body).unwrap();
+        let (a, p) = s.open_packet(&wire).unwrap();
+        assert_eq!(p, b"reply32");
+        assert_eq!(socks_addr_to_socket(&a), Some(dst));
+    }
+
+    #[test]
+    fn method_parsing() {
+        assert_eq!(Method::parse("aes-256-gcm").unwrap(), Method::Aes256Gcm);
+        assert_eq!(Method::parse("chacha20-ietf-poly1305").unwrap(), Method::ChaCha20Poly1305);
+        assert_eq!(Method::parse("2022-blake3-aes-128-gcm").unwrap(), Method::Ss2022Aes128Gcm);
+        assert!(Method::parse("aes-128-cfb").is_err());
+        assert_eq!(Method::Aes128Gcm.key_len(), 16);
+        assert_eq!(Method::Ss2022Aes256Gcm.salt_len(), 32);
+        assert!(Method::Ss2022ChaCha20Poly1305.is_2022());
+        assert!(!Method::Aes256Gcm.is_2022());
+    }
+}
