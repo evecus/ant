@@ -159,33 +159,24 @@ async fn main() -> Result<()> {
     app::sockopt::set_fwmark(mark);
     let bind = cfg.global.bind_address.clone();
     tracing::info!("bind-address={bind}");
-    let cache = {
+    let cache = if cfg.global.cache {
         let path = cfg.cache_db_path(base_dir.as_deref());
-        // Open redb when global cache, store-selected, or any rule-provider cache: true
-        let need = cfg.global.cache
-            || cfg.profile.store_selected
-            || cfg.rule_providers.values().any(|rp| rp.cache);
-        if need {
-            match crate::cache::AppCache::open(&path) {
-                Ok(c) => Some(c),
-                Err(e) => {
-                    tracing::warn!(error = %e, path = %path.display(), "cache disabled");
-                    None
-                }
+        match crate::cache::AppCache::open(&path) {
+            Ok(c) => Some(c),
+            Err(e) => {
+                tracing::warn!(error = %e, path = %path.display(), "cache=true but redb open failed");
+                None
             }
-        } else {
-            tracing::debug!("cache=false; DNS/FakeIP memory-only, no redb");
-            None
         }
+    } else {
+        tracing::debug!("cache=false; DNS/FakeIP/select memory-only, rulesets use files");
+        None
     };
     let router = Router::from_config(&cfg, base_dir.as_deref(), cache.clone()).await?;
     // DNS 模块关闭时整个 dns 配置对下游（ECH upstream 等）不可见。
     let dns_ref = if cfg.dns.enable { Some(&cfg.dns) } else { None };
-    let select_cache = if cfg.profile.store_selected {
-        cache.clone()
-    } else {
-        None
-    };
+    // select-group persistence follows global cache
+    let select_cache = cache.clone();
     let outbounds = OutboundManager::new(
         &cfg.proxies,
         &cfg.proxy_groups,
