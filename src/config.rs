@@ -206,6 +206,11 @@ pub struct GlobalConfig {
     /// 类似 mihomo clash-api 的 secret，但只需密码、无需地址/端口。
     #[serde(default, rename = "api-secret")]
     pub api_secret: String,
+    /// 是否常驻记录活跃连接（供 API 面板「连接」页显示）。
+    /// - `true`（默认 / 不写）：始终记录当前正在进行的连接；连接结束后自动移除，不会显示死连接。
+    /// - `false`：仅在面板打开期间记录（打开 `/ui` 或轮询 `/connections` 后短时生效，关闭后清空）。
+    #[serde(default = "default_true", rename = "api-connection-record")]
+    pub api_connection_record: bool,
     /// Protocol sniffing (TLS SNI / HTTP Host / QUIC SNI) for domain-based routing.
     /// Off by default. DNS-query sniffing is independent: it follows `dns.route-hijack`.
     #[serde(default)]
