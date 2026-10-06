@@ -100,10 +100,10 @@ impl Router {
     pub async fn from_config(
         cfg: &Config,
         base_dir: Option<&std::path::Path>,
-        cache: Option<&crate::cache::AppCache>,
+        cache: Option<Arc<crate::cache::AppCache>>,
     ) -> Result<Arc<Self>> {
         let ruleset_list = cfg.ruleset_list(base_dir)?;
-        let rulesets = ruleset::load_all_providers(&ruleset_list, cache).await?;
+        let rulesets = ruleset::load_all_providers(&ruleset_list, cache.as_deref()).await?;
         for (name, _) in &rulesets {
             tracing::info!("ruleset `{name}` ready");
         }
@@ -134,19 +134,25 @@ impl Router {
         let dns_enabled = cfg.dns.enable;
         let ipv6 = dns_enabled && cfg.dns.ipv6;
         let fakeip = dns_enabled && cfg.dns.mode == "fakeip";
+        // Persist DNS/FakeIP only when top-level `cache: true` and redb is open.
+        let persist_store: Option<Arc<crate::cache::AppCache>> =
+            if cfg.global.cache { cache.clone() } else { None };
+
         let fakeip_pool = if fakeip {
             let v6_range = if ipv6 {
                 cfg.dns.fakeip6_range.as_deref()
             } else {
                 None
             };
-            Some(FakeIpPool::new(cfg.dns.fakeip_range.as_deref(), v6_range)?)
+            let pool = FakeIpPool::new(cfg.dns.fakeip_range.as_deref(), v6_range)?
+                .with_store(persist_store.clone());
+            Some(pool)
         } else {
             None
         };
         if fakeip {
             tracing::info!(
-                "fake-ip enabled v4={:?} v6={:?} ipv6={} mode={} filter={:?}",
+                "fake-ip enabled v4={:?} v6={:?} ipv6={} mode={} filter={:?} persistent={}",
                 cfg.dns.fakeip_range,
                 if ipv6 {
                     cfg.dns.fakeip6_range.clone()
@@ -155,13 +161,21 @@ impl Router {
                 },
                 ipv6,
                 cfg.dns.fakeip_filter_mode,
-                cfg.dns.fakeip_filter
+                cfg.dns.fakeip_filter,
+                persist_store.is_some()
             );
         }
 
         let dns_cache = if dns_enabled && cfg.dns.cache_size > 0 {
-            tracing::info!("dns cache size={}", cfg.dns.cache_size);
-            Some(Arc::new(DnsCache::new(cfg.dns.cache_size)))
+            tracing::info!(
+                "dns cache size={} persistent={}",
+                cfg.dns.cache_size,
+                persist_store.is_some()
+            );
+            Some(Arc::new(DnsCache::with_store(
+                cfg.dns.cache_size,
+                persist_store.clone(),
+            )))
         } else {
             None
         };
