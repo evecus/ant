@@ -223,6 +223,8 @@ impl OutboundManager {
     }
 
     /// Snapshot of every proxy-group for GET /proxies.
+    /// Appends a synthetic `GLOBAL` group (all proxy nodes + DIRECT) for the
+    /// dashboard so nodes outside any proxy-group can still be listed / latency-tested.
     pub fn group_status(&self) -> Vec<group::GroupStatus> {
         let mut list = self.group_list.read().unwrap().clone();
         // Refresh `now` for select groups from live handles.
@@ -232,6 +234,17 @@ impl OutboundManager {
                 s.all = h.members();
             }
         }
+        // Synthetic GLOBAL: every configured node + DIRECT (not selectable for routing).
+        let mut all = self.node_names.clone();
+        if !all.iter().any(|n| n.eq_ignore_ascii_case("DIRECT")) {
+            all.push("DIRECT".to_string());
+        }
+        list.push(group::GroupStatus {
+            name: "GLOBAL".to_string(),
+            ty: "global".to_string(),
+            now: String::new(),
+            all,
+        });
         list
     }
 
