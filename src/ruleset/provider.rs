@@ -5,7 +5,6 @@ use crate::cache::AppCache;
 use crate::config::{RulesetConfig, RulesetStorage};
 use anyhow::{bail, Context, Result};
 use std::collections::HashMap;
-use std::sync::Arc;
 use tracing::{info, warn};
 
 /// Load every rule-provider into matchers.
