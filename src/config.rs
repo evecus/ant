@@ -956,6 +956,14 @@ pub fn parse_dns_rule_line(line: &str) -> Result<ParsedDnsRule> {
         bail!("empty dns rule line");
     }
     let kind = parts[0].to_ascii_uppercase();
+    // 与文档一致：关键字只能大写（RULE-SET / MATCH / DOMAIN...），
+    // 小写直接拒绝而不是静默归一化。
+    if parts[0] != kind {
+        bail!(
+            "dns rules keyword must be uppercase, got `{}` (expected `{kind}`)",
+            parts[0]
+        );
+    }
     match kind.as_str() {
         "RULE-SET" => {
             if parts.len() < 3 {
