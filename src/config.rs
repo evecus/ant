@@ -34,6 +34,34 @@ pub struct Config {
     /// `proxies` node name (reserved names are rejected for node names).
     #[serde(default)]
     pub route: Vec<String>,
+    /// Persistent state (mihomo-style `profile:`).
+    #[serde(default)]
+    pub profile: ProfileConfig,
+}
+
+/// mihomo-compatible profile options.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ProfileConfig {
+    /// Persist `select` group choices across restarts (redb). Default true.
+    #[serde(default = "default_true", rename = "store-selected")]
+    pub store_selected: bool,
+    /// Cache database path (select + ruleset payloads when `cache: true`).
+    /// Relative paths resolve against `-d/--dir`. Default `cache.db`.
+    #[serde(default = "default_cache_file", rename = "store-selected-file", alias = "cache-file")]
+    pub store_selected_file: PathBuf,
+}
+
+impl Default for ProfileConfig {
+    fn default() -> Self {
+        Self {
+            store_selected: true,
+            store_selected_file: default_cache_file(),
+        }
+    }
+}
+
+fn default_cache_file() -> PathBuf {
+    PathBuf::from("cache.db")
 }
 
 
@@ -614,19 +642,36 @@ impl ProxyConfig {
     }
 }
 
-/// One entry under `rule-providers:` (local file only for now).
+/// One entry under `rule-providers:`.
+///
+/// Storage priority for downloaded / loaded payloads:
+/// 1. Explicit `path` (highest) — absolute, relative, or `file:/abs/path`
+/// 2. Else if `cache: true` — store/load from redb (`profile.store-selected-file`)
+/// 3. Else — default file `rules/<name>.ars` under the run directory (`-d/--dir` or cwd)
 #[derive(Debug, Clone, Deserialize)]
 pub struct RuleProviderConfig {
-    /// Provider type; only `file` is supported.
+    /// `file` | `http`
     #[serde(default = "default_provider_type", rename = "type")]
     pub ty: String,
     /// `domain` / `ip` / `ipcidr` / `classical`.
     #[serde(default = "default_behavior")]
     pub behavior: String,
-    /// Optional format hint: `text` | `yaml` | `json` | `ars` (auto by extension if omitted).
+    /// Optional format hint: `text` | `yaml` | `json` | `ars` (auto by extension / content).
     #[serde(default)]
     pub format: Option<String>,
-    pub path: PathBuf,
+    /// Local path or `file:/abs/path`. Optional — see storage priority above.
+    #[serde(default)]
+    pub path: Option<PathBuf>,
+    /// Remote URL when `type: http`.
+    #[serde(default)]
+    pub url: Option<String>,
+    /// Update interval in seconds for `type: http` (0 = only at startup). Default 0.
+    #[serde(default)]
+    pub interval: Option<u64>,
+    /// When true and `path` is omitted, payload is stored in the redb cache.
+    /// When false and `path` is omitted, payload is stored under `rules/<name>.ars`.
+    #[serde(default)]
+    pub cache: bool,
 }
 
 fn default_provider_type() -> String {
@@ -637,14 +682,27 @@ fn default_behavior() -> String {
     "domain".into()
 }
 
+/// Where a rule-provider payload is read/written.
+#[derive(Debug, Clone)]
+pub enum RulesetStorage {
+    /// Filesystem path (explicit or default `rules/<name>.ars`).
+    File(PathBuf),
+    /// redb table key = provider name.
+    Db,
+}
+
 /// Normalized ruleset descriptor used by the router (derived from rule-providers).
 #[derive(Debug, Clone)]
 pub struct RulesetConfig {
     pub name: String,
     /// `domain` / `ip` / `classical`.
     pub ty: String,
-    pub path: PathBuf,
     pub format: Option<String>,
+    /// `file` or `http`.
+    pub provider_type: String,
+    pub url: Option<String>,
+    pub interval: u64,
+    pub storage: RulesetStorage,
 }
 
 /// Kind of a single route / DNS rule (mihomo-compatible).
@@ -808,6 +866,47 @@ pub fn parse_rule_line(line: &str) -> Result<ParsedRule> {
              IP-CIDR, IP-CIDR6, SRC-IP-CIDR, RULE-SET, MATCH"
         ),
     }
+}
+
+
+/// Strip optional `file:` / `file://` prefix from a path string.
+fn strip_file_scheme(s: &str) -> &str {
+    let s = s.trim();
+    if let Some(rest) = s.strip_prefix("file://") {
+        return rest;
+    }
+    if let Some(rest) = s.strip_prefix("file:") {
+        return rest;
+    }
+    s
+}
+
+/// Resolve where a rule-provider is stored.
+///
+/// Priority:
+/// 1. Explicit `path` (highest)
+/// 2. `cache: true` → redb
+/// 3. Default file `rules/<name>.ars` under `base_dir`
+pub fn resolve_ruleset_storage(
+    name: &str,
+    rp: &RuleProviderConfig,
+    base_dir: &std::path::Path,
+) -> RulesetStorage {
+    if let Some(ref path) = rp.path {
+        let raw = path.to_string_lossy();
+        let stripped = strip_file_scheme(&raw);
+        let p = PathBuf::from(stripped);
+        let abs = if p.is_absolute() {
+            p
+        } else {
+            base_dir.join(p)
+        };
+        return RulesetStorage::File(abs);
+    }
+    if rp.cache {
+        return RulesetStorage::Db;
+    }
+    RulesetStorage::File(base_dir.join("rules").join(format!("{name}.ars")))
 }
 
 fn normalize_behavior(behavior: &str) -> Result<String> {
@@ -974,23 +1073,48 @@ impl Config {
     }
 
     /// Rulesets derived from `rule-providers` for the router.
-    pub fn ruleset_list(&self) -> Result<Vec<RulesetConfig>> {
+    ///
+    /// `base_dir`: `-d/--dir` or cwd — used for relative / default paths.
+    pub fn ruleset_list(&self, base_dir: Option<&std::path::Path>) -> Result<Vec<RulesetConfig>> {
+        let base = base_dir
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
         let mut out = Vec::with_capacity(self.rule_providers.len());
         for (name, rp) in &self.rule_providers {
-            if !rp.ty.eq_ignore_ascii_case("file") {
+            let pty = rp.ty.to_ascii_lowercase();
+            if pty != "file" && pty != "http" {
                 bail!(
-                    "rule-provider `{name}`: type must be `file` (got `{}`)",
+                    "rule-provider `{name}`: type must be `file` or `http` (got `{}`)",
                     rp.ty
                 );
             }
+            if pty == "http" && rp.url.as_ref().map(|u| u.trim().is_empty()).unwrap_or(true) {
+                bail!("rule-provider `{name}`: type http requires `url`");
+            }
+            let storage = resolve_ruleset_storage(name, rp, &base);
             out.push(RulesetConfig {
                 name: name.clone(),
                 ty: normalize_behavior(&rp.behavior)?,
-                path: rp.path.clone(),
                 format: rp.format.clone(),
+                provider_type: pty,
+                url: rp.url.clone(),
+                interval: rp.interval.unwrap_or(0),
+                storage,
             });
         }
         Ok(out)
+    }
+
+    /// Absolute path for the shared redb cache database.
+    pub fn cache_db_path(&self, base_dir: Option<&std::path::Path>) -> PathBuf {
+        let p = &self.profile.store_selected_file;
+        if p.is_absolute() {
+            p.clone()
+        } else if let Some(base) = base_dir {
+            base.join(p)
+        } else {
+            p.clone()
+        }
     }
 
     /// Parse and validate all `route:` lines.
@@ -1014,9 +1138,15 @@ impl Config {
     /// nesting alike) are joined onto `base_dir`; absolute paths are untouched.
     pub fn resolve_ruleset_paths(&mut self, base_dir: &std::path::Path) {
         for rp in self.rule_providers.values_mut() {
-            if rp.path.is_relative() {
-                let rel = std::mem::take(&mut rp.path);
-                rp.path = base_dir.join(rel);
+            if let Some(ref path) = rp.path {
+                let raw = path.to_string_lossy();
+                let stripped = strip_file_scheme(&raw);
+                let p = PathBuf::from(stripped);
+                if p.is_relative() {
+                    rp.path = Some(base_dir.join(p));
+                } else {
+                    rp.path = Some(p);
+                }
             }
         }
     }
@@ -1372,7 +1502,7 @@ impl Config {
         }
 
         // rule-providers: .ars binary or plaintext (yaml/json/list/text)
-        let rulesets = self.ruleset_list()?;
+        let rulesets = self.ruleset_list(None)?;
         let ruleset_names: std::collections::HashSet<&str> =
             rulesets.iter().map(|r| r.name.as_str()).collect();
 
@@ -1578,13 +1708,12 @@ route:
         let mut cfg = parse(&yaml).unwrap();
         let base = std::path::Path::new("/opt/ant");
         cfg.resolve_ruleset_paths(base);
-        let list = cfg.ruleset_list().unwrap();
-        let path_of = |n: &str| {
-            list.iter()
-                .find(|r| r.name == n)
-                .unwrap()
-                .path
-                .clone()
+        let list = cfg.ruleset_list(Some(base)).unwrap();
+        let path_of = |n: &str| -> std::path::PathBuf {
+            match &list.iter().find(|r| r.name == n).unwrap().storage {
+                RulesetStorage::File(p) => p.clone(),
+                RulesetStorage::Db => panic!("expected file storage"),
+            }
         };
         assert_eq!(path_of("cn"), base.join("cn.ars"));
         assert_eq!(path_of("ads"), base.join("rules").join("ads.ars"));

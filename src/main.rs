@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use tracing_subscriber::EnvFilter;
 
 mod app;
+mod cache;
 mod config;
 mod dns;
 mod inbound;
@@ -158,11 +159,39 @@ async fn main() -> Result<()> {
     app::sockopt::set_fwmark(mark);
     let bind = cfg.global.bind_address.clone();
     tracing::info!("bind-address={bind}");
-    let router = Router::from_config(&cfg)?;
+    let cache = {
+        let path = cfg.cache_db_path(base_dir.as_deref());
+        // Open when store-selected is on OR any rule-provider uses cache: true
+        let need = cfg.profile.store_selected
+            || cfg.rule_providers.values().any(|rp| rp.cache);
+        if need {
+            match crate::cache::AppCache::open(&path) {
+                Ok(c) => Some(c),
+                Err(e) => {
+                    tracing::warn!(error = %e, path = %path.display(), "cache disabled");
+                    None
+                }
+            }
+        } else {
+            None
+        }
+    };
+    let router = Router::from_config(&cfg, base_dir.as_deref(), cache.as_deref()).await?;
     // DNS 模块关闭时整个 dns 配置对下游（ECH upstream 等）不可见。
     let dns_ref = if cfg.dns.enable { Some(&cfg.dns) } else { None };
-    let outbounds =
-        OutboundManager::new(&cfg.proxies, &cfg.proxy_groups, &cfg.proxy_providers, dns_ref).await?;
+    let select_cache = if cfg.profile.store_selected {
+        cache.clone()
+    } else {
+        None
+    };
+    let outbounds = OutboundManager::new(
+        &cfg.proxies,
+        &cfg.proxy_groups,
+        &cfg.proxy_providers,
+        dns_ref,
+        select_cache,
+    )
+    .await?;
     crate::app::api::set_outbounds(outbounds.clone());
     crate::app::api::set_config(cfg.clone());
 
@@ -365,14 +394,20 @@ async fn cmd_check(path: &str, base_dir: Option<&std::path::Path>) -> Result<()>
         println!("  ok    dns module disabled (system resolver)");
     }
 
-    Router::from_config(&cfg).context("router build failed")?;
+    Router::from_config(&cfg, None, None).await.context("router build failed")?;
     println!(
         "  ok    router: {} ruleset(s) loaded from .ars files",
         cfg.rule_providers.len()
     );
 
     let dns_ref = if cfg.dns.enable { Some(&cfg.dns) } else { None };
-    OutboundManager::new(&cfg.proxies, &cfg.proxy_groups, &cfg.proxy_providers, dns_ref)
+    OutboundManager::new(
+        &cfg.proxies,
+        &cfg.proxy_groups,
+        &cfg.proxy_providers,
+        dns_ref,
+        None,
+    )
         .await
         .context("outbound build failed (no dial attempted)")?;
     println!("  ok    outbounds built ({} node(s), no dial)", cfg.proxies.len());
@@ -403,7 +438,7 @@ fn print_summary(cfg: &Config) {
         };
         println!("  node   {} {} {}:{}{}", p.name, p.ty, p.server, p.port, tag);
     }
-    if let Ok(list) = cfg.ruleset_list() {
+    if let Ok(list) = cfg.ruleset_list(None) {
         for rs in &list {
             println!("  rules  {} ({}) <- {}", rs.name, rs.ty, rs.path.display());
         }
