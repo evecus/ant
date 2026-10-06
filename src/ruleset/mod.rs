@@ -10,7 +10,7 @@ mod loader;
 mod matcher;
 
 pub use compiler::{
-    compile_mihomo_ruleset, compile_singbox_json, write_ars, CompiledRuleSet, ProviderBehavior,
+    compile_mihomo_ruleset, compile_singbox_json, write_ars, ProviderBehavior,
 };
 pub use matcher::RuleSet;
 
@@ -71,10 +71,6 @@ pub fn load_ruleset(
     RuleSet::from_compiled(name, compiled).with_context(|| format!("build ruleset `{name}`"))
 }
 
-/// Backward-compatible entry: load any supported format (binary or plaintext).
-pub fn load_ars(name: &str, path: &Path) -> Result<RuleSet> {
-    load_ruleset(name, path, None, None)
-}
 
 /// Convert a ruleset source file → `.ars` (offline helper; not used at runtime).
 pub fn convert_to_ars(input: &Path, output: &Path, behavior: Option<ProviderBehavior>) -> Result<()> {
