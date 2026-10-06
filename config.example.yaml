@@ -136,6 +136,18 @@ proxies:
     # up: "100 Mbps"
     # down: "300 Mbps"
 
+  # NaiveProxy (HTTP/2 CONNECT over TLS). Requires tls: true, username and
+  # password; ALPN is forced to h2. UDP rides sing UoT v2 over the same
+  # tunnel, so both share one marked socket (no TUN loop).
+  # - name: naive-main
+  #   type: naive
+  #   server: example.com
+  #   port: 443
+  #   username: user
+  #   password: pass
+  #   sni: example.com
+  #   skip-cert-verify: false
+
   # SOCKS5 upstream (TCP CONNECT + UDP ASSOCIATE). Dial sockets carry the
   # global `mark` / bound interface like every other outbound (no TUN loop).
   # Omit username/password for no-auth.
