@@ -23,7 +23,7 @@ jobs:
 
 
       - name: Update Cargo.lock
-        run: cargo update
+        run: cargo update redb
 
       - name: Commit updated Cargo.lock
         run: |
