@@ -154,6 +154,9 @@ Optional: `proxy-providers` (`type: file`), `use`, `filter` / `exclude-filter`,
 
 Dashboard (`api:`) at `/ui`: **代理组** · **连接** · **信息**.
 
+Connection list is controlled by top-level `api-connection-record` (default `true`):
+always record live sessions; set to `false` for the old opt-in-while-UI-open behaviour.
+
 ## Limitations
 
 - Windows: no tproxy/redir; TUN auto-route/dns-hijack supported; auto-redirect is Linux-only

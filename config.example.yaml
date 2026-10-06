@@ -15,6 +15,9 @@ api: "127.0.0.1:9095"
 #                              # 配置后打开 /ui 需先登录，成功后浏览器保存凭证，
 #                              # 后续访问无需再输；也可用 `Authorization: Bearer <token>`
 #                              # 之外的方式——API 客户端可 POST /login 换取 Cookie。
+# api-connection-record: true  # 是否常驻记录活跃连接（默认 true）。
+#                              # true / 不写：始终记录当前正在进行的连接，结束后自动移除，不显示死连接。
+#                              # false：仅在面板打开期间记录（省内存，关闭面板后清空）。
 tproxy-port: 7878
 mixed-port: 7898
 redir-port: 7892
