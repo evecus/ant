@@ -235,7 +235,7 @@ impl OutboundManager {
             }
         }
         // Synthetic GLOBAL: every configured node + DIRECT (not selectable for routing).
-        let mut all = self.node_names.clone();
+        let mut all = self.node_names().to_vec();
         if !all.iter().any(|n| n.eq_ignore_ascii_case("DIRECT")) {
             all.push("DIRECT".to_string());
         }
