@@ -97,29 +97,15 @@ struct RouteEntry {
 }
 
 impl Router {
-    pub fn from_config(cfg: &Config) -> Result<Arc<Self>> {
-        let ruleset_list = cfg.ruleset_list()?;
-        let mut rulesets = HashMap::new();
-        for rs in &ruleset_list {
-            let behavior = match rs.ty.as_str() {
-                "domain" => Some(ruleset::ProviderBehavior::Domain),
-                "ip" => Some(ruleset::ProviderBehavior::Ipcidr),
-                "classical" => Some(ruleset::ProviderBehavior::Classical),
-                _ => None,
-            };
-            let loaded = ruleset::load_ruleset(
-                &rs.name,
-                &rs.path,
-                behavior,
-                rs.format.as_deref(),
-            )?;
-            tracing::info!(
-                "loaded ruleset {} ({}) from {:?}",
-                rs.name,
-                rs.ty,
-                rs.path
-            );
-            rulesets.insert(rs.name.clone(), loaded);
+    pub async fn from_config(
+        cfg: &Config,
+        base_dir: Option<&std::path::Path>,
+        cache: Option<&crate::cache::AppCache>,
+    ) -> Result<Arc<Self>> {
+        let ruleset_list = cfg.ruleset_list(base_dir)?;
+        let rulesets = ruleset::load_all_providers(&ruleset_list, cache).await?;
+        for (name, _) in &rulesets {
+            tracing::info!("ruleset `{name}` ready");
         }
 
         let parsed = cfg.parsed_rules()?;
