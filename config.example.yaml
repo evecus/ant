@@ -136,6 +136,25 @@ proxies:
     # up: "100 Mbps"
     # down: "300 Mbps"
 
+  # shadowquic (JLS over QUIC): username = JLS user iv, password = JLS password,
+  # sni must equal the server's jls-upstream domain. The QUIC socket carries the
+  # global `mark` / bound interface like every other outbound (no TUN loop).
+  # - name: shadowquic-main
+  #   type: shadowquic
+  #   server: 1.2.3.4
+  #   port: 443
+  #   username: your-username
+  #   password: your-password
+  #   sni: echo.free.beeceptor.com   # must match the server's jls-upstream
+  #   alpn: [h3]
+  #   congestion-control: bbr        # bbr (default) | cubic | new_reno
+  #   # over-stream: false           # UDP over QUIC datagram (default). true =
+  #   #                              # UDP over uni stream (avoid for HTTP/3).
+  #   # zero-rtt: true               # 0-RTT handshake (default true)
+  #   # initial-mtu: 1300            # must be >= min-mtu, both >= 1200
+  #   # min-mtu: 1290
+  #   # heartbeat: 10s               # QUIC keep-alive interval; "off" disables
+
   # NaiveProxy (HTTP/2 CONNECT over TLS). Requires tls: true, username and
   # password; ALPN is forced to h2. UDP rides sing UoT v2 over the same
   # tunnel, so both share one marked socket (no TUN loop).

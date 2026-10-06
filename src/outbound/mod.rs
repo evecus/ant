@@ -5,6 +5,7 @@ mod ech;
 mod hpke;
 mod hysteria2;
 mod naive;
+mod shadowquic;
 mod tuic;
 mod vless;
 mod vmess;
@@ -23,6 +24,7 @@ pub use direct::DirectOutbound;
 pub use hysteria2::Hysteria2Outbound;
 pub use naive::NaiveOutbound;
 pub use shadowsocks::{validate_method as validate_ss_method, ShadowsocksOutbound};
+pub use shadowquic::ShadowquicOutbound;
 pub use socks::SocksOutbound;
 pub use trojan::TrojanOutbound;
 pub use tuic::TuicOutbound;
@@ -115,6 +117,7 @@ impl OutboundManager {
             let dialer: Arc<dyn OutboundDialer> = match cfg.ty.to_lowercase().as_str() {
                 "hysteria2" => Arc::new(Hysteria2Outbound::new(cfg).await?),
                 "tuic" => Arc::new(TuicOutbound::new(cfg).await?),
+                "shadowquic" => Arc::new(ShadowquicOutbound::new(cfg).await?),
                 "anytls" => Arc::new(AnyTlsOutbound::new(cfg)?),
                 "naive" => Arc::new(NaiveOutbound::new(cfg)?),
                 "vless" => Arc::new(VlessOutbound::new_with_ech_dns(cfg, &ech_dns).await?),
@@ -174,6 +177,7 @@ impl OutboundManager {
                 let dialer: Arc<dyn OutboundDialer> = match cfg.ty.to_lowercase().as_str() {
                     "hysteria2" => Arc::new(Hysteria2Outbound::new(cfg).await?),
                     "tuic" => Arc::new(TuicOutbound::new(cfg).await?),
+                    "shadowquic" => Arc::new(ShadowquicOutbound::new(cfg).await?),
                     "anytls" => Arc::new(AnyTlsOutbound::new(cfg)?),
                     "naive" => Arc::new(NaiveOutbound::new(cfg)?),
                     "vless" => Arc::new(VlessOutbound::new_with_ech_dns(cfg, &ech_dns).await?),

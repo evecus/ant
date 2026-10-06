@@ -7,7 +7,7 @@ Inspired by [clash-rs](https://github.com/Watfaq/clash-rs) (protocol code patter
 ## Features (v0.1)
 
 - **Inbound**: `mixed-port` (HTTP CONNECT + SOCKS5 TCP/UDP), `tproxy-port` (Linux TProxy TCP+UDP), `redir-port`, TUN (system stack)
-- **Outbound**: Hysteria2 / TUIC / AnyTLS / **NaiveProxy** (HTTP/2 CONNECT, padding framing; UDP via sing UoT v2) / VLESS (ws / xhttp / REALITY / uTLS / ECH) / VMess (ws / xhttp / TLS / uTLS) / Trojan (ws / xhttp / TLS / uTLS) / **Shadowsocks** (AEAD + AEAD-2022, tcp / ws / xhttp, TLS / uTLS) / SOCKS5 (TCP + UDP ASSOCIATE, optional user/pass) / SOCKS4 + SOCKS4a (TCP CONNECT only) + direct / block
+- **Outbound**: Hysteria2 / TUIC / **shadowquic** (JLS over QUIC, 0-RTT, UDP over datagram or stream) / AnyTLS / **NaiveProxy** (HTTP/2 CONNECT, padding framing; UDP via sing UoT v2) / VLESS (ws / xhttp / REALITY / uTLS / ECH) / VMess (ws / xhttp / TLS / uTLS) / Trojan (ws / xhttp / TLS / uTLS) / **Shadowsocks** (AEAD + AEAD-2022, tcp / ws / xhttp, TLS / uTLS) / SOCKS5 (TCP + UDP ASSOCIATE, optional user/pass) / SOCKS4 + SOCKS4a (TCP CONNECT only) + direct / block
 - **Anti-loop**: every outbound socket (TCP + UDP, direct included) carries `SO_MARK` and binds the physical interface, so TUN auto-route never re-captures proxy traffic
 - **DNS**: local UDP/TCP DNS. `rule-follow-route: true`（默认）复用 `route:` 规则——
   direct 域名用 `direct-nameserver`、节点域名用 `proxy-nameserver`、block 用 `rcode://success`；

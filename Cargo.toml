@@ -40,6 +40,14 @@ tokio-rustls = { version = "0.26", default-features = false, features = ["ring",
 webpki-roots = "0.26"
 quinn = { version = "0.11.7", default-features = false, features = ["runtime-tokio", "rustls", "ring"] }
 
+# shadowquic 出站：JLS（QUIC + TLS 伪装）。shadowquic 用的是 quinn 的 JLS fork
+# (quinn-jls / rustls-jls)，与上面的 quinn 0.11 是不同 crate，可共存；
+# 通过 quinn_jls 别名引用，避免与 tuic/hysteria2 的 quinn 混淆。
+quinn-jls = { version = "0.3.8", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
+# rustls-jls 依赖 rustls-webpki 0.103，对应的根证书 crate 是 webpki-roots 1.x
+# （已有的 webpki-roots 0.26 对应 webpki 0.102，类型不兼容，只能并存）。
+webpki-roots-jls = { package = "webpki-roots", version = "1" }
+
 # binary ruleset (.ars) — same idea as reflex .rrs
 fst = "0.4"
 

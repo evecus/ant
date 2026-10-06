@@ -591,8 +591,26 @@ pub struct ProxyConfig {
     #[serde(default, rename = "congestion-control")]
     pub congestion_control: Option<String>,
     /// TUIC 应用层心跳间隔（QUIC datagram Heartbeat 帧），如 `"10s"`；默认 10s。
+    /// shadowquic 复用为 QUIC 层 keep-alive 间隔（`"off"` / `"0"` 关闭）。
     #[serde(default)]
     pub heartbeat: Option<String>,
+
+    // ── shadowquic 专用 ────────────────────────────────────────────────────
+    /// shadowquic：UDP 走 QUIC stream 而不是 datagram。
+    /// `false`（默认）用 datagram（类似 TUIC），`true` 用 uni stream。
+    /// 代理 HTTP/3 时建议保持 `false`：over-stream 的重传会与 shadowquic 内部
+    /// 拥塞控制冲突，并破坏 HTTP/3 的 MTU 探测。
+    #[serde(default, rename = "over-stream")]
+    pub over_stream: bool,
+    /// shadowquic：0-RTT 握手（默认 true）。
+    #[serde(default = "default_true")]
+    pub zero_rtt: bool,
+    /// shadowquic：QUIC 初始 MTU（默认 1300，必须 >= min-mtu 且 >= 1200）。
+    #[serde(default, rename = "initial-mtu")]
+    pub initial_mtu: Option<u16>,
+    /// shadowquic：QUIC 最小 MTU（默认 1290，必须 >= 1200）。
+    #[serde(default, rename = "min-mtu")]
+    pub min_mtu: Option<u16>,
 }
 
 /// SOCKS upstream protocol version.
@@ -1213,6 +1231,35 @@ impl Config {
                 "anytls" => {
                     if p.password.as_ref().map(|s| s.is_empty()).unwrap_or(true) {
                         bail!("anytls node `{label}` requires password");
+                    }
+                }
+                "shadowquic" => {
+                    // JLS 认证：username(user iv) + password(JLS pwd) 同时参与
+                    // QUIC/TLS 层握手，缺任何一个服务端都无法识别。
+                    if p.username.as_ref().map(|s| s.is_empty()).unwrap_or(true) {
+                        bail!("shadowquic node `{label}` requires username");
+                    }
+                    if p.password.as_ref().map(|s| s.is_empty()).unwrap_or(true) {
+                        bail!("shadowquic node `{label}` requires password");
+                    }
+                    // SNI 必须等于服务端 jls-upstream 的域名；不能退化成 IP。
+                    let sni = p
+                        .sni
+                        .as_deref()
+                        .or(p.servername.as_deref())
+                        .unwrap_or("");
+                    if sni.is_empty() {
+                        bail!("shadowquic node `{label}` requires sni (must match the server's jls-upstream domain)");
+                    }
+                    if let Some(m) = p.min_mtu {
+                        if m < 1200 {
+                            bail!("shadowquic node `{label}`: min-mtu must be >= 1200");
+                        }
+                    }
+                    if let Some(m) = p.initial_mtu {
+                        if m < p.min_mtu.unwrap_or(1290) {
+                            bail!("shadowquic node `{label}`: initial-mtu must be >= min-mtu");
+                        }
                     }
                 }
                 "naive" => {
