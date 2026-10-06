@@ -42,8 +42,8 @@ pub struct Config {
 /// mihomo-compatible profile options.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ProfileConfig {
-    /// Persist `select` group choices across restarts (redb). Default true.
-    #[serde(default = "default_true", rename = "store-selected")]
+    /// Persist `select` group choices across restarts (redb). Default false.
+    #[serde(default, rename = "store-selected")]
     pub store_selected: bool,
     /// Cache database path (select + ruleset payloads when `cache: true`).
     /// Relative paths resolve against `-d/--dir`. Default `cache.db`.
@@ -54,7 +54,7 @@ pub struct ProfileConfig {
 impl Default for ProfileConfig {
     fn default() -> Self {
         Self {
-            store_selected: true,
+            store_selected: false,
             store_selected_file: default_cache_file(),
         }
     }
@@ -243,6 +243,11 @@ pub struct GlobalConfig {
     /// IP rule-providers. Default false. Per-rule `no-resolve` skips this line.
     #[serde(default, rename = "route-resolve")]
     pub route_resolve: bool,
+    /// Persist DNS cache + Fake-IP mappings into redb. Default false (memory only).
+    /// Also opens the shared redb file used by `profile.store-selected` and
+    /// rule-provider `cache: true`.
+    #[serde(default)]
+    pub cache: bool,
 }
 
 fn default_bind() -> String {
