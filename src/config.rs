@@ -444,6 +444,17 @@ pub struct ProxyProviderConfig {
 /// `network` = `tcp`|`ws`|`xhttp`, `tls` = bool, optional `sni`, `skip-cert-verify`,
 /// `client-fingerprint` (uTLS), `ws-path` / `ws-host`,
 /// `xhttp-path` / `xhttp-host` / `xhttp-mode`
+///
+/// ## shadowsocks (`ss`)
+/// `password` (+ `cipher` / `method` 指定加密方式), `network` = `tcp`|`ws`|`xhttp`,
+/// 可选 `sni` / `skip-cert-verify` / `client-fingerprint` (uTLS) /
+/// `ws-path` / `ws-host` / `xhttp-*`。
+/// 注意两点：
+/// * **TLS 默认关闭**。`tls` 字段的全局默认值是 true，但 SS 只在显式给出 `sni`
+///   （或 `servername`）、或配置了 `client-fingerprint` 时才启用 TLS —— 没有 SNI
+///   的 TLS 握手没有意义。想彻底关闭写 `tls: false`。
+/// * **UDP 只在 `network: tcp` 下可用**。SS 的 UDP 是原生 UDP 中继，ws / xhttp
+///   承载的是 TCP 流，没有 UDP-over-TCP 约定，`dial_udp` 会直接报错。
 #[derive(Debug, Clone, Deserialize)]
 #[allow(dead_code)]
 pub struct ProxyConfig {
@@ -477,11 +488,15 @@ pub struct ProxyConfig {
     #[serde(default)]
     pub flow: Option<String>,
 
-    /// VMess 内层加密方式（mihomo 字段名 `cipher`，别名 `security`）：
-    /// `auto`(默认) | `aes-128-gcm` | `chacha20-poly1305` | `none` | `zero`。
-    /// 与 sing-box 一致：`auto` + tls 时降级为 `zero`（外层 TLS 已加密，内层冗余）。
-    /// 仅 AEAD 模式（alterId = 0），不支持 `aes-128-cfb`。
-    #[serde(default, rename = "cipher", alias = "security")]
+    /// VMess 内层加密方式 / Shadowsocks 加密方法（mihomo 字段名 `cipher`，
+    /// 别名 `security`；sing-box 的 `method` 也可识别）：
+    /// * vmess：`auto`(默认) | `aes-128-gcm` | `chacha20-poly1305` | `none` | `zero`
+    ///   （`auto` + tls 时降级为 `zero`，外层 TLS 已加密，内层冗余；仅 AEAD，
+    ///   不支持 `aes-128-cfb`）
+    /// * shadowsocks：`aes-128-gcm` | `aes-256-gcm` | `chacha20-ietf-poly1305` |
+    ///   `2022-blake3-aes-128-gcm` | `2022-blake3-aes-256-gcm` |
+    ///   `2022-blake3-chacha20-poly1305` | `none`
+    #[serde(default, rename = "cipher", alias = "security", alias = "method")]
     pub cipher: Option<String>,
     /// VMess `alterId`。仅支持 AEAD 模式（0），非 0 在校验阶段 fail-fast。
     #[serde(default, rename = "alter-id", alias = "alterId")]
@@ -1257,6 +1272,31 @@ impl Config {
                         );
                     }
                 }
+                "shadowsocks" | "ss" => {
+                    if p.password.as_ref().map(|s| s.is_empty()).unwrap_or(true) {
+                        bail!("shadowsocks node `{label}` requires password");
+                    }
+                    let method = p
+                        .cipher
+                        .as_deref()
+                        .map(|s| s.trim())
+                        .filter(|s| !s.is_empty())
+                        .with_context(|| {
+                            format!("shadowsocks node `{label}` requires `cipher` (or `method`)")
+                        })?;
+                    crate::outbound::validate_ss_method(method)
+                        .with_context(|| format!("shadowsocks node `{label}`"))?;
+                    let net = p.network.to_lowercase();
+                    if net != "tcp" && net != "ws" && net != "xhttp" {
+                        bail!(
+                            "shadowsocks node `{label}` network must be \"tcp\", \"ws\" or \"xhttp\", got {}",
+                            p.network
+                        );
+                    }
+                    if p.client_fingerprint.is_some() && !p.tls {
+                        bail!("shadowsocks node `{label}`: client-fingerprint requires tls");
+                    }
+                }
                 "socks5" | "socks" | "socks4" | "socks4a" => {
                     if p.server.is_empty() {
                         bail!("socks node `{label}` requires server");
@@ -1278,7 +1318,7 @@ impl Config {
                         }
                     }
                 }
-                other => bail!("proxy node `{label}`: unsupported type={other}; use hysteria2, vless, vmess, trojan, socks5, socks4 or socks4a"),
+                other => bail!("proxy node `{label}`: unsupported type={other}; use hysteria2, vless, vmess, trojan, shadowsocks, socks5, socks4 or socks4a"),
             }
         }
         let names: Vec<&str> = self.proxies.iter().map(|p| p.name.as_str()).collect();

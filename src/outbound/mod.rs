@@ -8,6 +8,7 @@ mod tuic;
 mod vless;
 mod vmess;
 mod reality;
+mod shadowsocks;
 mod socks;
 mod trojan;
 mod utls;
@@ -19,6 +20,7 @@ mod xhttp_h2;
 pub use anytls::AnyTlsOutbound;
 pub use direct::DirectOutbound;
 pub use hysteria2::Hysteria2Outbound;
+pub use shadowsocks::{validate_method as validate_ss_method, ShadowsocksOutbound};
 pub use socks::SocksOutbound;
 pub use trojan::TrojanOutbound;
 pub use tuic::TuicOutbound;
@@ -116,6 +118,7 @@ impl OutboundManager {
                 "vmess" => Arc::new(VmessOutbound::new(cfg)?),
                 "socks5" | "socks" | "socks4" | "socks4a" => Arc::new(SocksOutbound::new(cfg)?),
                 "trojan" => Arc::new(TrojanOutbound::new(cfg)?),
+                "shadowsocks" | "ss" => Arc::new(ShadowsocksOutbound::new(cfg)?),
                 other => bail!("unsupported proxy type: {other}"),
             };
             tracing::info!(
@@ -173,6 +176,7 @@ impl OutboundManager {
                     "vmess" => Arc::new(VmessOutbound::new(cfg)?),
                     "socks5" | "socks" | "socks4" | "socks4a" => Arc::new(SocksOutbound::new(cfg)?),
                     "trojan" => Arc::new(TrojanOutbound::new(cfg)?),
+                    "shadowsocks" | "ss" => Arc::new(ShadowsocksOutbound::new(cfg)?),
                     other => bail!("provider `{pname}`: unsupported proxy type: {other}"),
                 };
                 tracing::info!(

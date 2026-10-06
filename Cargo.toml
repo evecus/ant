@@ -77,6 +77,11 @@ aes = "0.8"
 crc32fast = "1.4"
 sha3 = "0.10"
 
+# Shadowsocks 出站：HKDF-SHA1 子密钥（传统 AEAD）、BLAKE3 derive_key（AEAD-2022）。
+# blake3 关闭默认 feature（不含 rayon），避免交叉编译到 mipsel/Android 时引入额外依赖。
+sha1 = "0.10"
+blake3 = { version = "1.8.7", default-features = false }
+
 # TUN virtual NIC (Linux + Windows via WinTun). async = AsyncDevice.
 tun = { version = "0.8", features = ["async"] }
 
