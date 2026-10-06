@@ -78,6 +78,8 @@ fn ipv6_cidr_to_range(addr: Ipv6Addr, prefix: u8) -> (u128, u128) {
 pub struct RuleSet {
     #[allow(dead_code)]
     pub name: String,
+    /// Approximate number of rules loaded (domains + suffixes + keywords + regexes + CIDRs).
+    pub rule_count: usize,
     domain_exact: Option<Set<Arc<[u8]>>>,
     domain_suffix: Option<Set<Arc<[u8]>>>,
     keywords: Vec<String>,
@@ -93,6 +95,11 @@ impl RuleSet {
     }
 
     pub fn from_loaded(name: &str, loaded: LoadedRuleSet) -> Result<Self> {
+        let v4_n = loaded.ipv4_cidrs.len();
+        let v6_n = loaded.ipv6_cidrs.len();
+        let kw_n = loaded.domain_keywords.len();
+        let re_n = loaded.domain_regexes.len();
+
         let domain_exact = if loaded.domain_fst.is_empty() {
             None
         } else {
@@ -131,8 +138,16 @@ impl RuleSet {
                 .map(|(a, p)| ipv6_cidr_to_range(a, p)),
         );
 
+        let rule_count = domain_exact.as_ref().map(|s| s.len()).unwrap_or(0)
+            + domain_suffix.as_ref().map(|s| s.len()).unwrap_or(0)
+            + kw_n
+            + re_n
+            + v4_n
+            + v6_n;
+
         Ok(Self {
             name: name.to_string(),
+            rule_count,
             domain_exact,
             domain_suffix,
             keywords: loaded.domain_keywords,
@@ -145,6 +160,13 @@ impl RuleSet {
     /// Build a matcher directly from a plaintext-compiled ruleset (no `.ars` round-trip).
     pub fn from_compiled(name: &str, compiled: super::compiler::CompiledRuleSet) -> Result<Self> {
         use super::compiler::{build_domain_fst, build_suffix_fst};
+
+        let rule_count = compiled.domains.len()
+            + compiled.domain_suffixes.len()
+            + compiled.domain_keywords.len()
+            + compiled.domain_regexes.len()
+            + compiled.ipv4_cidrs.len()
+            + compiled.ipv6_cidrs.len();
 
         let domain_exact = {
             let bytes = build_domain_fst(&compiled.domains)?;
@@ -192,6 +214,7 @@ impl RuleSet {
 
         Ok(Self {
             name: name.to_string(),
+            rule_count,
             domain_exact,
             domain_suffix,
             keywords: compiled.domain_keywords,
