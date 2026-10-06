@@ -130,9 +130,16 @@ async fn main() -> Result<()> {
     }
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new(&cfg.global.log_level));
-    tracing_subscriber::fmt()
-        .with_ansi(false)
-        .with_env_filter(filter)
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+    tracing_subscriber::registry()
+        .with(filter)
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_ansi(false)
+                .with_writer(std::io::stderr),
+        )
+        .with(app::log_buffer::BufferLayer)
         .init();
 
     tracing::info!("ant starting, config={}", config_path);
@@ -188,6 +195,7 @@ async fn main() -> Result<()> {
     )
     .await?;
     crate::app::api::set_outbounds(outbounds.clone());
+    crate::app::api::set_router(router.clone());
     crate::app::api::set_config(cfg.clone());
 
     let mut handles = Vec::new();
