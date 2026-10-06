@@ -62,8 +62,8 @@ enum DnsRoute {
         direct: DnsAction,
         proxy: DnsAction,
     },
-    /// false：`dns.rules` 自定义表（`None` key = MATCH 兜底）。
-    Rules(Vec<(Option<String>, DnsAction)>),
+    /// false：`dns.rules` 自定义表（Match kind = MATCH 兜底）。
+    Rules(Vec<(crate::config::RuleKind, DnsAction)>),
 }
 
 pub struct Router {
@@ -76,6 +76,8 @@ pub struct Router {
     fakeip_whitelist: bool,
     /// Protocol sniffing (TLS/HTTP/QUIC) enabled via top-level `sniff: true`.
     sniff: bool,
+    /// Top-level `route-resolve`.
+    route_resolve: bool,
     // Read by the DNS-hijack path in tproxy/redir inbounds (linux/android only).
     #[cfg_attr(
         not(any(target_os = "linux", target_os = "android")),
@@ -88,8 +90,10 @@ pub struct Router {
 }
 
 struct RouteEntry {
-    ruleset: String,
+    kind: crate::config::RuleKind,
     outbound: Outbound,
+    label: String,
+    no_resolve: bool,
 }
 
 impl Router {
@@ -97,7 +101,18 @@ impl Router {
         let ruleset_list = cfg.ruleset_list()?;
         let mut rulesets = HashMap::new();
         for rs in &ruleset_list {
-            let loaded = ruleset::load_ars(&rs.name, &rs.path)?;
+            let behavior = match rs.ty.as_str() {
+                "domain" => Some(ruleset::ProviderBehavior::Domain),
+                "ip" => Some(ruleset::ProviderBehavior::Ipcidr),
+                "classical" => Some(ruleset::ProviderBehavior::Classical),
+                _ => None,
+            };
+            let loaded = ruleset::load_ruleset(
+                &rs.name,
+                &rs.path,
+                behavior,
+                rs.format.as_deref(),
+            )?;
             tracing::info!(
                 "loaded ruleset {} ({}) from {:?}",
                 rs.name,
@@ -111,17 +126,20 @@ impl Router {
         let mut routes = Vec::new();
         let mut final_outbound = Outbound::Node("__unset__".into());
         for (i, r) in parsed.iter().enumerate() {
-            if r.is_match {
+            if r.is_match() {
                 final_outbound = Outbound::from_str(&r.outbound);
                 continue;
             }
-            let name = r.ruleset.as_ref().unwrap();
-            if !rulesets.contains_key(name) {
-                anyhow::bail!("rules[{}] references unknown rule-provider {}", i, name);
+            if let Some(name) = r.ruleset_name() {
+                if !rulesets.contains_key(name) {
+                    anyhow::bail!("rules[{}] references unknown rule-provider {}", i, name);
+                }
             }
             routes.push(RouteEntry {
-                ruleset: name.clone(),
+                kind: r.kind.clone(),
                 outbound: Outbound::from_str(&r.outbound),
+                label: rule_label(&r.kind),
+                no_resolve: r.no_resolve,
             });
         }
 
@@ -185,7 +203,7 @@ impl Router {
                 proxy: DnsAction::Upstream(proxy),
             }
         } else {
-            let mut entries: Vec<(Option<String>, DnsAction)> = Vec::new();
+            let mut entries: Vec<(crate::config::RuleKind, DnsAction)> = Vec::new();
             if cfg.dns.rules.is_empty() {
                 // 无 dns.rules：nameserver 即默认上游（配置校验已强制存在）。
                 let ns = cfg
@@ -195,7 +213,7 @@ impl Router {
                     .context("rule-follow-route=false without dns.rules requires dns.nameserver")?;
                 let up = parse_nameserver(ns)?;
                 tracing::info!("dns rule-follow-route=false rules=0 nameserver={up}");
-                entries.push((None, DnsAction::Upstream(up)));
+                entries.push((crate::config::RuleKind::Match, DnsAction::Upstream(up)));
             } else {
                 for (i, line) in cfg.dns.rules.iter().enumerate() {
                     let r = crate::config::parse_dns_rule_line(line)
@@ -209,7 +227,7 @@ impl Router {
                         DnsAction::Upstream(u) => u.to_string(),
                         DnsAction::Block => "rcode://success".into(),
                     });
-                    entries.push((r.ruleset, action));
+                    entries.push((r.kind, action));
                 }
             }
             DnsRoute::Rules(entries)
@@ -224,6 +242,7 @@ impl Router {
             fakeip_filter: cfg.dns.fakeip_filter.clone(),
             fakeip_whitelist: cfg.dns.fakeip_filter_mode == "whitelist",
             sniff: cfg.global.sniff,
+            route_resolve: cfg.global.route_resolve,
             hijack_dns: dns_enabled && cfg.dns.route_hijack,
             dns_route,
             ipv6,
@@ -243,10 +262,7 @@ impl Router {
             }
             DnsRoute::Rules(entries) => entries
                 .iter()
-                .find(|(name, _)| match name {
-                    None => true, // MATCH 兜底（校验保证存在且在最后）
-                    Some(n) => self.rulesets.get(n).is_some_and(|rs| rs.match_domain(domain)),
-                })
+                .find(|(kind, _)| self.match_kind(kind, Some(domain), None, None, &[], true))
                 .map(|(_, action)| action),
         }
     }
@@ -322,32 +338,54 @@ impl Router {
         pool.domain_of(ip)
     }
 
-    /// Match by domain (preferred after sniff) and/or destination IP.
-    pub fn match_outbound(&self, domain: Option<&str>, ip: Option<IpAddr>) -> Outbound {
-        self.match_route(domain, ip).outbound
+    pub fn route_resolve(&self) -> bool {
+        self.route_resolve
     }
 
-    pub fn match_route(&self, domain: Option<&str>, ip: Option<IpAddr>) -> RouteMatch {
+    /// Match by domain (preferred after sniff) and/or destination IP.
+    pub fn match_outbound(&self, domain: Option<&str>, ip: Option<IpAddr>) -> Outbound {
+        self.match_route(domain, ip, &[]).outbound
+    }
+
+    /// `resolved_ips`: addresses from resolving `domain` when `route-resolve: true`.
+    /// Used for IP rules that do not carry `no-resolve`.
+    pub fn match_route(
+        &self,
+        domain: Option<&str>,
+        ip: Option<IpAddr>,
+        resolved_ips: &[IpAddr],
+    ) -> RouteMatch {
+        self.match_route_ex(domain, ip, None, resolved_ips)
+    }
+
+    pub fn match_route_ex(
+        &self,
+        domain: Option<&str>,
+        dst_ip: Option<IpAddr>,
+        src_ip: Option<IpAddr>,
+        resolved_ips: &[IpAddr],
+    ) -> RouteMatch {
         // Fake-ip addresses must not hit ip rulesets; route by the mapped domain.
-        let ip = ip.filter(|addr| self.domain_for_fakeip(*addr).is_none());
+        let dst_ip = dst_ip.filter(|addr| self.domain_for_fakeip(*addr).is_none());
         for entry in &self.routes {
-            if let Some(rs) = self.rulesets.get(&entry.ruleset) {
-                let hit = match (domain, ip) {
-                    (Some(d), _) if rs.match_domain(d) => true,
-                    (_, Some(addr)) if rs.match_ip(addr) => true,
-                    _ => false,
+            if self.match_kind(
+                &entry.kind,
+                domain,
+                dst_ip,
+                src_ip,
+                resolved_ips,
+                entry.no_resolve,
+            ) {
+                tracing::debug!(
+                    "route hit {} -> {}{}",
+                    entry.label,
+                    entry.outbound.label(),
+                    if entry.no_resolve { " (no-resolve)" } else { "" }
+                );
+                return RouteMatch {
+                    outbound: entry.outbound.clone(),
+                    rule: entry.label.clone(),
                 };
-                if hit {
-                    tracing::debug!(
-                        "route hit ruleset={} -> {}",
-                        entry.ruleset,
-                        entry.outbound.label()
-                    );
-                    return RouteMatch {
-                        outbound: entry.outbound.clone(),
-                        rule: entry.ruleset.clone(),
-                    };
-                }
             }
         }
         tracing::debug!("route MATCH -> {}", self.final_outbound.label());
@@ -357,17 +395,148 @@ impl Router {
         }
     }
 
+    fn match_kind(
+        &self,
+        kind: &crate::config::RuleKind,
+        domain: Option<&str>,
+        dst_ip: Option<IpAddr>,
+        src_ip: Option<IpAddr>,
+        resolved_ips: &[IpAddr],
+        no_resolve: bool,
+    ) -> bool {
+        use crate::config::RuleKind;
+        match kind {
+            RuleKind::Match => true,
+            RuleKind::RuleSet(name) => {
+                let Some(rs) = self.rulesets.get(name) else {
+                    return false;
+                };
+                if let Some(d) = domain {
+                    if rs.match_domain(d) {
+                        return true;
+                    }
+                }
+                if let Some(addr) = dst_ip {
+                    if rs.match_ip(addr) {
+                        return true;
+                    }
+                }
+                // route-resolve: also try resolved IPs unless no-resolve
+                if self.route_resolve && !no_resolve {
+                    for addr in resolved_ips {
+                        if rs.match_ip(*addr) {
+                            return true;
+                        }
+                    }
+                }
+                false
+            }
+            RuleKind::Domain(d) => domain
+                .map(|x| {
+                    let x = x.trim_end_matches('.').to_ascii_lowercase();
+                    x == *d
+                })
+                .unwrap_or(false),
+            RuleKind::DomainSuffix(suf) => domain
+                .map(|x| {
+                    let x = x.trim_end_matches('.').to_ascii_lowercase();
+                    x == *suf || x.ends_with(&format!(".{suf}"))
+                })
+                .unwrap_or(false),
+            RuleKind::DomainKeyword(kw) => domain
+                .map(|x| {
+                    let x = x.trim_end_matches('.').to_ascii_lowercase();
+                    x.contains(kw.as_str())
+                })
+                .unwrap_or(false),
+            RuleKind::DomainRegex(re) => domain
+                .map(|x| {
+                    let x = x.trim_end_matches('.').to_ascii_lowercase();
+                    regex::Regex::new(re)
+                        .map(|r| r.is_match(&x))
+                        .unwrap_or(false)
+                })
+                .unwrap_or(false),
+            RuleKind::IpCidr(cidr) => {
+                if let Some(addr) = dst_ip {
+                    if ip_in_cidr(addr, cidr) {
+                        return true;
+                    }
+                }
+                if self.route_resolve && !no_resolve {
+                    for addr in resolved_ips {
+                        if ip_in_cidr(*addr, cidr) {
+                            return true;
+                        }
+                    }
+                }
+                false
+            }
+            RuleKind::SrcIpCidr(cidr) => {
+                src_ip.map(|addr| ip_in_cidr(addr, cidr)).unwrap_or(false)
+            }
+        }
+    }
+
     /// For DNS (rule-follow-route=true): decide which upstream (or block) for a
     /// domain query by reusing the top-level `route:` match.
     fn dns_outbound_for_domain(&self, domain: &str) -> Outbound {
         for entry in &self.routes {
-            if let Some(rs) = self.rulesets.get(&entry.ruleset) {
-                if rs.match_domain(domain) {
-                    return entry.outbound.clone();
-                }
+            if self.match_kind(&entry.kind, Some(domain), None, None, &[], true) {
+                return entry.outbound.clone();
             }
         }
         self.final_outbound.clone()
+    }
+}
+
+fn rule_label(kind: &crate::config::RuleKind) -> String {
+    use crate::config::RuleKind;
+    match kind {
+        RuleKind::Match => "MATCH".into(),
+        RuleKind::RuleSet(n) => n.clone(),
+        RuleKind::Domain(d) => format!("DOMAIN,{d}"),
+        RuleKind::DomainSuffix(s) => format!("DOMAIN-SUFFIX,{s}"),
+        RuleKind::DomainKeyword(k) => format!("DOMAIN-KEYWORD,{k}"),
+        RuleKind::DomainRegex(r) => format!("DOMAIN-REGEX,{r}"),
+        RuleKind::IpCidr(c) => format!("IP-CIDR,{c}"),
+        RuleKind::SrcIpCidr(c) => format!("SRC-IP-CIDR,{c}"),
+    }
+}
+
+fn ip_in_cidr(addr: IpAddr, cidr: &str) -> bool {
+    let cidr = cidr.trim();
+    if let Ok(ip) = cidr.parse::<IpAddr>() {
+        return ip == addr;
+    }
+    let (ip_s, prefix_s) = match cidr.split_once('/') {
+        Some(p) => p,
+        None => return false,
+    };
+    let prefix: u8 = match prefix_s.parse() {
+        Ok(p) => p,
+        Err(_) => return false,
+    };
+    match (addr, ip_s.parse::<IpAddr>()) {
+        (IpAddr::V4(a), Ok(IpAddr::V4(base))) => {
+            if prefix > 32 {
+                return false;
+            }
+            let mask = if prefix == 0 { 0u32 } else { !0u32 << (32 - prefix) };
+            (u32::from(a) & mask) == (u32::from(base) & mask)
+        }
+        (IpAddr::V6(a), Ok(IpAddr::V6(base))) => {
+            if prefix > 128 {
+                return false;
+            }
+            let mask = if prefix == 0 {
+                0u128
+            } else {
+                !0u128 << (128 - prefix)
+            };
+            (u128::from(a) & mask) == (u128::from(base) & mask)
+        }
+        _ => false,
     }
 }
 
@@ -406,6 +575,7 @@ mod tests {
             fakeip_filter: vec!["cn".to_string()],
             fakeip_whitelist: whitelist,
             sniff: false,
+            route_resolve: false,
             hijack_dns: false,
             dns_route: DnsRoute::FollowRoute {
                 direct: DnsAction::Upstream(parse_nameserver("223.5.5.5:53").unwrap()),
@@ -462,13 +632,14 @@ mod tests {
             fakeip_filter: vec![],
             fakeip_whitelist: false,
             sniff: false,
+            route_resolve: false,
             hijack_dns: false,
             dns_route: DnsRoute::Rules(vec![
                 (
-                    Some("cn".into()),
+                    crate::config::RuleKind::RuleSet("cn".into()),
                     DnsAction::Upstream(parse_nameserver("223.5.5.5:53").unwrap()),
                 ),
-                (None, DnsAction::Block),
+                (crate::config::RuleKind::Match, DnsAction::Block),
             ]),
             ipv6: true,
             dns_cache: None,
@@ -493,8 +664,10 @@ mod tests {
             rulesets,
             routes: vec![
                 RouteEntry {
-                    ruleset: "cn".into(),
+                    kind: crate::config::RuleKind::RuleSet("cn".into()),
                     outbound: Outbound::Block,
+                    label: "cn".into(),
+                    no_resolve: false,
                 },
             ],
             final_outbound: Outbound::Node("main".into()),
@@ -503,6 +676,7 @@ mod tests {
             fakeip_filter: vec![],
             fakeip_whitelist: false,
             sniff: false,
+            route_resolve: false,
             hijack_dns: false,
             dns_route: DnsRoute::FollowRoute {
                 direct: DnsAction::Upstream(parse_nameserver("223.5.5.5:53").unwrap()),
