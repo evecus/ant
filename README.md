@@ -11,8 +11,9 @@ Inspired by [clash-rs](https://github.com/Watfaq/clash-rs) (protocol code patter
 - **DNS**: local UDP/TCP DNS. `rule-follow-route: true`（默认）复用 `route:` 规则——
   direct 域名用 `direct-nameserver`、节点域名用 `proxy-nameserver`、block 用 `rcode://success`；
   `false` 时用 `dns.rules` + `nameserver` 自定义 DNS 路由
-- **Routing**: sequential `RULE-SET` match; TLS/HTTP sniff first; required `MATCH` last
-- **Rulesets**: local binary `.ars` via `rule-providers` (convert from sing-box JSON)
+- **Routing**: DOMAIN / DOMAIN-SUFFIX / DOMAIN-KEYWORD / DOMAIN-REGEX / IP-CIDR / SRC-IP-CIDR / RULE-SET; TLS/HTTP sniff first; required `MATCH` last
+- **route-resolve**: optional (default false); resolve domain before IP rules; per-rule `no-resolve` skips
+- **Rulesets**: binary `.ars` or plaintext (yaml/json/list/text) via `rule-providers` — plaintext loads directly
 
 ## Build
 
@@ -46,8 +47,8 @@ Layout (mihomo-style):
 - `dns:` — `rule-follow-route` / `direct-nameserver` / `proxy-nameserver` / `rules` /
   `nameserver` / `mode` / `fakeip-range` / …
 - `proxies:` — node list（节点名不得使用保留名 `direct` / `block` / `reject`，大小写不限）
-- `rule-providers:` — local `.ars` files (`type: file`, `behavior: domain|ip`)
-- `route:` — only `RULE-SET,<name>,<outbound>` and final `MATCH,<outbound>`
+- `rule-providers:` — local files (`type: file`, `behavior: domain|ipcidr|classical`); `.ars` or plaintext
+- `route:` — mihomo rule types + optional `,no-resolve`; final `MATCH` required
 
 Outbound aliases: `DIRECT` → direct, `BLOCK` / `REJECT` → block.
 

@@ -1,5 +1,6 @@
-# ant example config — mihomo-style YAML; rulesets must be binary `.ars`
-# Convert: ant ruleset-convert -i in.json -o out.ars
+# ant example config — mihomo-style YAML
+# Rule-providers: binary `.ars` or plaintext (yaml/json/list/text).
+# Optional offline convert: ant ruleset-convert -i in.yaml -o out.ars
 
 log-level: info
 # mark: 255
@@ -16,6 +17,10 @@ redir-port: 7892
 # 注意：所有入站端口显式配置 0 会直接校验失败；想关闭某个入站就省略该字段。
 # sniff: true  # sniff TLS SNI / HTTP Host / QUIC for domain routing (default off);
 #              # DNS-query sniffing follows dns.route-hijack independently
+#
+# route-resolve: false
+#   When true, domain hosts are DNS-resolved before matching IP rules / IP
+#   rule-providers. Default false. Per-rule opt-out: append `,no-resolve`.
 
 # TUN virtual NIC (system stack only). Does NOT install routes — you must
 # use auto-route (or point traffic at the device yourself with ip rule/route).
@@ -271,12 +276,17 @@ proxy-groups:
   #   type: relay
   #   proxies: [socks-up, hy2-main]   # last member is the exit
 
-# Local rule providers only (type: file). behavior: domain | ip | ipcidr
+# Local rule providers (type: file).
+# behavior: domain | ip | ipcidr | classical
+# format (optional): text | yaml | json | ars — auto from path extension
+# path: .ars binary, or plaintext .yaml / .yml / .json / .list / .txt
 rule-providers:
   ads:
     type: file
     behavior: domain
     path: /root/rules/ads.ars
+    # path: ./rules/ads.yaml
+    # format: yaml
 
   cn-domain:
     type: file
@@ -288,11 +298,17 @@ rule-providers:
     behavior: ip
     path: /root/rules/cn-ip.ars
 
-# mihomo-style route (only RULE-SET and MATCH supported)
-# Outbound: direct/DIRECT, block/BLOCK, reject/REJECT, a proxies name,
-# or a proxy-groups name (e.g. PROXY / AUTO).
+# Route: DOMAIN / DOMAIN-SUFFIX / DOMAIN-KEYWORD / DOMAIN-REGEX /
+#        IP-CIDR / SRC-IP-CIDR / RULE-SET / MATCH
+# Outbound: direct/DIRECT, block/BLOCK, reject/REJECT, proxies or proxy-groups name.
+# Optional last field no-resolve: skip domain→IP resolve for that line when
+# route-resolve: true.
 route:
+  - DOMAIN-SUFFIX,google.com,PROXY
+  - DOMAIN-KEYWORD,ads,REJECT
+  - IP-CIDR,10.0.0.0/8,DIRECT
   - RULE-SET,ads,REJECT
   - RULE-SET,cn-domain,DIRECT
   - RULE-SET,cn-ip,DIRECT
+  # - RULE-SET,cn-ip,DIRECT,no-resolve
   - MATCH,PROXY
