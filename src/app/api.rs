@@ -1,7 +1,10 @@
 //! Clash-style local API: dashboard UI + JSON endpoints.
 //!
-//! Opening `/ui` (or polling `/connections`) arms the connection tracker for a
-//! short TTL. Closing the browser stops registration and frees the map.
+//! Connection tracking is controlled by the top-level config key
+//! `api-connection-record` (default true = always record live sessions).
+//! When set to false, opening `/ui` (or polling `/connections`) arms the
+//! tracker for a short TTL; closing the browser stops registration and frees
+//! the map.
 
 use crate::app::stats;
 use crate::app::ui::{LOGIN_HTML, UI_HTML};
@@ -40,6 +43,13 @@ pub fn set_outbounds(m: Arc<OutboundManager>) {
 
 pub fn set_config(c: Arc<Config>) {
     *CONFIG.write().unwrap() = Some(c.clone());
+    // Wire connection-recording mode into the stats tracker.
+    stats::set_always_record(c.global.api_connection_record);
+    if c.global.api_connection_record {
+        tracing::info!("api connection record: always-on (api-connection-record: true)");
+    } else {
+        tracing::info!("api connection record: opt-in while UI open (api-connection-record: false)");
+    }
     let secret = c.global.api_secret.clone();
     if secret.is_empty() {
         *AUTH.write().unwrap() = None;
@@ -63,7 +73,7 @@ pub async fn run_api(listen: SocketAddr) -> Result<()> {
     let listener = TcpListener::bind(listen)
         .await
         .with_context(|| format!("api bind {listen}"))?;
-    tracing::info!("api panel http://{listen}/ui (tracking only while UI is open)");
+    tracing::info!("api panel http://{listen}/ui");
     loop {
         let (stream, peer) = listener.accept().await?;
         tokio::spawn(async move {
@@ -306,6 +316,7 @@ fn build_info() -> serde_json::Value {
         "log_level": c.global.log_level,
         "sniff": c.global.sniff,
         "auth": !c.global.api_secret.is_empty(),
+        "api_connection_record": c.global.api_connection_record,
         "dns_enable": c.dns.enable,
         "dns_port": if c.dns.enable { serde_json::json!(c.dns.listen_port()) } else { serde_json::Value::Null },
         "dns_mode": c.dns.mode,

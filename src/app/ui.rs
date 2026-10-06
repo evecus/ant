@@ -295,6 +295,7 @@ document.querySelectorAll('.nav button').forEach(btn => {
     c.style.display = btn.dataset.page === 'connections' ? '' : 'none';
     if (btn.dataset.page === 'info') refreshInfo();
     if (btn.dataset.page === 'proxies') refreshProxies();
+    if (btn.dataset.page === 'connections') refreshConn();
   });
 });
 
@@ -473,6 +474,7 @@ async function refreshInfo() {
       row('log-level', esc(c.log_level || '—')),
       row('sniff', yn(!!c.sniff)),
       row('api-secret 鉴权', yn(!!c.auth)),
+      row('api-connection-record', yn(!!c.api_connection_record)),
     ].join('');
     document.getElementById('info-dns').innerHTML = [
       row('enable', yn(!!c.dns_enable)),

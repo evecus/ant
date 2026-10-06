@@ -1,10 +1,16 @@
 //! Active connection tracker for the API panel.
 //!
-//! Tracking is **opt-in at runtime**: entries are only created while the API UI
-//! (or `/connections`) has been requested recently. Closing the browser stops
-//! registration within a few seconds and clears the map so memory is released.
+//! Behaviour is controlled by the top-level config key `api-connection-record`
+//! (default **true**):
+//!
+//! - **true** (default / omitted): always record live connections. The map only
+//!   holds currently open sessions; closed connections are removed by `ConnGuard`
+//!   on Drop, so the UI never shows dead connections.
+//! - **false**: opt-in at runtime — entries are only created while the API UI
+//!   (or `/connections`) has been requested recently. Closing the browser stops
+//!   registration within a few seconds and clears the map so memory is released.
 
-use portable_atomic::AtomicU64;
+use portable_atomic::{AtomicBool, AtomicU64};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -12,16 +18,28 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-/// Keep recording while the panel has been hit within this window.
+/// Keep recording while the panel has been hit within this window (only used
+/// when `api-connection-record: false`).
 /// UI polls every 1.5s, so 8s covers a few missed ticks + tab backgrounding.
 const WATCH_TTL_MS: u64 = 8_000;
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+/// Set from config (`api-connection-record`). Default true = always record.
+static ALWAYS_RECORD: AtomicBool = AtomicBool::new(true);
 static TRACKER: once_cell::sync::Lazy<Arc<Tracker>> =
     once_cell::sync::Lazy::new(|| Arc::new(Tracker::new()));
 
 pub fn global() -> Arc<Tracker> {
     TRACKER.clone()
+}
+
+/// Called once at startup from `api::set_config`.
+pub fn set_always_record(enabled: bool) {
+    ALWAYS_RECORD.store(enabled, Ordering::Relaxed);
+}
+
+fn always_record() -> bool {
+    ALWAYS_RECORD.load(Ordering::Relaxed)
 }
 
 fn now_ms() -> u64 {
@@ -81,12 +99,15 @@ impl Tracker {
     }
 
     /// Called by the API on `/ui` and `/connections` so inbound paths start
-    /// (or keep) recording live sessions.
+    /// (or keep) recording live sessions when `api-connection-record: false`.
     pub fn touch(&self) {
         self.last_watch_ms.store(now_ms(), Ordering::Relaxed);
     }
 
     fn is_watching(&self) -> bool {
+        if always_record() {
+            return true;
+        }
         let last = self.last_watch_ms.load(Ordering::Relaxed);
         if last == 0 {
             return false;
@@ -94,11 +115,17 @@ impl Tracker {
         now_ms().saturating_sub(last) < WATCH_TTL_MS
     }
 
-    /// Register a connection only while the panel is being watched.
-    /// Otherwise returns a no-op guard (zero heap growth).
+    /// Register a live connection.
+    ///
+    /// - `api-connection-record: true` (default): always records.
+    /// - `false`: only while the panel is being watched; otherwise returns a
+    ///   no-op guard (zero heap growth) and clears any leftover entries.
+    ///
+    /// Closed connections are removed by `ConnGuard` on Drop, so the map only
+    /// ever contains currently open sessions.
     pub fn register(&self, info: ConnectionInfo) -> ConnGuard {
         if !self.is_watching() {
-            // Release any leftover entries once the panel is closed.
+            // Release any leftover entries once the panel is closed (opt-in mode).
             if let Ok(mut map) = self.map.try_lock() {
                 if !map.is_empty() {
                     map.clear();
@@ -124,7 +151,7 @@ impl Tracker {
     }
 
     pub fn list(&self) -> Vec<ConnectionView> {
-        // A list request itself counts as watching.
+        // A list request itself counts as watching (relevant for opt-in mode).
         self.touch();
         let map = self.map.lock().unwrap();
         let mut out: Vec<_> = map
