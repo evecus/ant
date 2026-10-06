@@ -1,4 +1,4 @@
-//! Embedded dashboard HTML: proxy-groups / connections / info (mihomo-style),
+//! Embedded dashboard HTML: proxy-groups / connections / info / logs (mihomo-style),
 //! plus the api-secret login page.
 
 pub const LOGIN_HTML: &str = r#"<!DOCTYPE html>
@@ -166,6 +166,25 @@ pub const UI_HTML: &str = r#"<!DOCTYPE html>
   .modal-head { display:flex; align-items:flex-start; gap:10px; margin-bottom:14px; }
   .modal-head h2 { margin:0; font-size:15px; font-weight:600; word-break:break-all; flex:1; }
   .modal-head .close { flex-shrink:0; width:28px; height:28px; padding:0; border-radius:8px; font-size:14px; line-height:1; }
+
+  /* ── logs ─────────────────────────────────────────────────── */
+  .log-box {
+    background:var(--card); border:1px solid var(--line); border-radius:12px;
+    padding:10px 12px; font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+    font-size:12px; line-height:1.55; max-height:calc(100vh - 140px); overflow-y:auto;
+    white-space:pre-wrap; word-break:break-all;
+  }
+  .log-line { padding:1px 0; border-bottom:1px solid transparent; }
+  .log-line:hover { background:#1c2128; }
+  .log-ts { color:var(--muted); margin-right:8px; }
+  .log-lv { font-weight:600; margin-right:8px; min-width:42px; display:inline-block; }
+  .log-lv.ERROR { color:var(--bad); }
+  .log-lv.WARN { color:var(--warn); }
+  .log-lv.INFO { color:var(--acc); }
+  .log-lv.DEBUG { color:#8b949e; }
+  .log-lv.TRACE { color:#6e7681; }
+  .log-msg { color:var(--text); }
+
   @media (max-width:600px) {
     .kv { grid-template-columns: 1fr; gap:2px 0; }
     .kv .k { margin-top:8px; }
@@ -181,6 +200,7 @@ pub const UI_HTML: &str = r#"<!DOCTYPE html>
     <button type="button" data-page="proxies" class="active">代理组</button>
     <button type="button" data-page="connections">连接</button>
     <button type="button" data-page="info">信息</button>
+    <button type="button" data-page="logs">日志</button>
   </nav>
   <span class="pill" id="count" style="display:none">0</span>
   <span class="meta" id="updated">—</span>
@@ -210,14 +230,6 @@ pub const UI_HTML: &str = r#"<!DOCTYPE html>
       <div class="kv" id="info-ports"></div>
     </div>
     <div class="card">
-      <h2>DNS</h2>
-      <div class="kv" id="info-dns"></div>
-    </div>
-    <div class="card">
-      <h2>TUN</h2>
-      <div class="kv" id="info-tun"></div>
-    </div>
-    <div class="card">
       <h2>规则集 <span class="tag" id="ruleset-count">0</span></h2>
       <ul class="list" id="info-rulesets"></ul>
     </div>
@@ -225,10 +237,19 @@ pub const UI_HTML: &str = r#"<!DOCTYPE html>
       <h2>路由规则 <span class="tag" id="route-count">0</span></h2>
       <ul class="list mono" id="info-routes"></ul>
     </div>
-    <div class="card">
-      <h2>节点 <span class="tag" id="node-count">0</span></h2>
-      <ul class="list mono" id="info-nodes"></ul>
+  </section>
+
+  <!-- 4. logs -->
+  <section id="page-logs" class="page">
+    <div class="actions" style="margin-bottom:12px">
+      <button class="btn primary" type="button" id="btn-refresh-logs">刷新</button>
+      <button class="btn" type="button" id="btn-clear-logs">清空</button>
+      <label class="meta" style="display:flex;align-items:center;gap:6px;cursor:pointer">
+        <input type="checkbox" id="logs-auto" checked/> 自动刷新
+      </label>
+      <span class="meta" id="logs-count">0 条</span>
     </div>
+    <div class="log-box" id="log-box"><div class="empty" id="logs-empty">暂无日志</div></div>
   </section>
 </main>
 
@@ -244,6 +265,8 @@ pub const UI_HTML: &str = r#"<!DOCTYPE html>
 
 <script>
 const TEST_URL = 'http://www.gstatic.com/generate_204';
+// DIRECT 用国内可达的小米 204，避免 gstatic 直连必超时
+const DIRECT_TEST_URL = 'http://connect.rom.miui.com/generate_204';
 const delays = {}; // name -> ms | -1 fail | undefined
 let connData = [];  // latest /connections payload (for the detail modal)
 
@@ -296,6 +319,7 @@ document.querySelectorAll('.nav button').forEach(btn => {
     if (btn.dataset.page === 'info') refreshInfo();
     if (btn.dataset.page === 'proxies') refreshProxies();
     if (btn.dataset.page === 'connections') refreshConn();
+    if (btn.dataset.page === 'logs') refreshLogs(true);
   });
 });
 
@@ -314,17 +338,20 @@ async function refreshProxies() {
     }
     empty.style.display = 'none';
     root.innerHTML = data.map(g => {
+      // Only real select groups can switch member; GLOBAL is list + latency only.
       const selectable = g.type === 'select';
+      const isGlobal = g.type === 'global' || (g.name || '').toUpperCase() === 'GLOBAL';
       const members = (g.all || []).map(m => {
-        const active = m === g.now ? ' active' : '';
+        const active = !isGlobal && m === g.now ? ' active' : '';
         return `<div class="mem${active}" data-group="${esc(g.name)}" data-member="${esc(m)}" data-selectable="${selectable}">
           <span class="name">${esc(m)}</span>
           <span class="delay ${delayClass(m)}">${delayText(m)}</span>
         </div>`;
       }).join('');
+      const nowTag = isGlobal ? '' : `<span class="tag now">now: ${esc(g.now)}</span>`;
       return `<div class="card" data-group-card="${esc(g.name)}">
         <h2>${esc(g.name)} <span class="tag">${esc(g.type)}</span>
-          <span class="tag now">now: ${esc(g.now)}</span></h2>
+          ${nowTag}</h2>
         <div class="members">${members}</div>
         <div class="actions">
           <button class="btn" type="button" data-test-group="${esc(g.name)}">测速本组</button>
@@ -361,9 +388,13 @@ async function refreshProxies() {
   }
 }
 
+function testUrlFor(name) {
+  return (name || '').toLowerCase() === 'direct' ? DIRECT_TEST_URL : TEST_URL;
+}
 async function testOne(name) {
   try {
-    const r = await api('/proxies/' + encodeURIComponent(name) + '/delay?url=' + encodeURIComponent(TEST_URL) + '&timeout=5000');
+    const url = testUrlFor(name);
+    const r = await api('/proxies/' + encodeURIComponent(name) + '/delay?url=' + encodeURIComponent(url) + '&timeout=5000');
     const j = await r.json();
     if (typeof j.delay === 'number' && j.delay >= 0) delays[name] = j.delay;
     else delays[name] = -1;
@@ -465,52 +496,28 @@ async function refreshInfo() {
   try {
     const r = await api('/configs');
     const c = await r.json();
+    const dnsPort = c.dns_port == null ? '—' : (c.dns_port || '未监听');
     document.getElementById('info-ports').innerHTML = [
       row('mixed-port', c.mixed_port || 0),
       row('tproxy-port', c.tproxy_port || 0),
       row('redir-port', c.redir_port || 0),
-      row('api', esc(c.api || '—')),
-      row('bind-address', esc(c.bind_address || '—')),
-      row('log-level', esc(c.log_level || '—')),
-      row('sniff', yn(!!c.sniff)),
-      row('api-secret 鉴权', yn(!!c.auth)),
-      row('api-connection-record', yn(!!c.api_connection_record)),
-    ].join('');
-    document.getElementById('info-dns').innerHTML = [
-      row('enable', yn(!!c.dns_enable)),
-      row('port', c.dns_port == null ? '—' : (c.dns_port || '未监听（仅劫持）')),
-      row('mode', esc(c.dns_mode || '—')),
-      row('rule-follow-route', yn(!!c.dns_rule_follow_route)),
-      row('default-nameserver', '<code>'+esc(c.dns_default_nameserver||'—')+'</code>'),
-      row('direct-nameserver', '<code>'+esc(c.dns_direct_nameserver||'—')+'</code>'),
-      row('proxy-nameserver', '<code>'+esc(c.dns_proxy_nameserver||'—')+'</code>'),
-      row('fakeip-range', esc(c.fakeip_range || '—')),
-      row('fakeip6-range', esc(c.fakeip6_range || '—')),
-      row('ipv6', yn(!!c.dns_ipv6)),
-    ].join('');
-    document.getElementById('info-tun').innerHTML = [
-      row('enable', yn(!!c.tun_enable)),
-      row('stack', esc(c.tun_stack || '—')),
-      row('device', esc(c.tun_device || '—')),
-      row('auto-route', yn(!!c.tun_auto_route)),
-      row('strict-route', yn(!!c.tun_strict_route)),
-      row('auto-detect-interface', yn(!!c.tun_auto_detect_interface)),
-      row('dns-hijack', (c.tun_dns_hijack||[]).map(esc).join(', ') || '—'),
+      row('dns-port', dnsPort),
+      row('允许局域网', yn(!!c.lan)),
+      row('IPv6', yn(!!c.ipv6)),
+      row('TUN', yn(!!c.tun_enable)),
     ].join('');
     const rs = c.rule_providers || [];
     document.getElementById('ruleset-count').textContent = rs.length;
     document.getElementById('info-rulesets').innerHTML = rs.length
-      ? rs.map(x => `<li><code>${esc(x.name)}</code> · ${esc(x.behavior||x.type||'')} · ${esc(x.path||'')}</li>`).join('')
+      ? rs.map(x => {
+          const meta = [x.behavior, x.type].filter(Boolean).join(' · ');
+          return `<li><code>${esc(x.name)}</code>${meta ? ' · ' + esc(meta) : ''} · <span class="tag">${x.count ?? 0} 条</span></li>`;
+        }).join('')
       : '<li class="off">无</li>';
     const routes = c.route || [];
     document.getElementById('route-count').textContent = routes.length;
     document.getElementById('info-routes').innerHTML = routes.length
       ? routes.map(x => `<li>${esc(x)}</li>`).join('')
-      : '<li class="off">无</li>';
-    const nodes = c.proxies || [];
-    document.getElementById('node-count').textContent = nodes.length;
-    document.getElementById('info-nodes').innerHTML = nodes.length
-      ? nodes.map(x => `<li>${esc(x)}</li>`).join('')
       : '<li class="off">无</li>';
     document.getElementById('updated').textContent = new Date().toLocaleTimeString();
   } catch (e) {
@@ -518,11 +525,49 @@ async function refreshInfo() {
   }
 }
 
+// ── logs ─────────────────────────────────────────────────
+function fmtLogTs(ms) {
+  const d = new Date(ms);
+  const p = n => String(n).padStart(2, '0');
+  return p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
+}
+async function refreshLogs(scrollBottom) {
+  try {
+    const r = await api('/logs');
+    const data = await r.json();
+    const box = document.getElementById('log-box');
+    const empty = document.getElementById('logs-empty');
+    document.getElementById('logs-count').textContent = data.length + ' 条';
+    if (!data.length) {
+      box.innerHTML = '<div class="empty" id="logs-empty">暂无日志</div>';
+      return;
+    }
+    const nearBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 80;
+    box.innerHTML = data.map(l =>
+      `<div class="log-line"><span class="log-ts">${fmtLogTs(l.ts_ms)}</span>` +
+      `<span class="log-lv ${esc(l.level)}">${esc(l.level)}</span>` +
+      `<span class="log-msg">${esc(l.msg)}</span></div>`
+    ).join('');
+    if (scrollBottom || nearBottom) box.scrollTop = box.scrollHeight;
+    document.getElementById('updated').textContent = new Date().toLocaleTimeString();
+  } catch (e) {
+    if (String(e) !== 'Error: unauthorized') document.getElementById('updated').textContent = 'error: ' + e;
+  }
+}
+document.getElementById('btn-refresh-logs').addEventListener('click', () => refreshLogs(true));
+document.getElementById('btn-clear-logs').addEventListener('click', async () => {
+  try {
+    await api('/logs', { method: 'DELETE' });
+    refreshLogs(true);
+  } catch (e) { /* ignore */ }
+});
+
 refreshProxies();
 refreshConn();
 setInterval(() => {
   const page = document.querySelector('.nav button.active')?.dataset.page;
   if (page === 'connections') refreshConn();
+  else if (page === 'logs' && document.getElementById('logs-auto')?.checked) refreshLogs(false);
   else if (page === 'proxies') { /* keep delays; soft refresh optional */ }
 }, 1500);
 </script>

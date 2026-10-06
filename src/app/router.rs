@@ -349,6 +349,20 @@ impl Router {
         }
     }
 
+    /// Snapshot of loaded rulesets for the API info panel: (name, rule_count).
+    pub fn ruleset_stats(&self) -> Vec<(String, usize)> {
+        let guard = match self.rulesets.read() {
+            Ok(g) => g,
+            Err(_) => return Vec::new(),
+        };
+        let mut out: Vec<(String, usize)> = guard
+            .iter()
+            .map(|(n, rs)| (n.clone(), rs.rule_count))
+            .collect();
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out
+    }
+
     /// Background loop: re-download `type: http` providers with `update-interval` > 0.
     /// Interval unit is **hours**.
     pub fn spawn_ruleset_updater(

@@ -6,6 +6,7 @@
 //! tracker for a short TTL; closing the browser stops registration and frees
 //! the map.
 
+use crate::app::router::Router;
 use crate::app::stats;
 use crate::app::ui::{LOGIN_HTML, UI_HTML};
 use crate::config::Config;
@@ -24,6 +25,7 @@ use std::sync::{Arc, RwLock};
 use tokio::net::TcpListener;
 
 static OUTBOUNDS: RwLock<Option<Arc<OutboundManager>>> = RwLock::new(None);
+static ROUTER: RwLock<Option<Arc<Router>>> = RwLock::new(None);
 static CONFIG: RwLock<Option<Arc<Config>>> = RwLock::new(None);
 /// api-secret 鉴权状态：None = 未启用（无 api-secret 字段）。
 static AUTH: RwLock<Option<AuthState>> = RwLock::new(None);
@@ -39,6 +41,14 @@ struct AuthState {
 
 pub fn set_outbounds(m: Arc<OutboundManager>) {
     *OUTBOUNDS.write().unwrap() = Some(m);
+}
+
+pub fn set_router(r: Arc<Router>) {
+    *ROUTER.write().unwrap() = Some(r);
+}
+
+fn router() -> Option<Arc<Router>> {
+    ROUTER.read().unwrap().clone()
 }
 
 pub fn set_config(c: Arc<Config>) {
@@ -125,6 +135,27 @@ async fn handle(
         (&Method::GET, "/configs") | (&Method::GET, "/api/configs") => {
             Ok(json_body(StatusCode::OK, &build_info()))
         }
+        (&Method::GET, "/logs") | (&Method::GET, "/api/logs") => {
+            // Optional ?limit=N (default all buffered, max 2000).
+            let limit = req
+                .uri()
+                .query()
+                .and_then(|q| {
+                    q.split('&').find_map(|p| {
+                        let mut it = p.splitn(2, '=');
+                        match (it.next(), it.next()) {
+                            (Some("limit"), Some(v)) => v.parse::<usize>().ok(),
+                            _ => None,
+                        }
+                    })
+                });
+            let lines = crate::app::log_buffer::list(limit);
+            Ok(json_body(StatusCode::OK, &lines))
+        }
+        (&Method::DELETE, "/logs") | (&Method::DELETE, "/api/logs") => {
+            crate::app::log_buffer::clear();
+            Ok(json_msg(StatusCode::OK, "cleared"))
+        }
         // PUT /proxies/{group}
         (&Method::PUT, p)
             if p.starts_with("/proxies/") || p.starts_with("/api/proxies/") =>
@@ -170,7 +201,13 @@ async fn handle(
                 .trim_end_matches("/delay")
                 .trim_matches('/');
             let name = percent_decode(rest);
-            let mut url = "http://www.gstatic.com/generate_204".to_string();
+            // DIRECT 默认用小米 204（国内直连可达）；其它节点默认 gstatic。
+            // 请求带 ?url= 时仍以参数为准。
+            let mut url = if name.eq_ignore_ascii_case("direct") {
+                "http://connect.rom.miui.com/generate_204".to_string()
+            } else {
+                "http://www.gstatic.com/generate_204".to_string()
+            };
             let mut timeout_ms: u64 = 5000;
             for pair in query.split('&') {
                 let mut it = pair.splitn(2, '=');
@@ -287,56 +324,74 @@ fn ct_eq(a: &str, b: &str) -> bool {
     diff == 0
 }
 
+fn bind_is_lan(bind: &str) -> bool {
+    let b = bind.trim();
+    // Loopback-only → not LAN; anything else (0.0.0.0 / :: / specific NIC IP) → LAN.
+    !(b == "127.0.0.1" || b == "::1" || b.eq_ignore_ascii_case("localhost"))
+}
+
+fn bind_has_ipv6(bind: &str) -> bool {
+    let b = bind.trim();
+    // Explicit IPv4-only binds.
+    if b == "0.0.0.0" || b == "127.0.0.1" {
+        return false;
+    }
+    // :: / ::1 / dual-stack or any IPv6 literal.
+    b.contains(':')
+}
+
 fn build_info() -> serde_json::Value {
     let Some(c) = config() else {
         return serde_json::json!({});
     };
-    let rule_providers: Vec<serde_json::Value> = c
-        .rule_providers
-        .iter()
-        .map(|(name, p)| {
-            serde_json::json!({
-                "name": name,
-                "type": p.ty,
-                "behavior": p.behavior,
-                "path": p.path.as_ref().map(|x| x.display().to_string()).unwrap_or_default(),
-                "url": p.url,
+    // Prefer runtime-loaded rule counts; fall back to config names with count 0.
+    let rule_providers: Vec<serde_json::Value> = if let Some(r) = router() {
+        r.ruleset_stats()
+            .into_iter()
+            .map(|(name, count)| {
+                let behavior = c
+                    .rule_providers
+                    .get(&name)
+                    .map(|p| p.behavior.clone())
+                    .unwrap_or_default();
+                let ty = c
+                    .rule_providers
+                    .get(&name)
+                    .map(|p| p.ty.clone())
+                    .unwrap_or_default();
+                serde_json::json!({
+                    "name": name,
+                    "type": ty,
+                    "behavior": behavior,
+                    "count": count,
+                })
             })
-        })
-        .collect();
-    let proxies: Vec<String> = outbounds()
-        .map(|m| m.node_names().to_vec())
-        .unwrap_or_else(|| c.proxies.iter().map(|p| p.name.clone()).collect());
+            .collect()
+    } else {
+        c.rule_providers
+            .iter()
+            .map(|(name, p)| {
+                serde_json::json!({
+                    "name": name,
+                    "type": p.ty,
+                    "behavior": p.behavior,
+                    "count": 0,
+                })
+            })
+            .collect()
+    };
+    let bind = &c.global.bind_address;
     serde_json::json!({
         "mixed_port": c.global.mixed_port.unwrap_or(0),
         "tproxy_port": c.global.tproxy_port.unwrap_or(0),
         "redir_port": c.global.redir_port.unwrap_or(0),
-        "api": c.global.api,
-        "bind_address": c.global.bind_address,
-        "log_level": c.global.log_level,
-        "sniff": c.global.sniff,
-        "auth": !c.global.api_secret.is_empty(),
-        "api_connection_record": c.global.api_connection_record,
-        "dns_enable": c.dns.enable,
         "dns_port": if c.dns.enable { serde_json::json!(c.dns.listen_port()) } else { serde_json::Value::Null },
-        "dns_mode": c.dns.mode,
-        "dns_rule_follow_route": c.dns.rule_follow_route,
-        "dns_default_nameserver": c.dns.default_nameserver,
-        "dns_direct_nameserver": c.dns.direct_nameserver,
-        "dns_proxy_nameserver": c.dns.proxy_nameserver,
-        "fakeip_range": c.dns.fakeip_range,
-        "fakeip6_range": c.dns.fakeip6_range,
-        "dns_ipv6": c.dns.ipv6,
+        "bind_address": bind,
+        "lan": bind_is_lan(bind),
+        "ipv6": bind_has_ipv6(bind),
         "tun_enable": c.tun.enable,
-        "tun_stack": "system",
-        "tun_device": c.tun.device,
-        "tun_auto_route": c.tun.auto_route,
-        "tun_strict_route": c.tun.strict_route,
-        "tun_auto_detect_interface": c.tun.auto_detect_interface,
-        "tun_dns_hijack": c.tun.dns_hijack,
         "rule_providers": rule_providers,
         "route": c.route,
-        "proxies": proxies,
     })
 }
 
