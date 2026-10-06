@@ -176,7 +176,7 @@ async fn main() -> Result<()> {
             None
         }
     };
-    let router = Router::from_config(&cfg, base_dir.as_deref(), cache.as_deref()).await?;
+    let router = Router::from_config(&cfg, base_dir.as_deref(), cache.clone()).await?;
     // DNS 模块关闭时整个 dns 配置对下游（ECH upstream 等）不可见。
     let dns_ref = if cfg.dns.enable { Some(&cfg.dns) } else { None };
     let select_cache = if cfg.profile.store_selected {
