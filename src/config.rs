@@ -34,36 +34,7 @@ pub struct Config {
     /// `proxies` node name (reserved names are rejected for node names).
     #[serde(default)]
     pub route: Vec<String>,
-    /// Persistent state (mihomo-style `profile:`).
-    #[serde(default)]
-    pub profile: ProfileConfig,
 }
-
-/// mihomo-compatible profile options.
-#[derive(Debug, Clone, Deserialize)]
-pub struct ProfileConfig {
-    /// Persist `select` group choices across restarts (redb). Default true.
-    #[serde(default = "default_true", rename = "store-selected")]
-    pub store_selected: bool,
-    /// Cache database path (select + ruleset payloads when `cache: true`).
-    /// Relative paths resolve against `-d/--dir`. Default `cache.db`.
-    #[serde(default = "default_cache_file", rename = "store-selected-file", alias = "cache-file")]
-    pub store_selected_file: PathBuf,
-}
-
-impl Default for ProfileConfig {
-    fn default() -> Self {
-        Self {
-            store_selected: true,
-            store_selected_file: default_cache_file(),
-        }
-    }
-}
-
-fn default_cache_file() -> PathBuf {
-    PathBuf::from("cache.db")
-}
-
 
 /// Flat `tun:` block. Creates a virtual NIC and runs the system stack.
 /// Optional OS integration: dns-hijack / auto-route / auto-detect-interface /
@@ -243,6 +214,14 @@ pub struct GlobalConfig {
     /// IP rule-providers. Default false. Per-rule `no-resolve` skips this line.
     #[serde(default, rename = "route-resolve")]
     pub route_resolve: bool,
+    /// Global persistent cache (redb). Default false.
+    /// When true: DNS, Fake-IP, select-group choices, and path-less rule-providers
+    /// are stored in redb (`cache-file`).
+    #[serde(default)]
+    pub cache: bool,
+    /// Path to the redb file when `cache: true`. Default `cache.db`.
+    #[serde(default = "default_cache_file", rename = "cache-file")]
+    pub cache_file: PathBuf,
 }
 
 fn default_bind() -> String {
@@ -590,6 +569,10 @@ pub enum SocksVersion {
 fn default_network() -> String {
     "tcp".into()
 }
+fn default_cache_file() -> PathBuf {
+    PathBuf::from("cache.db")
+}
+
 fn default_true() -> bool {
     true
 }
@@ -668,10 +651,6 @@ pub struct RuleProviderConfig {
     /// Update interval in seconds for `type: http` (0 = only at startup). Default 0.
     #[serde(default)]
     pub interval: Option<u64>,
-    /// When true and `path` is omitted, payload is stored in the redb cache.
-    /// When false and `path` is omitted, payload is stored under `rules/<name>.ars`.
-    #[serde(default)]
-    pub cache: bool,
 }
 
 fn default_provider_type() -> String {
@@ -892,6 +871,7 @@ pub fn resolve_ruleset_storage(
     name: &str,
     rp: &RuleProviderConfig,
     base_dir: &std::path::Path,
+    global_cache: bool,
 ) -> RulesetStorage {
     if let Some(ref path) = rp.path {
         let raw = path.to_string_lossy();
@@ -904,7 +884,7 @@ pub fn resolve_ruleset_storage(
         };
         return RulesetStorage::File(abs);
     }
-    if rp.cache {
+    if global_cache {
         return RulesetStorage::Db;
     }
     RulesetStorage::File(base_dir.join("rules").join(format!("{name}.ars")))
@@ -1092,7 +1072,7 @@ impl Config {
             if pty == "http" && rp.url.as_ref().map(|u| u.trim().is_empty()).unwrap_or(true) {
                 bail!("rule-provider `{name}`: type http requires `url`");
             }
-            let storage = resolve_ruleset_storage(name, rp, &base);
+            let storage = resolve_ruleset_storage(name, rp, &base, self.global.cache);
             out.push(RulesetConfig {
                 name: name.clone(),
                 ty: normalize_behavior(&rp.behavior)?,
@@ -1108,7 +1088,7 @@ impl Config {
 
     /// Absolute path for the shared redb cache database.
     pub fn cache_db_path(&self, base_dir: Option<&std::path::Path>) -> PathBuf {
-        let p = &self.profile.store_selected_file;
+        let p = &self.global.cache_file;
         if p.is_absolute() {
             p.clone()
         } else if let Some(base) = base_dir {
