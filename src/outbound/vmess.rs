@@ -424,8 +424,6 @@ impl RespReader {
                     let dec = aead_open(&key[..16], &iv[..12], &self.raw[..RESP_LEN_FRAME], b"")
                         .ok_or_else(|| invalid("vmess: decrypt response length failed"))?;
                     let header_len = u16::from_be_bytes([dec[0], dec[1]]) as usize;
-                    #[cfg(test)]
-                    eprintln!("[dbg-parse] len decrypted, header_len={header_len}, raw={}", self.raw.len());
                     let _ = self.raw.drain(..RESP_LEN_FRAME);
                     self.state = RespState::Header(header_len);
                 }
@@ -790,14 +788,8 @@ impl<R: AsyncRead + Unpin> AsyncRead for VmessReadHalf<R> {
                 return Poll::Ready(Ok(()));
             }
             match this.decoder.try_decode(&mut this.raw_buf)? {
-                Some(data) if data.is_empty() => {
-                    #[cfg(test)]
-                    eprintln!("[dbg-rh] decoder got empty chunk (EOF signal)");
-                    return Poll::Ready(Ok(()));
-                }
+                Some(data) if data.is_empty() => return Poll::Ready(Ok(())),
                 Some(data) => {
-                    #[cfg(test)]
-                    eprintln!("[dbg-rh] decoder got {} bytes", data.len());
                     this.decoded_buf = data;
                     continue;
                 }
@@ -812,8 +804,6 @@ impl<R: AsyncRead + Unpin> AsyncRead for VmessReadHalf<R> {
                 Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
                 Poll::Ready(Ok(())) => {
                     let n = read_buf.filled().len();
-                    #[cfg(test)]
-                    eprintln!("[dbg-rh] inner read {} bytes", n);
                     if n == 0 {
                         return Poll::Ready(Ok(()));
                     }
@@ -986,7 +976,6 @@ struct VmessStreamIo<S> {
     pending_write: Option<Bytes>,
     pending_reported: usize,
     resp: Option<RespReader>,
-    raw_buf: Vec<u8>,
     read_buf: Bytes,
     response_done: bool,
 }
@@ -1000,7 +989,6 @@ impl<S> VmessStreamIo<S> {
             pending_write: None,
             pending_reported: 0,
             resp: Some(RespReader::new(chk)),
-            raw_buf: Vec::new(),
             read_buf: Bytes::new(),
             response_done: false,
         }
@@ -1014,7 +1002,6 @@ impl<S> VmessStreamIo<S> {
             pending_write: None,
             pending_reported: 0,
             resp: Some(RespReader::new(chk)),
-            raw_buf: Vec::new(),
             read_buf: Bytes::new(),
             response_done: false,
         }
@@ -1029,7 +1016,6 @@ impl<S> VmessStreamIo<S> {
             pending_write: None,
             pending_reported: 0,
             resp: None,
-            raw_buf: Vec::new(),
             read_buf: Bytes::from(rest),
             response_done: true,
         }
@@ -1060,21 +1046,21 @@ impl<S: AsyncRead + Unpin> AsyncRead for VmessStreamIo<S> {
                     Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
                     Poll::Ready(Ok(())) => {
                         let filled = rb.filled();
-                        #[cfg(test)]
-                        eprintln!("[dbg-io] resp loop read {} bytes", filled.len());
                         if filled.is_empty() {
                             return Poll::Ready(Ok(())); // EOF
                         }
-                        this.raw_buf.extend_from_slice(filled);
+                        let parsed = {
+                            let reader = this.resp.as_mut().expect("resp reader");
+                            reader.raw.extend_from_slice(filled);
+                            reader.parse()?
+                        };
+                        if let Some(rest) = parsed {
+                            this.response_done = true;
+                            this.resp = None;
+                            this.read_buf = Bytes::from(rest);
+                            break;
+                        }
                     }
-                }
-                let parsed = this.resp.as_mut().expect("resp reader").parse()?;
-                if let Some(rest) = parsed {
-                    this.response_done = true;
-                    this.resp = None;
-                    this.raw_buf.clear();
-                    this.read_buf = Bytes::from(rest);
-                    break;
                 }
             }
         }
