@@ -1908,10 +1908,12 @@ mod tests {
             let got = sess.decoder.try_decode(&mut raw).unwrap().expect("decode");
             assert_eq!(&got[..], b"hello");
 
-            // 3. 回帧
+            // 3. 回帧后优雅关闭（直接 drop 会让客户端在 EOF 处收到
+            //    ResetWithoutClosingHandshake，吞掉已缓冲的帧）
             let out = sess.encoder.encode(b"world").unwrap();
             ws.send(Message::Binary(out.to_vec())).await.unwrap();
             ws.flush().await.unwrap();
+            let _ = ws.close(None).await;
             sess.target
         });
 
@@ -1926,12 +1928,11 @@ mod tests {
             .unwrap();
         s.write_all(b"hello").await.unwrap();
         s.flush().await.unwrap();
-        // 先等服务端结束：若服务端 panic 能第一时间看到真实原因，
-        // 而不是被 ws 掉线的 ResetWithoutClosingHandshake 掩盖。
-        assert_eq!(server.await.unwrap(), "example.com:443");
         let mut buf = [0u8; 16];
         let n = s.read(&mut buf).await.unwrap();
         assert_eq!(&buf[..n], b"world");
+        // 服务端若中途 panic，在这里以 JoinError 暴露
+        assert_eq!(server.await.unwrap(), "example.com:443");
     }
 
     /// 配置：network / cipher / utls 组合的解析与 fail-fast。
