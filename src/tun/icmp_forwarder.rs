@@ -104,7 +104,7 @@ impl IcmpForwarder {
         let dst = Ipv4Addr::from([raw[16], raw[17], raw[18], raw[19]]);
         let icmp_id = u16::from_be_bytes([raw[ihl + 4], raw[ihl + 5]]);
 
-        match self.router.match_route(None, Some(IpAddr::V4(dst))).outbound {
+        match self.router.match_route(None, Some(IpAddr::V4(dst)), &[]).outbound {
             Outbound::Block => {
                 debug!(%dst, "tun: icmp v4 blocked");
                 return true;
@@ -141,7 +141,7 @@ impl IcmpForwarder {
         let dst = Ipv6Addr::from(<[u8; 16]>::try_from(&raw[24..40]).unwrap());
         let icmp_id = u16::from_be_bytes([raw[44], raw[45]]);
 
-        match self.router.match_route(None, Some(IpAddr::V6(dst))).outbound {
+        match self.router.match_route(None, Some(IpAddr::V6(dst)), &[]).outbound {
             Outbound::Block => {
                 debug!(%dst, "tun: icmp v6 blocked");
                 return true;
