@@ -14,7 +14,8 @@ mod tproxy;
 pub use mixed::{run_http, run_mixed, run_socks};
 #[cfg(any(target_os = "linux", target_os = "android"))]
 pub use redir::run_redir;
-#[cfg(any(target_os = "linux", target_os = "android"))]
+// Used by `tun::redirect` auto-redirect accept loop; only needed when TUN is compiled in.
+#[cfg(all(feature = "tun", any(target_os = "linux", target_os = "android")))]
 pub(crate) use redir::handle_connection as handle_redir_connection;
 #[cfg(any(target_os = "linux", target_os = "android"))]
 pub use tproxy::run_tproxy;
