@@ -387,6 +387,11 @@ mod stub {
     pub struct ConnGuard;
 
     impl ConnGuard {
+        /// Never resolves — without the API panel there is nothing to cancel.
+        pub fn cancelled(&self) -> std::future::Pending<()> {
+            std::future::pending()
+        }
+
         pub async fn while_alive<T, E, F>(&self, fut: F) -> Result<T, E>
         where
             F: Future<Output = Result<T, E>>,
