@@ -1,6 +1,9 @@
-//! Mixed inbound: HTTP CONNECT + SOCKS5 (TCP CONNECT + UDP ASSOCIATE) +
-//! SOCKS4 / SOCKS4a (TCP CONNECT only).
-//! Listens dual-stack: 0.0.0.0 and [::].
+//! Inbounds for proxy clients:
+//! - **mixed**: auto-detect HTTP CONNECT + SOCKS4/4a/5 (TCP + UDP ASSOCIATE)
+//! - **http**: HTTP CONNECT / absolute-URI only (like clash-rs `proxy/http/inbound`)
+//! - **socks**: SOCKS4 / SOCKS4a / SOCKS5 only (like clash-rs `proxy/socks/inbound`)
+//!
+//! All listen dual-stack according to `bind-address` (0.0.0.0 and/or [::]).
 
 use crate::outbound::{relay, OutboundManager, UdpSession};
 use crate::app::router::{Outbound, Router};
@@ -14,17 +17,89 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpStream, UdpSocket};
 use tokio::sync::Mutex;
 
+/// Protocol mode for a TCP client handler.
+#[derive(Clone, Copy)]
+enum Mode {
+    /// Peek first byte: 0x05 → SOCKS5, 0x04 → SOCKS4, else HTTP.
+    Mixed,
+    /// Force HTTP CONNECT / absolute-form proxy requests only.
+    Http,
+    /// Force SOCKS4 / SOCKS4a / SOCKS5 only.
+    Socks,
+}
+
 pub async fn run_mixed(
     port: u16,
     bind_address: String,
     router: Arc<Router>,
     outbounds: Arc<OutboundManager>,
 ) -> Result<()> {
+    run_listener(
+        "mixed",
+        "mixed (HTTP+SOCKS4/4a/5, TCP/UDP)",
+        port,
+        bind_address,
+        router,
+        outbounds,
+        Mode::Mixed,
+    )
+    .await
+}
+
+/// Dedicated HTTP inbound (HTTP CONNECT + absolute-URI GET/POST/…).
+/// Mirrors clash-rs `HttpInbound`: TCP only, no SOCKS framing.
+pub async fn run_http(
+    port: u16,
+    bind_address: String,
+    router: Arc<Router>,
+    outbounds: Arc<OutboundManager>,
+) -> Result<()> {
+    run_listener(
+        "http",
+        "http (CONNECT + absolute-URI)",
+        port,
+        bind_address,
+        router,
+        outbounds,
+        Mode::Http,
+    )
+    .await
+}
+
+/// Dedicated SOCKS inbound (SOCKS4 / SOCKS4a / SOCKS5 TCP + SOCKS5 UDP ASSOCIATE).
+/// Mirrors clash-rs `SocksInbound`.
+pub async fn run_socks(
+    port: u16,
+    bind_address: String,
+    router: Arc<Router>,
+    outbounds: Arc<OutboundManager>,
+) -> Result<()> {
+    run_listener(
+        "socks",
+        "socks (SOCKS4/4a/5, TCP/UDP)",
+        port,
+        bind_address,
+        router,
+        outbounds,
+        Mode::Socks,
+    )
+    .await
+}
+
+async fn run_listener(
+    name: &'static str,
+    log_label: &'static str,
+    port: u16,
+    bind_address: String,
+    router: Arc<Router>,
+    outbounds: Arc<OutboundManager>,
+    mode: Mode,
+) -> Result<()> {
     let mut handles = Vec::new();
     for bind in crate::app::sockopt::listen_addrs(&bind_address, port) {
         match crate::app::sockopt::bind_tcp_listener(bind) {
             Ok((listener, bind)) => {
-                tracing::info!("mixed (HTTP+SOCKS4/4a/5, TCP/UDP) listening on {}", bind);
+                tracing::info!("{log_label} listening on {bind}");
                 let router = router.clone();
                 let outbounds = outbounds.clone();
                 handles.push(tokio::spawn(async move {
@@ -32,48 +107,73 @@ pub async fn run_mixed(
                         let (stream, peer) = match listener.accept().await {
                             Ok((s, p)) => (s, crate::app::sockopt::canonical(p)),
                             Err(e) => {
-                                tracing::warn!("mixed accept: {e}");
+                                tracing::warn!("{name} accept: {e}");
                                 continue;
                             }
                         };
                         let router = router.clone();
                         let outbounds = outbounds.clone();
                         tokio::spawn(async move {
-                            if let Err(e) = handle_client(stream, peer, router, outbounds).await {
-                                tracing::debug!("mixed client {}: {}", peer, e);
+                            if let Err(e) =
+                                handle_client(mode, stream, peer, router, outbounds).await
+                            {
+                                tracing::debug!("{name} client {peer}: {e}");
                             }
                         });
                     }
                 }));
             }
-            Err(e) => tracing::warn!("mixed bind {}: {e}", bind),
+            Err(e) => tracing::warn!("{name} bind {bind}: {e}"),
         }
     }
     if handles.is_empty() {
-        anyhow::bail!("mixed: no bind succeeded");
+        anyhow::bail!("{name}: no bind succeeded");
     }
     futures::future::join_all(handles).await;
     Ok(())
 }
 
 async fn handle_client(
+    mode: Mode,
     stream: TcpStream,
     peer: SocketAddr,
     router: Arc<Router>,
     outbounds: Arc<OutboundManager>,
 ) -> Result<()> {
     stream.set_nodelay(true)?;
-    let mut peek = [0u8; 1];
-    let n = stream.peek(&mut peek).await?;
-    if n == 0 {
-        return Ok(());
-    }
-    if peek[0] == 0x05 {
-        handle_socks5(stream, peer, router, outbounds).await
-    } else if peek[0] == 0x04 {
-        handle_socks4(stream, peer, router, outbounds).await
-    } else {
-        handle_http(stream, peer, router, outbounds).await
+    // Connection-tracker `inbound` label reflects the *listener*, not the wire
+    // protocol: mixed-port → "mixed"; http-port → "http"; socks-port → "socks5"/"socks4".
+    match mode {
+        Mode::Http => handle_http(stream, peer, router, outbounds, "http").await,
+        Mode::Socks => {
+            let mut peek = [0u8; 1];
+            let n = stream.peek(&mut peek).await?;
+            if n == 0 {
+                return Ok(());
+            }
+            if peek[0] == 0x05 {
+                handle_socks5(stream, peer, router, outbounds, "socks5").await
+            } else if peek[0] == 0x04 {
+                handle_socks4(stream, peer, router, outbounds, "socks4").await
+            } else {
+                bail!("socks inbound: expected SOCKS4/5, got 0x{:02x}", peek[0]);
+            }
+        }
+        Mode::Mixed => {
+            let mut peek = [0u8; 1];
+            let n = stream.peek(&mut peek).await?;
+            if n == 0 {
+                return Ok(());
+            }
+            // Always tag as "mixed" so the connections page shows the listener name.
+            if peek[0] == 0x05 {
+                handle_socks5(stream, peer, router, outbounds, "mixed").await
+            } else if peek[0] == 0x04 {
+                handle_socks4(stream, peer, router, outbounds, "mixed").await
+            } else {
+                handle_http(stream, peer, router, outbounds, "mixed").await
+            }
+        }
     }
 }
 
@@ -82,6 +182,7 @@ async fn handle_socks5(
     peer: SocketAddr,
     router: Arc<Router>,
     outbounds: Arc<OutboundManager>,
+    inbound: &'static str,
 ) -> Result<()> {
     let mut buf = [0u8; 2];
     stream.read_exact(&mut buf).await?;
@@ -107,7 +208,7 @@ async fn handle_socks5(
             stream
                 .write_all(&[0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
                 .await?;
-            serve_connect(stream, peer, router, outbounds, host, port, dest_ip, "socks5").await
+            serve_connect(stream, peer, router, outbounds, host, port, dest_ip, inbound).await
         }
         0x03 => {
             let bind = if peer.is_ipv6() {
@@ -280,6 +381,7 @@ async fn handle_socks4(
     peer: SocketAddr,
     router: Arc<Router>,
     outbounds: Arc<OutboundManager>,
+    inbound: &'static str,
 ) -> Result<()> {
     let req = read_socks4_request(&mut stream).await?;
     if req.cmd != S4_CMD_CONNECT {
@@ -293,7 +395,7 @@ async fn handle_socks4(
         Some(d) => (d, None),
         None => (req.ip.to_string(), Some(IpAddr::V4(req.ip))),
     };
-    serve_connect(stream, peer, router, outbounds, host, req.port, dest_ip, "socks4").await
+    serve_connect(stream, peer, router, outbounds, host, req.port, dest_ip, inbound).await
 }
 
 async fn socks5_udp_relay(
@@ -466,6 +568,7 @@ async fn handle_http(
     peer: SocketAddr,
     router: Arc<Router>,
     outbounds: Arc<OutboundManager>,
+    inbound: &'static str,
 ) -> Result<()> {
     let mut buf = Vec::with_capacity(4096);
     let mut tmp = [0u8; 1024];
@@ -524,13 +627,13 @@ async fn handle_http(
             return Ok(());
         }
 
-        tracing::debug!("http CONNECT {} → {:?} via {:?}", target, decided.host, decided.outbound);
+        tracing::debug!("{inbound} CONNECT {} → {:?} via {:?}", target, decided.host, decided.outbound);
         let _conn = crate::app::stats::global().register(crate::app::stats::ConnectionInfo {
             peer,
             dest: decided.addr,
             dest_host: decided.host.clone(),
             network: "tcp",
-            inbound: "http",
+            inbound,
             rule: decided.rule.clone(),
             outbound: decided.outbound.label(),
         });
@@ -576,7 +679,7 @@ async fn handle_http(
             dest: decided.addr,
             dest_host: decided.host.clone(),
             network: "tcp",
-            inbound: "http",
+            inbound,
             rule: decided.rule.clone(),
             outbound: decided.outbound.label(),
         });
