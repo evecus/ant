@@ -152,25 +152,57 @@ fn apply_unicast_if(sock: &Socket, is_v4: bool) {
     }
 }
 
-/// `::` (or empty) is a single dual-stack IPv6 socket (IPV6_V6ONLY=0) that
-/// accepts both IPv4 and IPv6, so it is bound exactly once; binding `0.0.0.0`
-/// as well would make the `[::]` bind fail with EADDRINUSE.
-/// `0.0.0.0` v4 external, `127.0.0.1` localhost v4+v6.
-pub fn listen_addrs(bind: &str, port: u16) -> Vec<SocketAddr> {
+/// Resolve listen addresses from `bind-address` + top-level `ipv6`.
+///
+/// `bind` is restricted to `0.0.0.0` / `127.0.0.1` (validated in config).
+/// - `ipv6 = true`: dual-stack via a single `[::]` socket (IPV6_V6ONLY=0) for
+///   LAN binds, or `127.0.0.1` + `::1` for loopback.
+/// - `ipv6 = false`: IPv4 only.
+pub fn listen_addrs(bind: &str, port: u16, ipv6: bool) -> Vec<SocketAddr> {
     let dual = || vec![SocketAddr::from(([0u16; 8], port))];
     match bind.trim() {
-        "" | "::" | "[::]" => dual(),
-        "0.0.0.0" => vec![SocketAddr::from(([0, 0, 0, 0], port))],
-        "127.0.0.1" | "localhost" => vec![
-            SocketAddr::from(([127, 0, 0, 1], port)),
-            SocketAddr::from(([0, 0, 0, 0, 0, 0, 0, 1], port)),
-        ],
-        other => {
-            if let Ok(ip) = other.parse() {
-                vec![SocketAddr::new(ip, port)]
-            } else {
-                tracing::warn!("unknown bind-address {other}, using dual-stack");
+        "0.0.0.0" | "" => {
+            if ipv6 {
                 dual()
+            } else {
+                vec![SocketAddr::from(([0, 0, 0, 0], port))]
+            }
+        }
+        "127.0.0.1" | "localhost" => {
+            if ipv6 {
+                vec![
+                    SocketAddr::from(([127, 0, 0, 1], port)),
+                    SocketAddr::from(([0, 0, 0, 0, 0, 0, 0, 1], port)),
+                ]
+            } else {
+                vec![SocketAddr::from(([127, 0, 0, 1], port))]
+            }
+        }
+        // Legacy values kept for best-effort compatibility.
+        "::" | "[::]" => {
+            if ipv6 {
+                dual()
+            } else {
+                vec![SocketAddr::from(([0, 0, 0, 0], port))]
+            }
+        }
+        other => {
+            if let Ok(ip) = other.parse::<std::net::IpAddr>() {
+                if !ipv6 && ip.is_ipv6() {
+                    tracing::warn!(
+                        "bind-address {other} is IPv6 but top-level ipv6=false; falling back to 0.0.0.0"
+                    );
+                    vec![SocketAddr::from(([0, 0, 0, 0], port))]
+                } else {
+                    vec![SocketAddr::new(ip, port)]
+                }
+            } else {
+                tracing::warn!("unknown bind-address {other}, using dual-stack={ipv6}");
+                if ipv6 {
+                    dual()
+                } else {
+                    vec![SocketAddr::from(([0, 0, 0, 0], port))]
+                }
             }
         }
     }

@@ -351,14 +351,8 @@ fn bind_is_lan(bind: &str) -> bool {
     !(b == "127.0.0.1" || b == "::1" || b.eq_ignore_ascii_case("localhost"))
 }
 
-fn bind_has_ipv6(bind: &str) -> bool {
-    let b = bind.trim();
-    // Explicit IPv4-only binds.
-    if b == "0.0.0.0" || b == "127.0.0.1" {
-        return false;
-    }
-    // :: / ::1 / dual-stack or any IPv6 literal.
-    b.contains(':')
+fn effective_ipv6(c: &crate::config::Config) -> bool {
+    c.global.ipv6
 }
 
 fn build_info() -> serde_json::Value {
@@ -411,7 +405,7 @@ fn build_info() -> serde_json::Value {
         "dns_port": if c.dns.enable { serde_json::json!(c.dns.listen_port()) } else { serde_json::Value::Null },
         "bind_address": bind,
         "lan": bind_is_lan(bind),
-        "ipv6": bind_has_ipv6(bind),
+        "ipv6": effective_ipv6(c),
         "tun_enable": c.tun.enable,
         "rule_providers": rule_providers,
         "route": c.route,

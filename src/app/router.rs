@@ -85,7 +85,10 @@ pub struct Router {
     )]
     hijack_dns: bool,
     dns_route: DnsRoute,
+    /// Effective DNS IPv6 (global.ipv6 && dns.ipv6 && dns.enable).
     ipv6: bool,
+    /// Top-level `ipv6` flag (controls ruleset IP loading and listen dual-stack).
+    global_ipv6: bool,
     dns_cache: Option<Arc<DnsCache>>,
 }
 
@@ -103,7 +106,16 @@ impl Router {
         cache: Option<Arc<crate::cache::AppCache>>,
     ) -> Result<Arc<Self>> {
         let ruleset_list = cfg.ruleset_list(base_dir)?;
-        let rulesets = ruleset::load_all_providers(&ruleset_list, cache.as_deref()).await?;
+        let mut rulesets = ruleset::load_all_providers(&ruleset_list, cache.as_deref()).await?;
+        // Top-level ipv6=false → drop all IPv6 CIDRs from every ruleset so
+        // IP matching is IPv4-only.
+        let global_ipv6 = cfg.global.ipv6;
+        if !global_ipv6 {
+            for (name, rs) in rulesets.iter_mut() {
+                rs.drop_ipv6();
+                tracing::info!("ruleset `{name}`: IPv6 CIDRs dropped (ipv6=false)");
+            }
+        }
         for name in rulesets.keys() {
             tracing::info!("ruleset `{name}` ready");
         }
@@ -132,7 +144,8 @@ impl Router {
         // DNS 模块总开关：无 `dns:` 块或 enable=false → 完全不启用
         // （无监听、无劫持、无 fakeip/缓存；内部解析走系统 resolver）。
         let dns_enabled = cfg.dns.enable;
-        let ipv6 = dns_enabled && cfg.dns.ipv6;
+        // Effective DNS IPv6 requires both top-level ipv6 and dns.ipv6.
+        let ipv6 = dns_enabled && global_ipv6 && cfg.dns.ipv6;
         let fakeip = dns_enabled && cfg.dns.mode == "fakeip";
         // Persist DNS/FakeIP only when top-level `cache: true` and redb is open.
         let persist_store: Option<Arc<crate::cache::AppCache>> =
@@ -246,6 +259,7 @@ impl Router {
             hijack_dns: dns_enabled && cfg.dns.route_hijack,
             dns_route,
             ipv6,
+            global_ipv6,
             dns_cache,
         }))
     }
@@ -342,7 +356,11 @@ impl Router {
     }
 
     /// Replace a loaded ruleset (used by remote auto-update).
-    pub fn replace_ruleset(&self, name: &str, rs: RuleSet) {
+    /// When top-level `ipv6=false`, IPv6 CIDRs are stripped before insertion.
+    pub fn replace_ruleset(&self, name: &str, mut rs: RuleSet) {
+        if !self.global_ipv6 {
+            rs.drop_ipv6();
+        }
         if let Ok(mut g) = self.rulesets.write() {
             g.insert(name.to_string(), rs);
             tracing::info!(name, "ruleset hot-reloaded");
@@ -654,6 +672,7 @@ mod tests {
                 proxy: DnsAction::Upstream(parse_nameserver("223.5.5.5:53").unwrap()),
             },
             ipv6: true,
+            global_ipv6: true,
             dns_cache: None,
         }
     }
@@ -714,6 +733,7 @@ mod tests {
                 (crate::config::RuleKind::Match, DnsAction::Block),
             ]),
             ipv6: true,
+            global_ipv6: true,
             dns_cache: None,
         };
         match r.dns_action_for_domain("www.baidu.cn") {
@@ -755,6 +775,7 @@ mod tests {
                 proxy: DnsAction::Upstream(parse_nameserver("8.8.8.8:53").unwrap()),
             },
             ipv6: true,
+            global_ipv6: true,
             dns_cache: None,
         };
         // route 出站 block → None（rcode://success）
