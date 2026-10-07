@@ -102,6 +102,7 @@ impl OutboundDialer for BlockOutbound {
     }
 }
 
+#[cfg_attr(not(feature = "api"), allow(dead_code))]
 pub struct OutboundManager {
     direct: Arc<DirectOutbound>,
     /// Proxy nodes + proxy-groups by name.
@@ -254,6 +255,7 @@ impl OutboundManager {
     /// Snapshot of every proxy-group for GET /proxies.
     /// Appends a synthetic `GLOBAL` group (all proxy nodes + DIRECT) for the
     /// dashboard so nodes outside any proxy-group can still be listed / latency-tested.
+    #[cfg_attr(not(feature = "api"), allow(dead_code))]
     pub fn group_status(&self) -> Vec<group::GroupStatus> {
         let mut list = self.group_list.read().unwrap().clone();
         // Refresh `now` for select groups from live handles.
@@ -277,11 +279,13 @@ impl OutboundManager {
         list
     }
 
+    #[cfg_attr(not(feature = "api"), allow(dead_code))]
     pub fn node_names(&self) -> &[String] {
         &self.node_names
     }
 
     /// Switch a `select` group to `member`.
+    #[cfg_attr(not(feature = "api"), allow(dead_code))]
     pub fn set_group(&self, group: &str, member: &str) -> Result<()> {
         for h in &self.selects {
             if h.group_name().eq_ignore_ascii_case(group) {
@@ -299,6 +303,7 @@ impl OutboundManager {
     }
 
     /// Health-check delay in ms for a node or group member name.
+    #[cfg_attr(not(feature = "api"), allow(dead_code))]
     pub async fn delay(&self, name: &str, url: &str) -> Option<u32> {
         let dialer = self.select(Outbound::from_str(name))?;
         group::delay_ms(dialer.as_ref(), url).await

@@ -20,13 +20,15 @@ pub type DialerMap = Arc<RwLock<HashMap<String, Arc<dyn OutboundDialer>>>>;
 pub type ProviderIndex = HashMap<String, Vec<String>>;
 
 #[derive(Clone)]
-pub struct SelectHandle {
+#[cfg_attr(not(feature = "api"), allow(dead_code))]
+struct SelectHandle {
     name: String,
     members: Arc<RwLock<Vec<String>>>,
     selected: Arc<RwLock<String>>,
     cache: Option<Arc<crate::cache::AppCache>>,
 }
 
+#[cfg_attr(not(feature = "api"), allow(dead_code))]
 impl SelectHandle {
     pub fn group_name(&self) -> &str {
         &self.name
@@ -616,6 +618,7 @@ fn parse_http_url(url: &str) -> Option<(String, u16, String)> {
     Some((host, port, path))
 }
 
+#[cfg_attr(not(feature = "api"), allow(dead_code))]
 pub async fn delay_ms(dialer: &dyn OutboundDialer, url: &str) -> Option<u32> {
     probe(dialer, url).await.map(|d| d.as_millis() as u32)
 }
