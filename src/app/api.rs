@@ -125,6 +125,27 @@ async fn handle(
             let list = stats::global().list();
             Ok(json_body(StatusCode::OK, &list))
         }
+        // mihomo-compatible: close all / close one tracked connection.
+        (&Method::DELETE, "/connections") | (&Method::DELETE, "/api/connections") => {
+            let n = stats::global().close_all();
+            Ok(json_body(
+                StatusCode::OK,
+                &serde_json::json!({ "closed": n }),
+            ))
+        }
+        (&Method::DELETE, p)
+            if p.starts_with("/connections/") || p.starts_with("/api/connections/") =>
+        {
+            let id_str = p
+                .trim_start_matches("/api")
+                .trim_start_matches("/connections/")
+                .trim_matches('/');
+            match id_str.parse::<u64>() {
+                Ok(id) if stats::global().close(id) => Ok(json_msg(StatusCode::OK, "closed")),
+                Ok(_) => Ok(json_msg(StatusCode::NOT_FOUND, "connection not found")),
+                Err(_) => Ok(json_msg(StatusCode::BAD_REQUEST, "invalid connection id")),
+            }
+        }
         (&Method::GET, "/proxies") | (&Method::GET, "/api/proxies") => {
             let body = match outbounds() {
                 Some(m) => m.group_status(),

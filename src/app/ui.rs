@@ -219,6 +219,9 @@ pub const UI_HTML: &str = r#"<!DOCTYPE html>
 
   <!-- 2. connections: card list + detail modal -->
   <section id="page-connections" class="page">
+    <div class="actions" style="margin-bottom:12px">
+      <button class="btn" type="button" id="btn-close-all-conn">关闭全部连接</button>
+    </div>
     <div class="conn-list" id="conn-list"></div>
     <div class="empty" id="empty" style="display:none">暂无活动连接</div>
   </section>
@@ -260,6 +263,9 @@ pub const UI_HTML: &str = r#"<!DOCTYPE html>
       <button class="btn close" type="button" id="modal-close">✕</button>
     </div>
     <div class="kv" id="modal-kv"></div>
+    <div class="actions" style="margin-top:14px">
+      <button class="btn primary" type="button" id="btn-close-conn">关闭此连接</button>
+    </div>
   </div>
 </div>
 
@@ -269,6 +275,7 @@ const TEST_URL = 'http://www.gstatic.com/generate_204';
 const DIRECT_TEST_URL = 'http://connect.rom.miui.com/generate_204';
 const delays = {}; // name -> ms | -1 fail | undefined
 let connData = [];  // latest /connections payload (for the detail modal)
+let connModalId = null;
 
 // 带鉴权的 fetch：凭证过期（401）时回到登录页。
 async function api(path, opts) {
@@ -466,6 +473,7 @@ async function refreshConn() {
 function openConnModal(id) {
   const c = connData.find(x => x.id === id);
   if (!c) return;
+  connModalId = id;
   document.getElementById('modal-title').innerHTML =
     `<span class="net ${esc(c.network)}" style="vertical-align:2px;margin-right:8px">${esc(c.network)}</span>${esc(c.dest_host)}`;
   document.getElementById('modal-kv').innerHTML = [
@@ -480,12 +488,36 @@ function openConnModal(id) {
   ].join('');
   document.getElementById('conn-mask').classList.add('open');
 }
-function closeConnModal() { document.getElementById('conn-mask').classList.remove('open'); }
+function closeConnModal() {
+  connModalId = null;
+  document.getElementById('conn-mask').classList.remove('open');
+}
 document.getElementById('modal-close').addEventListener('click', closeConnModal);
 document.getElementById('conn-mask').addEventListener('click', e => {
   if (e.target === e.currentTarget) closeConnModal();
 });
 document.addEventListener('keydown', e => { if (e.key === 'Escape') closeConnModal(); });
+
+document.getElementById('btn-close-all-conn').addEventListener('click', async () => {
+  if (!confirm('关闭全部活动连接？')) return;
+  try {
+    await api('/connections', { method: 'DELETE' });
+    closeConnModal();
+    refreshConn();
+  } catch (e) {
+    alert('关闭失败: ' + e);
+  }
+});
+document.getElementById('btn-close-conn').addEventListener('click', async () => {
+  if (connModalId == null) return;
+  try {
+    await api('/connections/' + connModalId, { method: 'DELETE' });
+    closeConnModal();
+    refreshConn();
+  } catch (e) {
+    alert('关闭失败: ' + e);
+  }
+});
 
 function row(k, v) { return `<div class="k">${esc(k)}</div><div class="v">${v}</div>`; }
 

@@ -1,27 +1,41 @@
-//! Active connection tracker for the API panel.
+//! Active connection tracker for the API panel (mihomo clash-api style).
+//!
+//! Design mirrors mihomo `tunnel/statistic`:
+//! - Each live session is registered (`Join`) and removed on end (`Leave`).
+//! - Removal is driven by `ConnGuard` Drop (normal path) **or** explicit
+//!   `close` / `close_all` (API), which also cancels the session so the
+//!   connection task can exit promptly instead of lingering as a "dead"
+//!   map entry.
+//! - A background sweeper periodically drops any cancelled leftovers so a
+//!   missed Drop cannot leak memory indefinitely.
 //!
 //! Behaviour is controlled by the top-level config key `api-connection-record`
 //! (default **true**):
 //!
-//! - **true** (default / omitted): always record live connections. The map only
-//!   holds currently open sessions; closed connections are removed by `ConnGuard`
-//!   on Drop, so the UI never shows dead connections.
-//! - **false**: opt-in at runtime — entries are only created while the API UI
-//!   (or `/connections`) has been requested recently. Closing the browser stops
-//!   registration within a few seconds and clears the map so memory is released.
+//! - **true** (default / omitted): always record live connections.
+//! - **false**: opt-in while the API UI (or `/connections`) is watched; closing
+//!   the browser stops registration and clears the map.
 
 use portable_atomic::{AtomicBool, AtomicU64};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::Ordering;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use tokio_util::sync::CancellationToken;
 
 /// Keep recording while the panel has been hit within this window (only used
 /// when `api-connection-record: false`).
 /// UI polls every 1.5s, so 8s covers a few missed ticks + tab backgrounding.
 const WATCH_TTL_MS: u64 = 8_000;
+
+/// How often the sweeper reaps cancelled / orphaned entries.
+const SWEEP_INTERVAL: Duration = Duration::from_secs(5);
+
+/// Absolute age after which an entry is force-reaped even if not cancelled
+/// (safety net for tasks that hang without Drop). 30 minutes.
+const MAX_AGE: Duration = Duration::from_secs(30 * 60);
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 /// Set from config (`api-connection-record`). Default true = always record.
@@ -82,12 +96,18 @@ struct Live {
     info: ConnectionInfo,
     start: Instant,
     start_wall: SystemTime,
+    /// Signalled on Leave / force-close so the connection task can exit.
+    cancel: CancellationToken,
+    /// Set when the entry has been left; sweeper uses this as a secondary check.
+    closed: AtomicBool,
 }
 
 pub struct Tracker {
-    map: Mutex<HashMap<u64, Live>>,
+    map: Mutex<HashMap<u64, Arc<Live>>>,
     /// Last time the API panel touched us (unix ms). 0 = never.
     last_watch_ms: AtomicU64,
+    /// Ensure only one background sweeper is spawned.
+    sweeper_started: AtomicBool,
 }
 
 impl Tracker {
@@ -95,6 +115,52 @@ impl Tracker {
         Self {
             map: Mutex::new(HashMap::new()),
             last_watch_ms: AtomicU64::new(0),
+            sweeper_started: AtomicBool::new(false),
+        }
+    }
+
+    fn ensure_sweeper(&self) {
+        if self
+            .sweeper_started
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::Relaxed)
+            .is_err()
+        {
+            return;
+        }
+        let weak: Weak<Tracker> = Arc::downgrade(&global());
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(SWEEP_INTERVAL);
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                tick.tick().await;
+                let Some(t) = weak.upgrade() else { break };
+                t.sweep();
+            }
+        });
+    }
+
+    /// Reap cancelled entries and anything older than MAX_AGE (force-cancel).
+    fn sweep(&self) {
+        let Ok(mut map) = self.map.lock() else {
+            return;
+        };
+        let before = map.len();
+        map.retain(|_, live| {
+            if live.closed.load(Ordering::Relaxed) || live.cancel.is_cancelled() {
+                return false;
+            }
+            if live.start.elapsed() > MAX_AGE {
+                // Hung session: signal cancel so the task can unwind if it is
+                // still running, then drop the map entry to free memory.
+                live.cancel.cancel();
+                live.closed.store(true, Ordering::Relaxed);
+                return false;
+            }
+            true
+        });
+        let removed = before.saturating_sub(map.len());
+        if removed > 0 {
+            tracing::debug!("connection tracker sweep: removed {removed} stale entr(y/ies)");
         }
     }
 
@@ -115,37 +181,46 @@ impl Tracker {
         now_ms().saturating_sub(last) < WATCH_TTL_MS
     }
 
-    /// Register a live connection.
+    /// Register a live connection (`Join` in mihomo terms).
     ///
-    /// - `api-connection-record: true` (default): always records.
-    /// - `false`: only while the panel is being watched; otherwise returns a
-    ///   no-op guard (zero heap growth) and clears any leftover entries.
-    ///
-    /// Closed connections are removed by `ConnGuard` on Drop, so the map only
-    /// ever contains currently open sessions.
+    /// Closed connections are removed by `ConnGuard` on Drop (`Leave`), or by
+    /// `close` / `close_all` / the background sweeper.
     pub fn register(&self, info: ConnectionInfo) -> ConnGuard {
         if !self.is_watching() {
             // Release any leftover entries once the panel is closed (opt-in mode).
             if let Ok(mut map) = self.map.try_lock() {
                 if !map.is_empty() {
+                    for live in map.values() {
+                        live.cancel.cancel();
+                        live.closed.store(true, Ordering::Relaxed);
+                    }
                     map.clear();
                 }
             }
             return ConnGuard {
                 id: 0,
+                cancel: CancellationToken::new(),
                 tracker: global(),
             };
         }
 
+        self.ensure_sweeper();
+
         let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-        let live = Live {
+        let cancel = CancellationToken::new();
+        let live = Arc::new(Live {
             info,
             start: Instant::now(),
             start_wall: SystemTime::now(),
-        };
-        self.map.lock().unwrap().insert(id, live);
+            cancel: cancel.clone(),
+            closed: AtomicBool::new(false),
+        });
+        if let Ok(mut map) = self.map.lock() {
+            map.insert(id, live);
+        }
         ConnGuard {
             id,
+            cancel,
             tracker: global(),
         }
     }
@@ -153,9 +228,16 @@ impl Tracker {
     pub fn list(&self) -> Vec<ConnectionView> {
         // A list request itself counts as watching (relevant for opt-in mode).
         self.touch();
-        let map = self.map.lock().unwrap();
+        // Opportunistic reap so the panel never shows dead rows.
+        self.sweep();
+        let Ok(map) = self.map.lock() else {
+            return Vec::new();
+        };
         let mut out: Vec<_> = map
             .iter()
+            .filter(|(_, live)| {
+                !live.closed.load(Ordering::Relaxed) && !live.cancel.is_cancelled()
+            })
             .map(|(id, live)| {
                 let age = live.start.elapsed();
                 let start_ms = live
@@ -188,22 +270,113 @@ impl Tracker {
         out
     }
 
-    fn unregister(&self, id: u64) {
+    /// Force-close one connection (mihomo `DELETE /connections/{id}`).
+    /// Cancels the session token and removes the map entry immediately.
+    pub fn close(&self, id: u64) -> bool {
+        if id == 0 {
+            return false;
+        }
+        let live = {
+            let Ok(mut map) = self.map.lock() else {
+                return false;
+            };
+            map.remove(&id)
+        };
+        if let Some(live) = live {
+            live.cancel.cancel();
+            live.closed.store(true, Ordering::Relaxed);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Force-close every tracked connection (mihomo `DELETE /connections`).
+    pub fn close_all(&self) -> usize {
+        let entries: Vec<_> = {
+            let Ok(mut map) = self.map.lock() else {
+                return 0;
+            };
+            map.drain().map(|(_, live)| live).collect()
+        };
+        let n = entries.len();
+        for live in entries {
+            live.cancel.cancel();
+            live.closed.store(true, Ordering::Relaxed);
+        }
+        n
+    }
+
+    /// Number of entries currently in the map (including just-cancelled ones
+    /// not yet swept). Useful for diagnostics.
+    pub fn len(&self) -> usize {
+        self.map.lock().map(|m| m.len()).unwrap_or(0)
+    }
+
+    fn leave(&self, id: u64) {
         if id == 0 {
             return;
         }
-        self.map.lock().unwrap().remove(&id);
+        let live = {
+            let Ok(mut map) = self.map.lock() else {
+                return;
+            };
+            map.remove(&id)
+        };
+        if let Some(live) = live {
+            live.cancel.cancel();
+            live.closed.store(true, Ordering::Relaxed);
+        }
     }
 }
 
-/// Drop removes the connection from the live list (no-op when `id == 0`).
+/// Drop removes the connection from the live list (`Leave` in mihomo terms).
+/// Also cancels the session token so any `select!` on `cancelled()` exits.
 pub struct ConnGuard {
     id: u64,
+    cancel: CancellationToken,
     tracker: Arc<Tracker>,
+}
+
+impl ConnGuard {
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+
+    /// Resolves when this connection is force-closed via the API or Leave.
+    pub fn cancelled(&self) -> tokio_util::sync::WaitForCancellationFuture<'_> {
+        self.cancel.cancelled()
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.cancel.is_cancelled()
+    }
+
+    /// Run `fut` until it completes or the connection is cancelled.
+    /// On cancel, returns `Err` with a short message so callers unwind and Drop.
+    pub async fn while_alive<T, E, F>(&self, fut: F) -> Result<T, E>
+    where
+        F: std::future::Future<Output = Result<T, E>>,
+        E: From<std::io::Error>,
+    {
+        if self.id == 0 {
+            // Recording disabled — just run the work.
+            return fut.await;
+        }
+        tokio::select! {
+            r = fut => r,
+            _ = self.cancel.cancelled() => {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::ConnectionAborted,
+                    "connection closed",
+                ).into())
+            }
+        }
+    }
 }
 
 impl Drop for ConnGuard {
     fn drop(&mut self) {
-        self.tracker.unregister(self.id);
+        self.tracker.leave(self.id);
     }
 }
