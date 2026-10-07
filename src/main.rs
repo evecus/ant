@@ -134,7 +134,6 @@ async fn main() -> Result<()> {
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new(&cfg.global.log_level));
     use tracing_subscriber::layer::SubscriberExt;
-    use tracing_subscriber::util::SubscriberInitExt;
     let registry = tracing_subscriber::registry()
         .with(filter)
         .with(

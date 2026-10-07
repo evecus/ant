@@ -3,7 +3,9 @@
 //! Enabled at runtime only when top-level `cache: true` (default false).
 //! Without the `cache` feature, `AppCache` is a no-op stub so call sites compile.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
+#[cfg(feature = "cache")]
+use anyhow::Context;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
