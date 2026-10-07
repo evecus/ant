@@ -405,7 +405,7 @@ fn build_info() -> serde_json::Value {
         "dns_port": if c.dns.enable { serde_json::json!(c.dns.listen_port()) } else { serde_json::Value::Null },
         "bind_address": bind,
         "lan": bind_is_lan(bind),
-        "ipv6": effective_ipv6(c),
+        "ipv6": effective_ipv6(&c),
         "tun_enable": c.tun.enable,
         "rule_providers": rule_providers,
         "route": c.route,
