@@ -8,7 +8,10 @@ mod cache;
 mod config;
 mod dns;
 mod inbound;
-#[cfg(any(target_os = "linux", target_os = "android", target_os = "windows", target_os = "macos"))]
+#[cfg(all(
+    feature = "tun",
+    any(target_os = "linux", target_os = "android", target_os = "windows", target_os = "macos")
+))]
 mod tun;
 mod outbound;
 mod ruleset;
@@ -146,7 +149,10 @@ async fn main() -> Result<()> {
 
     // Resolve SO_MARK (Linux) / route mark bookkeeping. On macOS SO_MARK is a
     // no-op but the value is still stored for logging consistency.
-    #[cfg(any(target_os = "linux", target_os = "android", target_os = "windows", target_os = "macos"))]
+    #[cfg(all(
+        feature = "tun",
+        any(target_os = "linux", target_os = "android", target_os = "windows", target_os = "macos")
+    ))]
     let mark = if cfg.tun.enable {
         let m = tun::marks_resolve(
             cfg.global.mark,
@@ -161,7 +167,10 @@ async fn main() -> Result<()> {
     } else {
         cfg.global.mark
     };
-    #[cfg(not(any(target_os = "linux", target_os = "android", target_os = "windows", target_os = "macos")))]
+    #[cfg(not(all(
+        feature = "tun",
+        any(target_os = "linux", target_os = "android", target_os = "windows", target_os = "macos")
+    )))]
     let mark = cfg.global.mark;
     app::sockopt::set_fwmark(mark);
     let bind = cfg.global.bind_address.clone();
@@ -266,7 +275,10 @@ async fn main() -> Result<()> {
     }
 
     // TUN: Linux / Android / Windows / macOS (system stack + optional OS integration).
-    #[cfg(any(target_os = "linux", target_os = "android", target_os = "windows", target_os = "macos"))]
+    #[cfg(all(
+        feature = "tun",
+        any(target_os = "linux", target_os = "android", target_os = "windows", target_os = "macos")
+    ))]
     if cfg.tun.enable {
         let r = router.clone();
         let o = outbounds.clone();

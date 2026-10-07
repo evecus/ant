@@ -1122,6 +1122,32 @@ pub fn parse_dns_rule_line(line: &str) -> Result<ParsedDnsRule> {
     }
 }
 
+/// Ensure a cargo feature was enabled at compile time. Used by config
+/// validation so misconfigured binaries fail fast with a clear message.
+fn require_feature(what: &str, feature: &str) -> Result<()> {
+    let enabled = match feature {
+        "tuic" => cfg!(feature = "tuic"),
+        "anytls" => cfg!(feature = "anytls"),
+        "naive" => cfg!(feature = "naive"),
+        "shadowquic" => cfg!(feature = "shadowquic"),
+        "vmess" => cfg!(feature = "vmess"),
+        "shadowsocks" => cfg!(feature = "shadowsocks"),
+        "socks" => cfg!(feature = "socks"),
+        "trojan" => cfg!(feature = "trojan"),
+        "wireguard" => cfg!(feature = "wireguard"),
+        "tun" => cfg!(feature = "tun"),
+        _ => false,
+    };
+    if enabled {
+        Ok(())
+    } else {
+        bail!(
+            "`{what}` is not included in this build; \
+             recompile with `--features {feature}` (or `--features full`)"
+        )
+    }
+}
+
 /// Validate a `dns.rules` upstream value: `rcode://success` or a parseable
 /// nameserver URL (udp/tcp/tls/https). Outbound names — reserved words and
 /// `proxies` node names — are rejected (fail-fast).
@@ -1263,6 +1289,7 @@ impl Config {
                 // `tuic` / `anytls` 之前漏了这两个分支，节点会被 `other` 分支当成
                 // 不支持的类型拒掉（尽管 OutboundManager 已经能构造它们）。
                 "tuic" => {
+                    require_feature("tuic", "tuic")?;
                     if p.uuid.as_ref().map(|s| s.is_empty()).unwrap_or(true) {
                         bail!("tuic node `{label}` requires uuid");
                     }
@@ -1271,11 +1298,13 @@ impl Config {
                     }
                 }
                 "anytls" => {
+                    require_feature("anytls", "anytls")?;
                     if p.password.as_ref().map(|s| s.is_empty()).unwrap_or(true) {
                         bail!("anytls node `{label}` requires password");
                     }
                 }
                 "shadowquic" => {
+                    require_feature("shadowquic", "shadowquic")?;
                     // JLS 认证：username(user iv) + password(JLS pwd) 同时参与
                     // QUIC/TLS 层握手，缺任何一个服务端都无法识别。
                     if p.username.as_ref().map(|s| s.is_empty()).unwrap_or(true) {
@@ -1305,6 +1334,7 @@ impl Config {
                     }
                 }
                 "naive" => {
+                    require_feature("naive", "naive")?;
                     // NaiveProxy 必然是 TLS + HTTP/2 CONNECT，且必须有 Basic 认证。
                     if !p.tls {
                         bail!("naive node `{label}`: `tls: false` is invalid (naive is always TLS)");
@@ -1351,6 +1381,7 @@ impl Config {
                     }
                 }
                 "vmess" => {
+                    require_feature("vmess", "vmess")?;
                     if p.uuid
                         .as_ref()
                         .or(p.password.as_ref())
@@ -1377,6 +1408,7 @@ impl Config {
                     }
                 }
                 "trojan" => {
+                    require_feature("trojan", "trojan")?;
                     if p.password.as_ref().map(|s| s.is_empty()).unwrap_or(true) {
                         bail!("trojan node `{label}` requires password");
                     }
@@ -1389,6 +1421,7 @@ impl Config {
                     }
                 }
                 "shadowsocks" | "ss" => {
+                    require_feature("shadowsocks", "shadowsocks")?;
                     if p.password.as_ref().map(|s| s.is_empty()).unwrap_or(true) {
                         bail!("shadowsocks node `{label}` requires password");
                     }
@@ -1400,8 +1433,11 @@ impl Config {
                         .with_context(|| {
                             format!("shadowsocks node `{label}` requires `cipher` (or `method`)")
                         })?;
+                    #[cfg(feature = "shadowsocks")]
                     crate::outbound::validate_ss_method(method)
                         .with_context(|| format!("shadowsocks node `{label}`"))?;
+                    #[cfg(not(feature = "shadowsocks"))]
+                    let _ = method;
                     let net = p.network.to_lowercase();
                     if net != "tcp" && net != "ws" && net != "xhttp" {
                         bail!(
@@ -1414,6 +1450,7 @@ impl Config {
                     }
                 }
                 "socks5" | "socks" | "socks4" | "socks4a" => {
+                    require_feature("socks", "socks")?;
                     if p.server.is_empty() {
                         bail!("socks node `{label}` requires server");
                     }
@@ -1435,6 +1472,7 @@ impl Config {
                     }
                 }
                 "wireguard" => {
+                    require_feature("wireguard", "wireguard")?;
                     use base64::Engine;
                     if p.server.is_empty() {
                         bail!("wireguard node `{label}` requires server");
@@ -1675,6 +1713,11 @@ impl Config {
         }
 
         let known = self.outbound_names();
+
+        // TUN requires the `tun` cargo feature.
+        if self.tun.enable {
+            require_feature("tun", "tun")?;
+        }
 
         // 端口 fail-fast：显式 0 一律拒绝；想关闭某个入站就省略字段。
         if self.global.mixed_port == Some(0) {
