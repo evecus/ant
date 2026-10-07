@@ -168,6 +168,27 @@ Subscription refresh:
 - `subscription-userinfo` response header is parsed into `subscriptionInfo`
   (upload / download / total / expire).
 
+## Proxy providers — share-link support
+
+Subscription payloads (YAML `proxies:` / base64 / share links) are converted with the
+matrix below. Everything maps onto `ProxyConfig` fields that have a real outbound.
+
+| scheme | transport (`?type=`) | TLS |
+|---|---|---|
+| `hysteria2` / `hy2` | — | always TLS; `sni`, `alpn`, `obfs`, `ports`/`mport`, `up`/`down`, `pinSHA256`, `insecure` |
+| `tuic` | — | always TLS; `sni`, `alpn`, `congestion_control`, `pinSHA256` (v5 `uuid:password` only) |
+| `anytls` | — | always TLS; uTLS `fp` (default `chrome`) |
+| `vless` | `tcp` / `ws` / `xhttp` | `security=tls\|xtls\|reality\|none`; REALITY `pbk`+`sid`; `flow=*vision*`; uTLS `fp` (default `chrome`); `sni`, `alpn`, `pcs`/`pinSHA256`, `allowInsecure` |
+| `vmess` | `tcp` / `ws` / `xhttp` | base64 JSON (`tls`, `sni`) **or** Xray AEAD link (`security`, `fp`, …) |
+| `trojan` | `tcp` / `ws` / `xhttp` | always TLS; uTLS `fp` (default `chrome`), `pcs`/`pinSHA256` |
+| `ss` | `tcp` / `ws` / `xhttp` | SIP002 + legacy + AEAD-2022; TLS only when `sni`/`fp` is given |
+| `socks5` / `socks5h` / `socks` | — | — (optional user/pass) |
+| `socks4` / `socks4a` | — | — (USERID only) |
+| `naive` `shadowquic` `wireguard` | — | ant-native formats (no cross-client standard); `wireguard://<base64 JSON>` uses the ant YAML key names |
+
+uTLS `fp`: `chrome` / `firefox` / `safari` / `edge` / `ios` / `android` / `360` / `qq` / `random`
+(`none` disables). REALITY ignores `fp` — its handshake is self-implemented TLS 1.3.
+
 Dashboard (`api:`) at `/ui`: **代理组** · **连接** · **信息**.
 
 Connection list is controlled by top-level `api-connection-record` (default `true`):
@@ -182,10 +203,9 @@ always record live sessions; set to `false` for the old opt-in-while-UI-open beh
 - No hot reload (restart to apply config changes)
 - Rules: only `RULE-SET` and `MATCH` (no DOMAIN-SUFFIX etc. yet)
 - rule-providers: local `file` only
-- proxy-providers share-link parsing: `hysteria2`/`hy2`, `tuic` (v5 `uuid:password`), `anytls`,
-  `vless` (tcp/ws/xhttp, TLS/REALITY), `vmess` (base64 JSON), `trojan` (tcp/ws), `ss` (SIP002 +
-  legacy, AEAD + AEAD-2022), `socks5`; `ssr`, `hysteria` v1, `http`, `wireguard` and `grpc`
-  transports are skipped with a warning
+- proxy-providers share-link parsing: only the schemes/transports ant can actually dial — see the
+  table below. `ssr`, hysteria v1, plain `http` proxy and `grpc` / `httpupgrade` transports have
+  no outbound, so those links are skipped with a warning instead of producing dead nodes
 
 ## License
 

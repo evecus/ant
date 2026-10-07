@@ -13,7 +13,7 @@ mod reality;
 mod shadowsocks;
 mod socks;
 mod trojan;
-mod utls;
+pub(crate) mod utls;
 mod vision;
 mod wg_stack;
 mod wireguard;
@@ -33,6 +33,8 @@ pub use tuic::TuicOutbound;
 pub use vless::VlessOutbound;
 pub use vmess::VmessOutbound;
 pub use wireguard::WireGuardOutbound;
+// uTLS fingerprint name validation, reused by share-link parsing.
+pub use utls::UtlsFingerprint;
 
 use crate::app::router::Outbound;
 use crate::config::{DnsConfig, ProxyConfig, ProxyGroupConfig};

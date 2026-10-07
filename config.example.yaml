@@ -346,8 +346,15 @@ proxies:
 # Payload may be any of:
 #   * a YAML/JSON document with a `proxies:` list (or a bare list of nodes);
 #   * base64 of the above (classic v2rayN subscription blob);
-#   * base64 or plain newline-separated share links
-#     (hysteria2/hy2, tuic, anytls, vless, vmess, trojan, ss, socks5).
+#   * base64 or plain newline-separated share links — every scheme ant can
+#     dial: hysteria2/hy2, tuic, anytls, vless, vmess (base64 JSON or Xray
+#     AEAD link), trojan, ss (SIP002 / legacy / AEAD-2022), socks5, socks4(a),
+#     plus the ant-native naive://, shadowquic:// and wireguard://<base64 JSON>.
+#     Transports: tcp / ws / xhttp (xhttp `mode` = auto|packet-up|stream-up|
+#     stream-one). TLS: sni, alpn, fp (uTLS), pcs/pinSHA256 (cert pin),
+#     allowInsecure; vless also supports security=reality with pbk/sid and
+#     flow=*vision*. Links ant cannot dial (ssr, hysteria v1, grpc, …) are
+#     skipped with a warning instead of dropping the subscription.
 #
 # `interval-time` is **hours and number only** — write `12`, not `12h`/`720m`.
 # `0` or omitted = fetch once (when no cache file exists), then manual only.
