@@ -212,6 +212,30 @@ async fn main() -> Result<()> {
         }));
     }
 
+    if cfg.global.http_port.unwrap_or(0) > 0 {
+        let r = router.clone();
+        let o = outbounds.clone();
+        let port = cfg.global.http_port.unwrap();
+        let bind = bind.clone();
+        handles.push(tokio::spawn(async move {
+            if let Err(e) = inbound::run_http(port, bind, r, o).await {
+                tracing::error!("http inbound exited: {e:#}");
+            }
+        }));
+    }
+
+    if cfg.global.socks_port.unwrap_or(0) > 0 {
+        let r = router.clone();
+        let o = outbounds.clone();
+        let port = cfg.global.socks_port.unwrap();
+        let bind = bind.clone();
+        handles.push(tokio::spawn(async move {
+            if let Err(e) = inbound::run_socks(port, bind, r, o).await {
+                tracing::error!("socks inbound exited: {e:#}");
+            }
+        }));
+    }
+
     // TPROXY / REDIRECT inbounds are Linux/Android-only (netfilter sockopts);
     // excluded from Windows builds at compile time.
     #[cfg(any(target_os = "linux", target_os = "android"))]
@@ -290,7 +314,7 @@ async fn main() -> Result<()> {
 
     if handles.is_empty() {
         anyhow::bail!(
-            "no inbound enabled (set mixed-port / tproxy-port / redir-port / tun.enable / port)"
+            "no inbound enabled (set mixed-port / http-port / socks-port / tproxy-port / redir-port / tun.enable / api / dns.port)"
         );
     }
 
@@ -375,12 +399,14 @@ async fn cmd_check(path: &str, base_dir: Option<&std::path::Path>) -> Result<()>
 
     anyhow::ensure!(
         cfg.global.mixed_port.unwrap_or(0) > 0
+            || cfg.global.http_port.unwrap_or(0) > 0
+            || cfg.global.socks_port.unwrap_or(0) > 0
             || cfg.global.tproxy_port.unwrap_or(0) > 0
             || cfg.global.redir_port.unwrap_or(0) > 0
             || cfg.tun.enable
             || !cfg.global.api.trim().is_empty()
             || (cfg.dns.enable && cfg.dns.listen_port() > 0),
-        "no inbound enabled (set mixed-port / tproxy-port / redir-port / tun.enable / api / dns.port)"
+        "no inbound enabled (set mixed-port / http-port / socks-port / tproxy-port / redir-port / tun.enable / api / dns.port)"
     );
 
     if cfg.dns.enable {
@@ -493,8 +519,10 @@ fn print_summary(cfg: &Config) {
         }
     }
     println!(
-        "  listen mixed-port={} tproxy-port={} redir-port={} api={} sniff={} auth={}",
+        "  listen mixed-port={} http-port={} socks-port={} tproxy-port={} redir-port={} api={} sniff={} auth={}",
         cfg.global.mixed_port.unwrap_or(0),
+        cfg.global.http_port.unwrap_or(0),
+        cfg.global.socks_port.unwrap_or(0),
         cfg.global.tproxy_port.unwrap_or(0),
         cfg.global.redir_port.unwrap_or(0),
         if cfg.global.api.is_empty() {

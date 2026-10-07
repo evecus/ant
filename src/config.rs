@@ -7,7 +7,7 @@ use std::path::PathBuf;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
-    /// Flat top-level keys (mihomo-style): mixed-port, log-level, …
+    /// Flat top-level keys (mihomo-style): mixed-port, http-port, socks-port, log-level, …
     #[serde(flatten)]
     pub global: GlobalConfig,
     /// DNS 模块。整块省略 = 不启用（走系统 DNS）；块内 `enable: false` 同效。
@@ -186,6 +186,15 @@ pub struct GlobalConfig {
     pub tproxy_port: Option<u16>,
     #[serde(default, rename = "mixed-port")]
     pub mixed_port: Option<u16>,
+    /// Dedicated HTTP inbound (CONNECT + absolute-URI). None = disabled.
+    /// Explicit `0` is rejected at validate (omit the field to disable).
+    /// Alias `port` matches mihomo / clash flat config.
+    #[serde(default, rename = "http-port", alias = "port")]
+    pub http_port: Option<u16>,
+    /// Dedicated SOCKS4/4a/5 inbound (TCP + SOCKS5 UDP ASSOCIATE). None = disabled.
+    /// Explicit `0` is rejected at validate (omit the field to disable).
+    #[serde(default, rename = "socks-port", alias = "socks5-port")]
+    pub socks_port: Option<u16>,
     /// None = 入站未启用；显式 `0` 会被校验拒绝（想关闭就省略字段）。
     #[serde(default, rename = "redir-port")]
     #[cfg_attr(
@@ -1578,6 +1587,12 @@ impl Config {
         // 端口 fail-fast：显式 0 一律拒绝；想关闭某个入站就省略字段。
         if self.global.mixed_port == Some(0) {
             bail!("mixed-port cannot be 0; omit the field to disable the inbound");
+        }
+        if self.global.http_port == Some(0) {
+            bail!("http-port cannot be 0; omit the field to disable the inbound");
+        }
+        if self.global.socks_port == Some(0) {
+            bail!("socks-port cannot be 0; omit the field to disable the inbound");
         }
         if self.global.tproxy_port == Some(0) {
             bail!("tproxy-port cannot be 0; omit the field to disable the inbound");
