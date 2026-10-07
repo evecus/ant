@@ -264,6 +264,11 @@ impl RuleSet {
             IpAddr::V6(v6) => self.ipv6.contains(u128::from(v6)),
         }
     }
+
+    /// Drop all IPv6 CIDR ranges (used when top-level `ipv6: false`).
+    pub fn drop_ipv6(&mut self) {
+        self.ipv6 = IpRanges { ranges: Vec::new() };
+    }
 }
 
 /// Suffix match: for "a.b.google.com" check FST for "com.", "com.google.", ...
