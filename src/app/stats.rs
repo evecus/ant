@@ -307,12 +307,6 @@ impl Tracker {
         n
     }
 
-    /// Number of entries currently in the map (including just-cancelled ones
-    /// not yet swept). Useful for diagnostics.
-    pub fn len(&self) -> usize {
-        self.map.lock().map(|m| m.len()).unwrap_or(0)
-    }
-
     fn leave(&self, id: u64) {
         if id == 0 {
             return;
@@ -339,17 +333,9 @@ pub struct ConnGuard {
 }
 
 impl ConnGuard {
-    pub fn id(&self) -> u64 {
-        self.id
-    }
-
     /// Resolves when this connection is force-closed via the API or Leave.
     pub fn cancelled(&self) -> tokio_util::sync::WaitForCancellationFuture<'_> {
         self.cancel.cancelled()
-    }
-
-    pub fn is_cancelled(&self) -> bool {
-        self.cancel.is_cancelled()
     }
 
     /// Run `fut` until it completes or the connection is cancelled.
