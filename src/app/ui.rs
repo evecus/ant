@@ -125,6 +125,14 @@ pub const UI_HTML: &str = r#"<!DOCTYPE html>
   .kv { display:grid; grid-template-columns: 140px 1fr; gap:8px 12px; font-size:13px; }
   .kv .k { color:var(--muted); }
   .kv .v { word-break:break-all; }
+  /* inbound/ports: 2 columns on mobile, auto-fill multi-column on desktop */
+  .pgrid { display:grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap:14px 12px; font-size:13px; }
+  .pgrid .pi { min-width:0; }
+  .pgrid .k { color:var(--muted); font-size:12px; }
+  .pgrid .v { margin-top:2px; word-break:break-all; }
+  @media (min-width:601px) {
+    .pgrid { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap:16px 20px; }
+  }
   .list { margin:0; padding-left:18px; font-size:13px; color:var(--text); }
   .list li { margin:4px 0; }
   .on { color:var(--ok); } .off { color:var(--muted); }
@@ -230,7 +238,7 @@ pub const UI_HTML: &str = r#"<!DOCTYPE html>
   <section id="page-info" class="page">
     <div class="card">
       <h2>入站 / 端口</h2>
-      <div class="kv" id="info-ports"></div>
+      <div class="pgrid" id="info-ports"></div>
     </div>
     <div class="card">
       <h2>规则集 <span class="tag" id="ruleset-count">0</span></h2>
@@ -520,6 +528,7 @@ document.getElementById('btn-close-conn').addEventListener('click', async () => 
 });
 
 function row(k, v) { return `<div class="k">${esc(k)}</div><div class="v">${v}</div>`; }
+function pitem(k, v) { return `<div class="pi"><div class="k">${esc(k)}</div><div class="v">${v}</div></div>`; }
 
 // ── info ─────────────────────────────────────────────────
 function yn(v) { return v ? '<span class="on">开启</span>' : '<span class="off">关闭</span>'; }
@@ -530,15 +539,15 @@ async function refreshInfo() {
     const c = await r.json();
     const dnsPort = c.dns_port == null ? '—' : (c.dns_port || '未监听');
     document.getElementById('info-ports').innerHTML = [
-      row('mixed-port', c.mixed_port || 0),
-      row('http-port', c.http_port || 0),
-      row('socks-port', c.socks_port || 0),
-      row('tproxy-port', c.tproxy_port || 0),
-      row('redir-port', c.redir_port || 0),
-      row('dns-port', dnsPort),
-      row('允许局域网', yn(!!c.lan)),
-      row('IPv6', yn(!!c.ipv6)),
-      row('TUN', yn(!!c.tun_enable)),
+      pitem('mixed-port', c.mixed_port || 0),
+      pitem('http-port', c.http_port || 0),
+      pitem('socks-port', c.socks_port || 0),
+      pitem('tproxy-port', c.tproxy_port || 0),
+      pitem('redir-port', c.redir_port || 0),
+      pitem('dns-port', dnsPort),
+      pitem('允许局域网', yn(!!c.lan)),
+      pitem('IPv6', yn(!!c.ipv6)),
+      pitem('TUN', yn(!!c.tun_enable)),
     ].join('');
     const rs = c.rule_providers || [];
     document.getElementById('ruleset-count').textContent = rs.length;
