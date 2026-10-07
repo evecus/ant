@@ -499,6 +499,8 @@ async function refreshInfo() {
     const dnsPort = c.dns_port == null ? '—' : (c.dns_port || '未监听');
     document.getElementById('info-ports').innerHTML = [
       row('mixed-port', c.mixed_port || 0),
+      row('http-port', c.http_port || 0),
+      row('socks-port', c.socks_port || 0),
       row('tproxy-port', c.tproxy_port || 0),
       row('redir-port', c.redir_port || 0),
       row('dns-port', dnsPort),

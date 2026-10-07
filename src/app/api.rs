@@ -383,6 +383,8 @@ fn build_info() -> serde_json::Value {
     let bind = &c.global.bind_address;
     serde_json::json!({
         "mixed_port": c.global.mixed_port.unwrap_or(0),
+        "http_port": c.global.http_port.unwrap_or(0),
+        "socks_port": c.global.socks_port.unwrap_or(0),
         "tproxy_port": c.global.tproxy_port.unwrap_or(0),
         "redir_port": c.global.redir_port.unwrap_or(0),
         "dns_port": if c.dns.enable { serde_json::json!(c.dns.listen_port()) } else { serde_json::Value::Null },
