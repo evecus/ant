@@ -93,6 +93,7 @@ pub async fn run_socks(
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_listener(
     name: &'static str,
     log_label: &'static str,
