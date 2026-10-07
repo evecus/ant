@@ -373,6 +373,7 @@ mod stub {
     use std::net::SocketAddr;
     use std::sync::Arc;
 
+    #[allow(dead_code)]
     #[derive(Debug, Clone)]
     pub struct ConnectionInfo {
         pub peer: SocketAddr,

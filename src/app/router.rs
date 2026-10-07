@@ -368,6 +368,7 @@ impl Router {
     }
 
     /// Snapshot of loaded rulesets for the API info panel: (name, rule_count).
+    #[cfg_attr(not(feature = "api"), allow(dead_code))]
     pub fn ruleset_stats(&self) -> Vec<(String, usize)> {
         let guard = match self.rulesets.read() {
             Ok(g) => g,
