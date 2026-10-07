@@ -39,8 +39,8 @@ pub struct Config {
 /// Flat `tun:` block. Creates a virtual NIC and runs the system stack.
 /// Optional OS integration: dns-hijack / auto-route / auto-detect-interface /
 /// auto-redirect (Linux) / strict-route — see field docs.
-# Fields are consumed by `src/tun/` which is compiled only with `--features tun`.
-# Without that feature the struct still exists for YAML deserialization + validate.
+// Fields are consumed by src/tun/ which is compiled only with --features tun.
+// Without that feature the struct still exists for YAML deserialization + validate.
 #[cfg_attr(not(feature = "tun"), allow(dead_code))]
 #[derive(Debug, Clone, Deserialize)]
 pub struct TunConfig {
