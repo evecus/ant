@@ -1,38 +1,66 @@
+#[cfg(feature = "anytls")]
 mod anytls;
 mod direct;
 mod group;
 mod ech;
 mod hpke;
 mod hysteria2;
+#[cfg(feature = "naive")]
 mod naive;
+#[cfg(feature = "shadowquic")]
 mod shadowquic;
+#[cfg(feature = "tuic")]
 mod tuic;
 mod vless;
+#[cfg(feature = "vmess")]
 mod vmess;
 mod reality;
+#[cfg(feature = "shadowsocks")]
 mod shadowsocks;
+#[cfg(feature = "socks")]
 mod socks;
+#[cfg(feature = "trojan")]
 mod trojan;
 mod utls;
 mod vision;
+#[cfg(feature = "wireguard")]
 mod wg_stack;
+#[cfg(feature = "wireguard")]
 mod wireguard;
 mod ws;
 mod xhttp;
 mod xhttp_h2;
 
+#[cfg(feature = "anytls")]
 pub use anytls::AnyTlsOutbound;
 pub use direct::DirectOutbound;
 pub use hysteria2::Hysteria2Outbound;
+#[cfg(feature = "naive")]
 pub use naive::NaiveOutbound;
+#[cfg(feature = "shadowsocks")]
 pub use shadowsocks::{validate_method as validate_ss_method, ShadowsocksOutbound};
+#[cfg(feature = "shadowquic")]
 pub use shadowquic::ShadowquicOutbound;
+#[cfg(feature = "socks")]
 pub use socks::SocksOutbound;
+#[cfg(feature = "trojan")]
 pub use trojan::TrojanOutbound;
+#[cfg(feature = "tuic")]
 pub use tuic::TuicOutbound;
 pub use vless::VlessOutbound;
+#[cfg(feature = "vmess")]
 pub use vmess::VmessOutbound;
+#[cfg(feature = "wireguard")]
 pub use wireguard::WireGuardOutbound;
+
+/// Fail-fast when a proxy type was configured but the corresponding cargo
+/// feature was not enabled at compile time.
+fn need_feature(ty: &str, feature: &str) -> anyhow::Error {
+    anyhow::anyhow!(
+        "proxy type `{ty}` is not included in this build; \
+         recompile with `--features {feature}` (or `--features full`)"
+    )
+}
 
 use crate::config::{DnsConfig, ProxyConfig, ProxyGroupConfig};
 use crate::dns::{parse_nameserver, DnsUpstream};
@@ -117,20 +145,10 @@ impl OutboundManager {
         };
         let mut nodes: HashMap<String, Arc<dyn OutboundDialer>> = HashMap::new();
         for cfg in proxies {
-            let dialer: Arc<dyn OutboundDialer> = match cfg.ty.to_lowercase().as_str() {
-                "hysteria2" => Arc::new(Hysteria2Outbound::new(cfg).await?),
-                "tuic" => Arc::new(TuicOutbound::new(cfg).await?),
-                "shadowquic" => Arc::new(ShadowquicOutbound::new(cfg).await?),
-                "anytls" => Arc::new(AnyTlsOutbound::new(cfg)?),
-                "naive" => Arc::new(NaiveOutbound::new(cfg)?),
-                "vless" => Arc::new(VlessOutbound::new_with_ech_dns(cfg, &ech_dns).await?),
-                "vmess" => Arc::new(VmessOutbound::new(cfg)?),
-                "socks5" | "socks" | "socks4" | "socks4a" => Arc::new(SocksOutbound::new(cfg)?),
-                "trojan" => Arc::new(TrojanOutbound::new(cfg)?),
-                "shadowsocks" | "ss" => Arc::new(ShadowsocksOutbound::new(cfg)?),
-                "wireguard" => Arc::new(WireGuardOutbound::new(cfg).await?),
-                other => bail!("unsupported proxy type: {other}"),
-            };
+            let dialer: Arc<dyn OutboundDialer> =
+                build_dialer(cfg, &ech_dns).await.with_context(|| {
+                    format!("build proxy node `{}` ({})", cfg.name, cfg.ty)
+                })?;
             tracing::info!(
                 "proxy node `{}` ({}) = {}:{} ready",
                 cfg.name,
@@ -178,20 +196,10 @@ impl OutboundManager {
             let loaded = load_provider_file(path)?;
             let mut names = Vec::new();
             for cfg in &loaded {
-                let dialer: Arc<dyn OutboundDialer> = match cfg.ty.to_lowercase().as_str() {
-                    "hysteria2" => Arc::new(Hysteria2Outbound::new(cfg).await?),
-                    "tuic" => Arc::new(TuicOutbound::new(cfg).await?),
-                    "shadowquic" => Arc::new(ShadowquicOutbound::new(cfg).await?),
-                    "anytls" => Arc::new(AnyTlsOutbound::new(cfg)?),
-                    "naive" => Arc::new(NaiveOutbound::new(cfg)?),
-                    "vless" => Arc::new(VlessOutbound::new_with_ech_dns(cfg, &ech_dns).await?),
-                    "vmess" => Arc::new(VmessOutbound::new(cfg)?),
-                    "socks5" | "socks" | "socks4" | "socks4a" => Arc::new(SocksOutbound::new(cfg)?),
-                    "trojan" => Arc::new(TrojanOutbound::new(cfg)?),
-                    "shadowsocks" | "ss" => Arc::new(ShadowsocksOutbound::new(cfg)?),
-                    "wireguard" => Arc::new(WireGuardOutbound::new(cfg).await?),
-                    other => bail!("provider `{pname}`: unsupported proxy type: {other}"),
-                };
+                let dialer: Arc<dyn OutboundDialer> =
+                    build_dialer(cfg, &ech_dns).await.with_context(|| {
+                        format!("provider `{pname}` node `{}` ({})", cfg.name, cfg.ty)
+                    })?;
                 tracing::info!(
                     "provider `{pname}` node `{}` ({}) ready",
                     cfg.name,
@@ -316,6 +324,58 @@ impl OutboundManager {
     }
 }
 
+
+/// Construct an outbound dialer for a single proxy node, honouring compile-time
+/// features. Core types (`hysteria2`, `vless`) are always available.
+async fn build_dialer(
+    cfg: &ProxyConfig,
+    ech_dns: &[DnsUpstream],
+) -> Result<Arc<dyn OutboundDialer>> {
+    let ty = cfg.ty.to_lowercase();
+    match ty.as_str() {
+        "hysteria2" => Ok(Arc::new(Hysteria2Outbound::new(cfg).await?)),
+        "vless" => Ok(Arc::new(
+            VlessOutbound::new_with_ech_dns(cfg, ech_dns).await?,
+        )),
+        #[cfg(feature = "tuic")]
+        "tuic" => Ok(Arc::new(TuicOutbound::new(cfg).await?)),
+        #[cfg(not(feature = "tuic"))]
+        "tuic" => Err(need_feature("tuic", "tuic")),
+        #[cfg(feature = "shadowquic")]
+        "shadowquic" => Ok(Arc::new(ShadowquicOutbound::new(cfg).await?)),
+        #[cfg(not(feature = "shadowquic"))]
+        "shadowquic" => Err(need_feature("shadowquic", "shadowquic")),
+        #[cfg(feature = "anytls")]
+        "anytls" => Ok(Arc::new(AnyTlsOutbound::new(cfg)?)),
+        #[cfg(not(feature = "anytls"))]
+        "anytls" => Err(need_feature("anytls", "anytls")),
+        #[cfg(feature = "naive")]
+        "naive" => Ok(Arc::new(NaiveOutbound::new(cfg)?)),
+        #[cfg(not(feature = "naive"))]
+        "naive" => Err(need_feature("naive", "naive")),
+        #[cfg(feature = "vmess")]
+        "vmess" => Ok(Arc::new(VmessOutbound::new(cfg)?)),
+        #[cfg(not(feature = "vmess"))]
+        "vmess" => Err(need_feature("vmess", "vmess")),
+        #[cfg(feature = "socks")]
+        "socks5" | "socks" | "socks4" | "socks4a" => Ok(Arc::new(SocksOutbound::new(cfg)?)),
+        #[cfg(not(feature = "socks"))]
+        "socks5" | "socks" | "socks4" | "socks4a" => Err(need_feature(&ty, "socks")),
+        #[cfg(feature = "trojan")]
+        "trojan" => Ok(Arc::new(TrojanOutbound::new(cfg)?)),
+        #[cfg(not(feature = "trojan"))]
+        "trojan" => Err(need_feature("trojan", "trojan")),
+        #[cfg(feature = "shadowsocks")]
+        "shadowsocks" | "ss" => Ok(Arc::new(ShadowsocksOutbound::new(cfg)?)),
+        #[cfg(not(feature = "shadowsocks"))]
+        "shadowsocks" | "ss" => Err(need_feature(&ty, "shadowsocks")),
+        #[cfg(feature = "wireguard")]
+        "wireguard" => Ok(Arc::new(WireGuardOutbound::new(cfg).await?)),
+        #[cfg(not(feature = "wireguard"))]
+        "wireguard" => Err(need_feature("wireguard", "wireguard")),
+        other => bail!("unsupported proxy type: {other}"),
+    }
+}
 
 pub async fn relay(mut a: BoxedStream, mut b: BoxedStream) -> Result<()> {
     match tokio::io::copy_bidirectional(&mut a, &mut b).await {
