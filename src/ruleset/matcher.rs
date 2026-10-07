@@ -79,6 +79,7 @@ pub struct RuleSet {
     #[allow(dead_code)]
     pub name: String,
     /// Approximate number of rules loaded (domains + suffixes + keywords + regexes + CIDRs).
+    #[cfg_attr(not(feature = "api"), allow(dead_code))]
     pub rule_count: usize,
     domain_exact: Option<Set<Arc<[u8]>>>,
     domain_suffix: Option<Set<Arc<[u8]>>>,
