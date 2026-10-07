@@ -21,7 +21,7 @@ pub type ProviderIndex = HashMap<String, Vec<String>>;
 
 #[derive(Clone)]
 #[cfg_attr(not(feature = "api"), allow(dead_code))]
-struct SelectHandle {
+pub(crate) struct SelectHandle {
     name: String,
     members: Arc<RwLock<Vec<String>>>,
     selected: Arc<RwLock<String>>,
