@@ -43,7 +43,8 @@ fn apply_mark(sock: &Socket) {
 fn apply_bind_iface(sock: &Socket) {
     // Force outbound onto the physical default interface so packets do not
     // re-enter TUN when auto-route / auto-detect-interface is on.
-    #[cfg(any(target_os = "linux", target_os = "android"))]
+    // Only active when the `tun` feature is compiled in.
+    #[cfg(all(feature = "tun", any(target_os = "linux", target_os = "android")))]
     {
         if let Some(name) = crate::tun::bind_interface() {
             // socket2 0.5: bind_device takes Option<&[u8]>
@@ -54,7 +55,7 @@ fn apply_bind_iface(sock: &Socket) {
     }
     // macOS: IP_BOUND_IF / IPV6_BOUND_IF (no SO_BINDTODEVICE).
     // mihomo / sing-box use the same approach for loop prevention.
-    #[cfg(target_os = "macos")]
+    #[cfg(all(feature = "tun", target_os = "macos"))]
     {
         use std::ffi::CString;
         use std::os::fd::AsRawFd;
@@ -102,10 +103,9 @@ fn apply_bind_iface(sock: &Socket) {
             }
         }
     }
-    #[cfg(not(any(
-        target_os = "linux",
-        target_os = "android",
-        target_os = "macos"
+    #[cfg(not(all(
+        feature = "tun",
+        any(target_os = "linux", target_os = "android", target_os = "macos")
     )))]
     let _ = sock;
 }
@@ -121,34 +121,41 @@ fn apply_unicast_if(sock: &Socket, is_v4: bool) {
         setsockopt, IPPROTO_IP, IPPROTO_IPV6, IP_UNICAST_IF, IPV6_UNICAST_IF,
     };
 
-    let Some(idx) = crate::tun::iface::bind_interface_index() else {
-        return;
-    };
-    let s = sock.as_raw_socket() as usize;
-    let rc = if is_v4 {
-        // network byte order (mihomo bind4: BigEndian.PutUint32)
-        let v = idx.to_be_bytes();
-        unsafe {
-            setsockopt(s, IPPROTO_IP, IP_UNICAST_IF, v.as_ptr(), v.len() as i32)
+    #[cfg(feature = "tun")]
+    {
+        let Some(idx) = crate::tun::iface::bind_interface_index() else {
+            return;
+        };
+        let s = sock.as_raw_socket() as usize;
+        let rc = if is_v4 {
+            // network byte order (mihomo bind4: BigEndian.PutUint32)
+            let v = idx.to_be_bytes();
+            unsafe {
+                setsockopt(s, IPPROTO_IP, IP_UNICAST_IF, v.as_ptr(), v.len() as i32)
+            }
+        } else {
+            // host byte order (mihomo bind6: plain SetsockoptInt)
+            let v = idx.to_ne_bytes();
+            unsafe {
+                setsockopt(
+                    s,
+                    IPPROTO_IPV6,
+                    IPV6_UNICAST_IF,
+                    v.as_ptr(),
+                    v.len() as i32,
+                )
+            }
+        };
+        if rc != 0 {
+            tracing::warn!(
+                "tun: IP_UNICAST_IF bind if-index {idx} failed (err={})",
+                std::io::Error::last_os_error()
+            );
         }
-    } else {
-        // host byte order (mihomo bind6: plain SetsockoptInt)
-        let v = idx.to_ne_bytes();
-        unsafe {
-            setsockopt(
-                s,
-                IPPROTO_IPV6,
-                IPV6_UNICAST_IF,
-                v.as_ptr(),
-                v.len() as i32,
-            )
-        }
-    };
-    if rc != 0 {
-        tracing::warn!(
-            "tun: IP_UNICAST_IF bind if-index {idx} failed (err={})",
-            std::io::Error::last_os_error()
-        );
+    }
+    #[cfg(not(feature = "tun"))]
+    {
+        let _ = (sock, is_v4);
     }
 }
 
