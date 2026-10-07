@@ -233,6 +233,7 @@ pub struct GlobalConfig {
     /// 是否常驻记录活跃连接（供 API 面板「连接」页显示）。
     /// - `true`（默认 / 不写）：始终记录当前正在进行的连接；连接结束后自动移除，不会显示死连接。
     /// - `false`：仅在面板打开期间记录（打开 `/ui` 或轮询 `/connections` 后短时生效，关闭后清空）。
+    #[cfg_attr(not(feature = "api"), allow(dead_code))]
     #[serde(default = "default_true", rename = "api-connection-record")]
     pub api_connection_record: bool,
     /// Protocol sniffing (TLS SNI / HTTP Host / QUIC SNI) for domain-based routing.
@@ -249,6 +250,7 @@ pub struct GlobalConfig {
     #[serde(default)]
     pub cache: bool,
     /// Path to the redb file when `cache: true`. Default `cache.db`.
+    #[cfg_attr(not(feature = "cache"), allow(dead_code))]
     #[serde(default = "default_cache_file", rename = "cache-file")]
     pub cache_file: PathBuf,
 }
@@ -1225,6 +1227,7 @@ impl Config {
     }
 
     /// Absolute path for the shared redb cache database.
+    #[cfg_attr(not(feature = "cache"), allow(dead_code))]
     pub fn cache_db_path(&self, base_dir: Option<&std::path::Path>) -> PathBuf {
         let p = &self.global.cache_file;
         if p.is_absolute() {

@@ -189,8 +189,10 @@ mod imp {
     use super::*;
 
     /// No-op stub when the `cache` feature is disabled.
+    #[allow(dead_code)]
     pub struct AppCache;
 
+    #[allow(dead_code)]
     impl AppCache {
         pub fn open(_path: impl AsRef<Path>) -> Result<Arc<Self>> {
             anyhow::bail!(
