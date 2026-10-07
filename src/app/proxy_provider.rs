@@ -10,9 +10,7 @@
 //! Nodes loaded here are merged into the outbound table and can be pulled into
 //! proxy-groups with `use: [provider-name]` / `include-all-providers: true`.
 
-mod link;
-mod parse;
-
+use super::provider_parse as parse;
 use crate::config::{ProxyConfig, ProxyProviderConfig};
 use anyhow::{bail, Context, Result};
 use std::collections::HashMap;

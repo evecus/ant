@@ -33,7 +33,7 @@ pub struct SelectHandle {
     name: String,
     members: Arc<RwLock<Vec<String>>>,
     selected: Arc<RwLock<String>>,
-    cache: Option<Arc<crate::cache::AppCache>>,
+    cache: Option<Arc<crate::app::cache::AppCache>>,
 }
 
 impl SelectHandle {
@@ -415,7 +415,7 @@ pub fn build_groups(
     all_proxy_names: &[String],
     providers: &ProviderIndex,
     addrs: RelayAddrMap,
-    select_cache: Option<Arc<crate::cache::AppCache>>,
+    select_cache: Option<Arc<crate::app::cache::AppCache>>,
 ) -> Result<(Vec<SelectHandle>, Vec<GroupStatus>, Vec<Members>)> {
     let mut selects = Vec::new();
     let mut statuses = Vec::new();

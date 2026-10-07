@@ -6,7 +6,7 @@
 //! 3. base64-encoded newline-separated share links;
 //! 4. plain newline-separated share links.
 
-use super::link;
+use super::provider_link;
 use crate::config::ProxyConfig;
 use anyhow::{bail, Result};
 use regex::Regex;
@@ -31,7 +31,7 @@ fn parse_text(provider: &str, text: &str, depth: usize) -> Result<Vec<ProxyConfi
     }
     // 2) base64 blob (subscription links or an embedded YAML document)
     if depth < 2 {
-        if let Some(decoded) = link::decode_b64(t) {
+        if let Some(decoded) = provider_link::decode_b64(t) {
             if let Ok(list) = parse_text(provider, &decoded, depth + 1) {
                 return Ok(list);
             }
@@ -73,11 +73,11 @@ fn share_links(text: &str) -> Vec<ProxyConfig> {
         if line.is_empty() {
             continue;
         }
-        match link::from_link(line) {
+        match provider_link::from_link(line) {
             Some(c) => out.push(c),
             None => {
                 tracing::warn!(
-                    scheme = link::scheme_of(line),
+                    scheme = provider_link::scheme_of(line),
                     "unsupported share link skipped"
                 );
             }
@@ -207,7 +207,7 @@ mod tests {
             ty: "socks5".into(),
             server: "1.1.1.1".into(),
             port: 1080,
-            ..link::blank()
+            ..provider_link::blank()
         }
     }
 }

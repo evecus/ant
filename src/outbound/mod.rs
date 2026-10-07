@@ -39,7 +39,7 @@ pub use utls::UtlsFingerprint;
 use crate::app::router::Outbound;
 use crate::config::{DnsConfig, ProxyConfig, ProxyGroupConfig};
 use crate::dns::{parse_nameserver, DnsUpstream};
-use crate::proxy_provider::ProxyProviderStore;
+use crate::app::proxy_provider::ProxyProviderStore;
 use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
 use std::collections::{HashMap, HashSet};
@@ -113,7 +113,7 @@ impl OutboundManager {
         groups: &[ProxyGroupConfig],
         providers: Option<Arc<ProxyProviderStore>>,
         dns: Option<&DnsConfig>,
-        select_cache: Option<Arc<crate::cache::AppCache>>,
+        select_cache: Option<Arc<crate::app::cache::AppCache>>,
     ) -> Result<Arc<Self>> {
         // ECH 的 DNS HTTPS RR 查询 upstream 优先级：
         // proxy-nameserver（通常为加密上游）→ dns.nameserver（自定义默认上游）

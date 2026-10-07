@@ -11,7 +11,7 @@ use crate::app::stats;
 use crate::app::ui::{LOGIN_HTML, UI_HTML};
 use crate::config::Config;
 use crate::outbound::OutboundManager;
-use crate::proxy_provider::ProxyProviderStore;
+use crate::app::proxy_provider::ProxyProviderStore;
 use anyhow::{Context, Result};
 use http_body_util::Full;
 use hyper::body::Bytes;

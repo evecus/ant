@@ -1,6 +1,6 @@
 //! DNS response cache with LRU eviction; optional redb persistence when `cache: true`.
 
-use crate::cache::AppCache;
+use crate::app::cache::AppCache;
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};

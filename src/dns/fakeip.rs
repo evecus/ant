@@ -3,7 +3,7 @@
 //! only domains hitting a fakeip-filter ruleset get fake addresses.
 
 use anyhow::{bail, Result};
-use crate::cache::AppCache;
+use crate::app::cache::AppCache;
 use ipnet::IpNet;
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};

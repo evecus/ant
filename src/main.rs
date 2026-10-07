@@ -4,14 +4,12 @@ use std::path::PathBuf;
 use tracing_subscriber::EnvFilter;
 
 mod app;
-mod cache;
 mod config;
 mod dns;
 mod inbound;
 #[cfg(any(target_os = "linux", target_os = "android", target_os = "windows", target_os = "macos"))]
 mod tun;
 mod outbound;
-mod proxy_provider;
 mod ruleset;
 
 use app::router::Router;
@@ -170,7 +168,7 @@ async fn main() -> Result<()> {
     tracing::info!("bind-address={bind} ipv6={ipv6}");
     let cache = if cfg.global.cache {
         let path = cfg.cache_db_path(base_dir.as_deref());
-        match crate::cache::AppCache::open(&path) {
+        match crate::app::cache::AppCache::open(&path) {
             Ok(c) => Some(c),
             Err(e) => {
                 tracing::warn!(error = %e, path = %path.display(), "cache=true but redb open failed");
@@ -194,7 +192,7 @@ async fn main() -> Result<()> {
         None
     } else {
         Some(
-            crate::proxy_provider::ProxyProviderStore::load_all(
+            crate::app::proxy_provider::ProxyProviderStore::load_all(
                 &cfg.proxy_providers,
                 Some(&run_dir),
                 false,
@@ -506,7 +504,7 @@ async fn cmd_check(path: &str, base_dir: Option<&std::path::Path>) -> Result<()>
         None
     } else {
         Some(
-            crate::proxy_provider::ProxyProviderStore::load_all(
+            crate::app::proxy_provider::ProxyProviderStore::load_all(
                 &cfg.proxy_providers,
                 base_dir,
                 true,

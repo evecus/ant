@@ -1,7 +1,7 @@
 //! Load rule-providers from local files, redb cache, or remote HTTP URLs.
 
 use super::{compile_mihomo_ruleset, compile_singbox_json, ProviderBehavior, RuleSet};
-use crate::cache::AppCache;
+use crate::app::cache::AppCache;
 use crate::config::{RulesetConfig, RulesetStorage};
 use anyhow::{bail, Context, Result};
 use std::collections::HashMap;

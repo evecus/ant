@@ -103,7 +103,7 @@ impl Router {
     pub async fn from_config(
         cfg: &Config,
         base_dir: Option<&std::path::Path>,
-        cache: Option<Arc<crate::cache::AppCache>>,
+        cache: Option<Arc<crate::app::cache::AppCache>>,
     ) -> Result<Arc<Self>> {
         let ruleset_list = cfg.ruleset_list(base_dir)?;
         let mut rulesets = ruleset::load_all_providers(&ruleset_list, cache.as_deref()).await?;
@@ -148,7 +148,7 @@ impl Router {
         let ipv6 = dns_enabled && global_ipv6 && cfg.dns.ipv6;
         let fakeip = dns_enabled && cfg.dns.mode == "fakeip";
         // Persist DNS/FakeIP only when top-level `cache: true` and redb is open.
-        let persist_store: Option<Arc<crate::cache::AppCache>> =
+        let persist_store: Option<Arc<crate::app::cache::AppCache>> =
             if cfg.global.cache { cache.clone() } else { None };
 
         let fakeip_pool = if fakeip {
@@ -386,7 +386,7 @@ impl Router {
     pub fn spawn_ruleset_updater(
         self: &Arc<Self>,
         list: Vec<crate::config::RulesetConfig>,
-        cache: Option<Arc<crate::cache::AppCache>>,
+        cache: Option<Arc<crate::app::cache::AppCache>>,
     ) {
         for rs in list {
             if !rs.provider_type.eq_ignore_ascii_case("http") {
