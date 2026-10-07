@@ -1140,6 +1140,8 @@ fn require_feature(what: &str, feature: &str) -> Result<()> {
         "trojan" => cfg!(feature = "trojan"),
         "wireguard" => cfg!(feature = "wireguard"),
         "tun" => cfg!(feature = "tun"),
+        "api" => cfg!(feature = "api"),
+        "cache" => cfg!(feature = "cache"),
         _ => false,
     };
     if enabled {
@@ -1718,9 +1720,15 @@ impl Config {
 
         let known = self.outbound_names();
 
-        // TUN requires the `tun` cargo feature.
+        // TUN / API / cache require matching cargo features.
         if self.tun.enable {
             require_feature("tun", "tun")?;
+        }
+        if !self.global.api.trim().is_empty() {
+            require_feature("api", "api")?;
+        }
+        if self.global.cache {
+            require_feature("cache", "cache")?;
         }
 
         // 端口 fail-fast：显式 0 一律拒绝；想关闭某个入站就省略字段。

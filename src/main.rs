@@ -135,15 +135,23 @@ async fn main() -> Result<()> {
         .unwrap_or_else(|_| EnvFilter::new(&cfg.global.log_level));
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
-    tracing_subscriber::registry()
+    let registry = tracing_subscriber::registry()
         .with(filter)
         .with(
             tracing_subscriber::fmt::layer()
                 .with_ansi(false)
                 .with_writer(std::io::stderr),
-        )
-        .with(app::log_buffer::BufferLayer)
-        .init();
+        );
+    #[cfg(feature = "api")]
+    {
+        use tracing_subscriber::util::SubscriberInitExt;
+        registry.with(app::log_buffer::BufferLayer).init();
+    }
+    #[cfg(not(feature = "api"))]
+    {
+        use tracing_subscriber::util::SubscriberInitExt;
+        registry.init();
+    }
 
     tracing::info!("ant starting, config={}", config_path);
 
@@ -177,13 +185,21 @@ async fn main() -> Result<()> {
     let ipv6 = cfg.global.ipv6;
     tracing::info!("bind-address={bind} ipv6={ipv6}");
     let cache = if cfg.global.cache {
-        let path = cfg.cache_db_path(base_dir.as_deref());
-        match crate::cache::AppCache::open(&path) {
-            Ok(c) => Some(c),
-            Err(e) => {
-                tracing::warn!(error = %e, path = %path.display(), "cache=true but redb open failed");
-                None
+        #[cfg(feature = "cache")]
+        {
+            let path = cfg.cache_db_path(base_dir.as_deref());
+            match crate::cache::AppCache::open(&path) {
+                Ok(c) => Some(c),
+                Err(e) => {
+                    tracing::warn!(error = %e, path = %path.display(), "cache=true but redb open failed");
+                    None
+                }
             }
+        }
+        #[cfg(not(feature = "cache"))]
+        {
+            tracing::warn!("cache=true ignored (build without --features cache)");
+            None
         }
     } else {
         tracing::debug!("cache=false; DNS/FakeIP/select memory-only, rulesets use files");
@@ -204,9 +220,12 @@ async fn main() -> Result<()> {
         select_cache,
     )
     .await?;
-    crate::app::api::set_outbounds(outbounds.clone());
-    crate::app::api::set_router(router.clone());
-    crate::app::api::set_config(cfg.clone());
+    #[cfg(feature = "api")]
+    {
+        crate::app::api::set_outbounds(outbounds.clone());
+        crate::app::api::set_router(router.clone());
+        crate::app::api::set_config(cfg.clone());
+    }
 
     let mut handles = Vec::new();
 
@@ -301,6 +320,7 @@ async fn main() -> Result<()> {
         }
     }
 
+    #[cfg(feature = "api")]
     if !cfg.global.api.trim().is_empty() {
         match app::api::parse_listen(&cfg.global.api) {
             Ok(addr) => {
