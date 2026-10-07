@@ -1,0 +1,151 @@
+[package]
+name = "ant"
+version = "0.1.0"
+edition = "2021"
+description = "Minimal proxy (Linux/macOS/Windows) with Hysteria2/VLESS, YAML config (mihomo-style), binary .ars rulesets"
+license = "MIT"
+repository = "https://github.com/aazz77/ant"
+
+[[bin]]
+name = "ant"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "1.35", features = ["full"] }
+tokio-util = { version = "0.7", features = ["codec", "net", "io"] }
+futures = "0.3"
+async-trait = "0.1"
+bytes = "1"
+anyhow = "1"
+thiserror = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+clap = { version = "4.4", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+socket2 = { version = "0.5", features = ["all"] }
+
+http = "1.0"
+# naive 出站：HTTP/2 CONNECT 隧道
+h2 = "0.4"
+hyper = { version = "1.1", features = ["server", "http1", "http2", "client"] }
+hyper-util = { version = "0.1", features = ["tokio", "server-auto", "client", "client-legacy", "http1", "http2"] }
+tower = { version = "0.5", default-features = false }
+tokio-stream = "0.1"
+http-body-util = "0.1"
+
+rustls = { version = "0.23.5", default-features = false, features = ["std", "tls12", "ring"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+webpki-roots = "0.26"
+quinn = { version = "0.11.7", default-features = false, features = ["runtime-tokio", "rustls", "ring"] }
+
+# shadowquic 出站：JLS（QUIC + TLS 伪装）。shadowquic 用的是 quinn 的 JLS fork
+# (quinn-jls / rustls-jls)，与上面的 quinn 0.11 是不同 crate，可共存；
+# 通过 quinn_jls 别名引用，避免与 tuic/hysteria2 的 quinn 混淆。
+quinn-jls = { version = "0.3.8", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
+# rustls-jls 依赖 rustls-webpki 0.103，对应的根证书 crate 是 webpki-roots 1.x
+# （已有的 webpki-roots 0.26 对应 webpki 0.102，类型不兼容，只能并存）。
+webpki-roots-jls = { package = "webpki-roots", version = "1" }
+
+# binary ruleset (.ars) — same idea as reflex .rrs
+fst = "0.4"
+
+# QUIC 出站（tuic / hysteria2）UDP 会话路由：分片锁，dispatch 路径无全局锁竞争
+
+# AnyTLS 出站：认证 token = md5 系列（RustCrypto 纯 Rust，与 sha2 同族）
+md-5 = "0.10"
+
+# AtomicU64 fallback for 32-bit targets without 64-bit atomics (e.g. mips32/musl);
+# std AtomicU64 alias on everything else.
+portable-atomic = { version = "1", features = ["fallback"] }
+# HPKE (RFC 9180) for rustls client-side ECH — the ring provider ships no HPKE,
+# so we provide one on the same pure-Rust crates as REALITY.
+hkdf = "0.12"
+
+redb = "2.4"
+
+ipnet = "2.9"
+once_cell = "1.19"
+rand = "0.8"
+hex = "0.4"
+ring = "0.17"
+regex = "1.10"
+tokio-tungstenite = { version = "0.24", default-features = false, features = ["handshake"] }
+uuid = { version = "1", features = ["serde", "v4"] }
+base64 = "0.22"
+
+# REALITY TLS (self-implemented TLS 1.3, from reflex)
+aes-gcm = "0.10"
+chacha20poly1305 = "0.10"
+hmac = "0.12"
+sha2 = "0.10"
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+
+# VMess 出站：AES-128-ECB（AuthID）、CRC32（AuthID 校验）、SHAKE128（chunk 长度掩码）
+aes = "0.8"
+crc32fast = "1.4"
+sha3 = "0.10"
+
+# Shadowsocks 出站：HKDF-SHA1 子密钥（传统 AEAD）、BLAKE3 derive_key（AEAD-2022）。
+# blake3 关闭默认 feature（不含 rayon），避免交叉编译到 mipsel/Android 时引入额外依赖。
+sha1 = "0.10"
+blake3 = { version = "1.8.7", default-features = false }
+
+# WireGuard 出站：boringtun（Cloudflare）提供 Noise_IKpsk2 数据面
+# （握手发起/响应、cookie reply、会话轮换、keepalive/重传定时器），仅用 noise 模块，
+# 不开 device feature（不建 TUN，IP 包的进出由我们自己的隧道 task 接管）。
+boringtun = { version = "0.7", default-features = false }
+# 隧道内用户态 TCP/IP 协议栈：dial 出的 TCP/UDP 会话封装成 IP 包进 WG 隧道。
+# feature 对齐 reflex gvisor 栈（medium-ip + v4/v6 + tcp/udp + cubic），
+# 不开 log（ant 无 log crate）、不开 fragmentation（WG MTU + MSS clamp 已防分片）。
+smoltcp = { version = "0.13", default-features = false, features = [
+    "std",
+    "medium-ip",
+    "proto-ipv4",
+    "proto-ipv6",
+    "socket-tcp",
+    "socket-tcp-cubic",
+    "socket-udp",
+] }
+
+# TUN virtual NIC (Linux + Windows via WinTun). async = AsyncDevice.
+tun = { version = "0.8", features = ["async"] }
+
+# Windows OS control plane (sing-tun equivalent): default-interface monitor,
+# IP_UNICAST_IF binding, and WFP strict-route filters.
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.52", features = [
+    "Win32_Foundation",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_NetworkManagement_Ndis",
+    "Win32_NetworkManagement_WindowsFilteringPlatform",
+    "Win32_Networking_WinSock",
+    "Win32_Security",
+    "Win32_System_Rpc",
+] }
+
+# Linux/Android-only: transparent proxy inbounds (tproxy / redir) use netfilter
+# sockopts via libc; etherparse is for raw-packet re-injection in tproxy.
+[target.'cfg(any(target_os = "linux", target_os = "android"))'.dependencies]
+libc = "0.2"
+etherparse = "0.15"
+nftables = "0.6"
+
+# Linux-only OS control plane (sing-tun equivalent): routes/rules via netlink.
+# rtnetlink 0.14 cannot compile on Android (AddressFamily::Bridge references
+# AF_BRIDGE, absent from bionic libc); Android uses external-FD mode where
+# auto-route is force-disabled and netlink is never needed.
+[target.'cfg(target_os = "linux")'.dependencies]
+rtnetlink = "0.14"
+netlink-packet-route = "0.19"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = "symbols"
+debug = false
+
+# macOS TUN: ioctl address/MTU setup (sing-tun tun_darwin.go equivalent)
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"

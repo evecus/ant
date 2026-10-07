@@ -1,0 +1,429 @@
+# ant example config — mihomo-style YAML
+# Rule-providers: binary `.ars` or plaintext (yaml/json/list/text).
+# Optional offline convert: ant ruleset-convert -i in.yaml -o out.ars
+
+log-level: info
+
+# Global persistent cache (redb). Default false.
+# cache: false
+# cache-file: cache.db
+# mark: 255
+# bind-address: "::"  # :: | 0.0.0.0 | 127.0.0.1
+# Dashboard: 代理组 / 连接 / 信息  — http://ip:9095/ui
+api: "127.0.0.1:9095"
+# api-secret: "your-password"  # 面板访问密码（类似 clash-api secret，但只输密码）。
+#                              # 配置后打开 /ui 需先登录，成功后浏览器保存凭证，
+#                              # 后续访问无需再输；也可用 `Authorization: Bearer <token>`
+#                              # 之外的方式——API 客户端可 POST /login 换取 Cookie。
+# api-connection-record: true  # 是否常驻记录活跃连接（默认 true）。
+#                              # true / 不写：始终记录当前正在进行的连接，结束后自动移除，不显示死连接。
+#                              # false：仅在面板打开期间记录（省内存，关闭面板后清空）。
+tproxy-port: 7878
+mixed-port: 7898
+# Dedicated HTTP / SOCKS inbounds (mihomo / clash compatible). Omit to disable.
+# http-port: 7890          # or top-level `port:` (alias)
+# socks-port: 7891         # SOCKS4/4a/5 + SOCKS5 UDP ASSOCIATE
+redir-port: 7892
+# 注意：所有入站端口显式配置 0 会直接校验失败；想关闭某个入站就省略该字段。
+# sniff: true  # sniff TLS SNI / HTTP Host / QUIC for domain routing (default off);
+#              # DNS-query sniffing follows dns.route-hijack independently
+#
+# route-resolve: false
+#   When true, domain hosts are DNS-resolved before matching IP rules / IP
+#   rule-providers. Default false. Per-rule opt-out: append `,no-resolve`.
+
+# TUN virtual NIC (system stack only). Does NOT install routes — you must
+# use auto-route (or point traffic at the device yourself with ip rule/route).
+# Platforms:
+#   Linux:   CAP_NET_ADMIN; auto-route via ip rule/route tables; auto-redirect (nftables).
+#   macOS:   root for utun; auto-route via `route` (split default); auto-detect via `route get`.
+#   Windows: place wintun.dll next to the binary (https://www.wintun.net/); auto-route via netsh + WFP.
+#   Android: root mode — run as root (su -c / magisk module); ant opens /dev/tun itself
+#            and installs auto-route via `ip rule`/`ip route` (rtnetlink is unavailable).
+#            VpnService mode — set file-descriptor / ANT_TUN_FD instead; routing is then
+#            owned by VpnService (auto-route is ignored).
+#
+# External FD (Android VpnService / iOS PacketTunnel — sing-tun FileDescriptor):
+#   file-descriptor: 42          # or env ANT_TUN_FD=42
+#   close-fd-on-drop: true       # default true; false if JNI keeps ownership
+# When file-descriptor / ANT_TUN_FD is set, auto-route / auto-redirect /
+# OS address configuration are skipped (the VPN framework owns them).
+# `address` is still required so the in-process stack knows server/client.
+# tun:
+#   enable: true
+#   device: tun0          # optional; Windows defaults to ant-tun; macOS uses utunX
+#   # file-descriptor: 42 # adopt existing TUN fd (Android VpnService / iOS)
+#   # close-fd-on-drop: true
+#   address:
+#     - 198.18.0.1/30     # need room for addr+1 (client); avoid /32
+#     # - fd00::1/126
+#   mtu: 1500
+#   dns-hijack:           # intercept DNS inside TUN stack → local dns module
+#     - any:53
+#   auto-route: true      # install split-default routes into TUN (all platforms)
+#   auto-detect-interface: true  # bind outbound to physical default NIC (anti-loop)
+#   auto-redirect: false  # Linux only; REQUIRES auto-route (startup fails otherwise;
+#                         # internal listener, no redir-port needed)
+#   strict-route: false   # stronger anti-leak on top of auto-route (Windows WFP; Linux rules)
+#   # route-address:      # custom prefixes instead of 0.0.0.0/1 + 128.0.0.0/1
+#   #   - 0.0.0.0/1
+#   #   - 128.0.0.0/1
+#   # route-exclude-address: []
+#   # iproute2-table-index: 1982   # Linux/Android route table (Android also uses it for `ip rule`)
+#   # iproute2-rule-index: 9000    # Linux; Android defaults to 8000 (below netd's 9000–18000 window)
+#
+# mark omitted → auto 255 when auto-route/redirect/detect-interface is on (Linux).
+# auto-redirect does not need redir-port (internal accept path).
+
+# DNS 模块。整个 `dns:` 块省略 = 不启用 DNS 模块（内部解析走系统 resolver）。
+# 块内也可显式 enable: false 关闭；enable: true（默认）时：
+#   - port 省略 = 不监听 DNS 端口，仅通过 dns.route-hijack / tun dns-hijack
+#     在路由层劫持 53 端口与 DNS 流量应答（此时不需要 dns 端口收流量）；
+#   - port: 0 校验直接拒绝（fail-fast），想不监听就省略字段。
+dns:
+  # enable: true
+  # route-hijack: true  # steal port 53 and sniffed DNS into this module
+  # mode: redir-host | fakeip  (default redir-host)
+  # fakeip-range: "198.18.0.0/15"
+  # fakeip6-range: "fc00::/18"
+  # fakeip-filter: ["cn-domain"]          # rule-provider names deciding fake-ip usage:
+  #                                       #   blacklist mode (default): matched stay real-IP, rest get fake-ip
+  #                                       #   whitelist mode: only matched get fake-ip
+  # fakeip-filter-mode: blacklist         # blacklist (default) | whitelist
+  # ipv6: true   # false: only A / IPv4 fake-ip, no AAAA upstream
+  # cache-size: 4096  # 0 disables; LRU eviction when full
+  port: 5353
+  # bare IP / host:port → UDP; or explicit scheme:
+  #   udp://1.1.1.1:53
+  #   tcp://1.1.1.1:53
+  #   tls://1.1.1.1:853
+  #   https://1.1.1.1/dns-query
+  #   https://cloudflare-dns.com/dns-query
+  # default-nameserver: bootstrap 上游。必须纯 IP（不允许域名），
+  # 仅用于解析其他 nameserver 与节点 server 的域名；启动时不联网，
+  # 解析发生在实际使用点，失败只影响当次查询/拨号并自动重试。
+  default-nameserver: "223.5.5.5:53"
+  # rule-follow-route: true（默认）— DNS 复用顶层 route: 规则匹配域名：
+  #   direct 出站 → direct-nameserver；节点出站 → proxy-nameserver；
+  #   block/reject 出站 → NOERROR 空应答（rcode://success）。
+  #   此模式下 direct-nameserver / proxy-nameserver 必填。
+  rule-follow-route: true
+  direct-nameserver: "223.5.5.5:53"
+  proxy-nameserver: "https://1.1.1.1/dns-query"
+  # rule-follow-route: false — 自定义 DNS 路由（二选一，不能混用）：
+  #   关键字只能大写 RULE-SET / MATCH；第三列只能是 nameserver URL 或
+  #   rcode://success（不能写 direct/block/节点名）；有 rules 时最后一条必须 MATCH。
+  # rules:
+  #   - RULE-SET,cn-domain,udp://223.5.5.5:53
+  #   - RULE-SET,ads,rcode://success
+  #   - MATCH,tls://8.8.8.8:853
+  # 未配置 rules 时，nameserver 作为默认上游（此时必填）：
+  # nameserver: "udp://223.5.5.5:53"
+
+# Multiple nodes under proxies:; each has a unique `name` referenced by route
+# or by proxy-groups. Reserved node names (case-insensitive): direct, block, reject.
+# DNS: domains routed to any node/group resolve via proxy-nameserver;
+# direct-routed domains via direct-nameserver.
+
+proxies:
+  - name: hy2-main
+    type: hysteria2
+    server: example.com
+    port: 443
+    password: your-password
+    sni: example.com
+    alpn: [h3]
+    skip-cert-verify: true
+    # Optional bandwidth limits, e.g. "100 Mbps" or "auto". `up` enables a
+    # Brutal-like BBR initial window; `down` is advertised to the server.
+    # up: "100 Mbps"
+    # down: "300 Mbps"
+
+  # shadowquic (JLS over QUIC): username = JLS user iv, password = JLS password,
+  # sni must equal the server's jls-upstream domain. The QUIC socket carries the
+  # global `mark` / bound interface like every other outbound (no TUN loop).
+  # - name: shadowquic-main
+  #   type: shadowquic
+  #   server: 1.2.3.4
+  #   port: 443
+  #   username: your-username
+  #   password: your-password
+  #   sni: echo.free.beeceptor.com   # must match the server's jls-upstream
+  #   alpn: [h3]
+  #   congestion-control: bbr        # bbr (default) | cubic | new_reno
+  #   # over-stream: false           # UDP over QUIC datagram (default). true =
+  #   #                              # UDP over uni stream (avoid for HTTP/3).
+  #   # zero-rtt: true               # 0-RTT handshake (default true)
+  #   # initial-mtu: 1300            # must be >= min-mtu, both >= 1200
+  #   # min-mtu: 1290
+  #   # heartbeat: 10s               # QUIC keep-alive interval; "off" disables
+
+  # NaiveProxy (HTTP/2 CONNECT over TLS). Requires tls: true, username and
+  # password; ALPN is forced to h2. UDP rides sing UoT v2 over the same
+  # tunnel, so both share one marked socket (no TUN loop).
+  # - name: naive-main
+  #   type: naive
+  #   server: example.com
+  #   port: 443
+  #   username: user
+  #   password: pass
+  #   sni: example.com
+  #   skip-cert-verify: false
+
+  # SOCKS5 upstream (TCP CONNECT + UDP ASSOCIATE). Dial sockets carry the
+  # global `mark` / bound interface like every other outbound (no TUN loop).
+  # Omit username/password for no-auth.
+  - name: socks-up
+    type: socks5
+    server: 127.0.0.1
+    port: 1080
+    # username: user
+    # password: pass
+
+  # SOCKS4 / SOCKS4a upstream (TCP CONNECT only, no UDP). `username` is sent
+  # as USERID; there is no password. `socks4` needs an IPv4 target, so domains
+  # are resolved locally; `socks4a` forwards the domain to the server.
+  # `type: socks` + `version: "4" | "4a" | "5"` is equivalent.
+  # - name: socks4-up
+  #   type: socks4a        # or: socks4
+  #   server: 127.0.0.1
+  #   port: 1080
+  #   # username: userid
+
+  - name: vless-ws
+    type: vless
+    server: 1.2.3.4
+    port: 443
+    uuid: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+    network: ws
+    tls: true
+    sni: example.com
+    ws-path: /path
+    ws-host: example.com
+    # ws-headers:
+    #   User-Agent: Mozilla/5.0
+    skip-cert-verify: false
+
+  # VLESS + REALITY (self-implemented TLS 1.3, ported from reflex).
+  # Any non-empty `reality-public-key` enables REALITY and bypasses rustls.
+  - name: vless-reality
+    type: vless
+    server: 1.2.3.4
+    port: 443
+    uuid: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+    network: tcp
+    tls: true
+    sni: www.cloudflare.com                 # REALITY server_name / camouflage SNI
+    reality-public-key: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx   # server x25519 pub (base64url / hex)
+    reality-short-id: "0123abcd"              # hex, 0~16 chars
+    # alpn: [h2]                              # optional, forwarded to the REALITY ClientHello
+
+  # VLESS + XHTTP (HTTP/1.1 stream-one: chunked POST up, response body down).
+  # Can be combined with REALITY: just add reality-public-key / reality-short-id.
+  - name: vless-xhttp
+    type: vless
+    server: 1.2.3.4
+    port: 443
+    uuid: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+    network: xhttp
+    tls: true
+    sni: example.com
+    xhttp-path: /xhttp
+    xhttp-host: example.com                   # Host header, defaults to SNI
+    xhttp-mode: stream-one                    # auto | stream-one | packet-up | stream-up
+    # xhttp-headers:
+    #   User-Agent: Mozilla/5.0
+    skip-cert-verify: false
+
+  # Trojan outbound. Transports: tcp / ws / xhttp; TLS with optional uTLS
+  # browser fingerprint (`client-fingerprint`). Dial sockets carry the global
+  # `mark` / bound interface like every other outbound (no TUN loop).
+  # UDP works via Trojan UDP-over-TCP.
+  # VMess outbound (AEAD only, alterId = 0). Transports: tcp / ws / xhttp;
+  # TLS with optional uTLS browser fingerprint (`client-fingerprint`).
+  # `cipher`: auto (default) | aes-128-gcm | chacha20-poly1305 | none | zero;
+  # `auto` + tls renders to `zero` (outer TLS already encrypts — sing-box parity).
+  # UDP: one VMess connection per destination (CMD_UDP, one datagram per chunk).
+  - name: vmess-ws
+    type: vmess
+    server: example.com
+    port: 443
+    uuid: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+    network: ws                               # tcp | ws | xhttp
+    tls: true
+    sni: example.com
+    cipher: auto                              # alias: security
+    alter-id: 0                               # AEAD only
+    ws-path: /path
+    ws-host: example.com
+    # client-fingerprint: chrome              # uTLS browser fingerprint (tls: true)
+    # xhttp-path: /xhttp                      # network: xhttp
+    # xhttp-host: example.com
+    # xhttp-mode: auto                        # auto | stream-one | packet-up | stream-up
+    skip-cert-verify: false
+
+  # Shadowsocks outbound. `cipher` (alias: `method`) selects the cipher:
+  #   aes-128-gcm | aes-256-gcm | chacha20-ietf-poly1305
+  #   2022-blake3-aes-128-gcm | 2022-blake3-aes-256-gcm |
+  #   2022-blake3-chacha20-poly1305   (password = base64 PSK, 16/32 bytes)
+  #   none                            (plaintext, testing only)
+  # Transports: tcp / ws / xhttp. Dial sockets carry the global `mark` /
+  # bound interface like every other outbound (no TUN loop).
+  # NOTE: TLS is **off by default** for shadowsocks — even though the shared
+  # `tls` field defaults to true globally, SS only enables TLS when `sni`
+  # (or `servername`) / `client-fingerprint` is given. UDP is native SS UDP
+  # relay and therefore only available with `network: tcp`.
+  - name: ss-tcp
+    type: shadowsocks                         # alias: ss
+    server: example.com
+    port: 8388
+    cipher: aes-256-gcm                       # alias: method
+    password: your-password
+    network: tcp                              # tcp | ws | xhttp
+
+  # Shadowsocks over WebSocket + TLS (+ optional uTLS browser fingerprint).
+  - name: ss-ws
+    type: ss
+    server: example.com
+    port: 443
+    cipher: 2022-blake3-aes-128-gcm
+    password: base64-psk-16-bytes
+    network: ws
+    sni: example.com                          # presence of sni turns TLS on
+    ws-path: /path
+    ws-host: example.com
+    # client-fingerprint: chrome              # uTLS browser fingerprint
+    skip-cert-verify: false
+
+  - name: trojan-tls
+    type: trojan
+    server: example.com
+    port: 443
+    password: your-password
+    network: tcp                              # tcp | ws | xhttp
+    tls: true
+    sni: example.com
+    # client-fingerprint: chrome              # uTLS browser fingerprint (tls: true)
+    # ws-path: /path                          # network: ws
+    # ws-host: example.com
+    # xhttp-path: /xhttp                      # network: xhttp
+    # xhttp-host: example.com
+    # xhttp-mode: auto                        # auto | stream-one | packet-up | stream-up
+    skip-cert-verify: false
+
+# Optional: load extra nodes from a local YAML file (mihomo-style).
+# The file is either a bare list of proxy objects or `{ proxies: [ ... ] }`.
+# proxy-providers:
+#   sub:
+#     type: file
+#     path: ./providers/sub.yaml
+#     # url / interval reserved for future HTTP subscription refresh
+
+# Proxy groups (mihomo-style). Group names are valid route outbounds
+# (same as a proxies node name). Supported types:
+#   select       — manual pick (switch via API /ui or PUT /proxies/{name})
+#   url-test     — lowest latency (periodic probe)
+#   fallback     — first healthy member in list order
+#   load-balance — round-robin | consistent-hashing | sticky-sessions
+#   relay        — exit = last member (dialer-proxy style chain)
+# Membership: `proxies` list, and/or `use: [provider]`, and/or
+# include-all-proxies / include-all-providers. Optional filter / exclude-filter
+# (regex; multiple patterns separated by `).
+proxy-groups:
+  - name: PROXY
+    type: select
+    proxies:
+      - hy2-main
+      - vless-ws
+      - vless-reality
+      - vmess-ws
+      - trojan-tls
+      - socks-up
+      - DIRECT
+    # selected: hy2-main
+
+  - name: AUTO
+    type: url-test
+    proxies:
+      - hy2-main
+      - vless-ws
+      - trojan-tls
+    url: http://www.gstatic.com/generate_204
+    interval: 300
+    tolerance: 50
+
+  # - name: FB
+  #   type: fallback
+  #   proxies: [hy2-main, vless-ws, DIRECT]
+  #   url: http://www.gstatic.com/generate_204
+  #   interval: 300
+
+  # - name: LB
+  #   type: load-balance
+  #   proxies: [hy2-main, vless-ws]
+  #   strategy: round-robin    # round-robin | consistent-hashing | sticky-sessions
+
+  # - name: HK
+  #   type: select
+  #   include-all-proxies: true
+  #   filter: "(?i)港|HK|Hong"
+  #   exclude-filter: "过期|expire"
+  #   # use: [sub]
+
+  # - name: CHAIN
+  #   type: relay
+  #   proxies: [socks-up, hy2-main]   # last member is the exit
+
+# Rule providers: type file | http
+# Storage priority:
+#   1. explicit path (highest) — absolute, relative, or file:/abs/path
+#   2. top-level cache: true → redb
+#   3. default file rules/<name>.ars under run dir (-d/--dir or cwd)
+# behavior: domain | ip | ipcidr | classical
+# format (optional): text | yaml | json | ars
+rule-providers:
+  ads:
+    type: file
+    behavior: domain
+    path: /root/rules/ads.ars
+    # path: ./rules/ads.yaml
+    # format: yaml
+
+  cn-domain:
+    type: file
+    behavior: domain
+    path: /root/rules/cn-domain.ars
+
+  cn-ip:
+    type: file
+    behavior: ip
+    path: /root/rules/cn-ip.ars
+
+  # Remote example — download once at startup, save under rules/geoip.ars
+  # geoip:
+  #   type: http
+  #   behavior: ip
+  #   url: "https://example.com/geoip.ars"
+  #   update-interval: 5
+  #   # path omitted + cache: false → rules/geoip.ars
+
+  # Remote into redb when top-level cache: true (omit path)
+  # ads-remote:
+  #   type: http
+  #   behavior: domain
+  #   url: "https://example.com/ads.yaml"
+
+# Route: DOMAIN / DOMAIN-SUFFIX / DOMAIN-KEYWORD / DOMAIN-REGEX /
+#        IP-CIDR / SRC-IP-CIDR / RULE-SET / MATCH
+# Outbound: direct/DIRECT, block/BLOCK, reject/REJECT, proxies or proxy-groups name.
+# Optional last field no-resolve: skip domain→IP resolve for that line when
+# route-resolve: true.
+route:
+  - DOMAIN-SUFFIX,google.com,PROXY
+  - DOMAIN-KEYWORD,ads,REJECT
+  - IP-CIDR,10.0.0.0/8,DIRECT
+  - RULE-SET,ads,REJECT
+  - RULE-SET,cn-domain,DIRECT
+  - RULE-SET,cn-ip,DIRECT
+  # - RULE-SET,cn-ip,DIRECT,no-resolve
+  - MATCH,PROXY
