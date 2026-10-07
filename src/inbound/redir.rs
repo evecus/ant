@@ -97,7 +97,7 @@ pub(crate) async fn handle_connection(
         tracing::debug!("redir block {dest} ({:?})", target.host);
         return Ok(());
     }
-    let _conn = crate::app::stats::global().register(crate::app::stats::ConnectionInfo {
+    let conn = crate::app::stats::global().register(crate::app::stats::ConnectionInfo {
         peer,
         dest: target.addr,
         dest_host: target.host.clone(),
@@ -112,7 +112,7 @@ pub(crate) async fn handle_connection(
         .await
         .with_context(|| format!("dial tcp {}", target.addr))?;
     let local: crate::outbound::BoxedStream = Box::new(stream);
-    crate::outbound::relay(local, remote).await?;
+    conn.while_alive(crate::outbound::relay(local, remote)).await?;
     Ok(())
 }
 

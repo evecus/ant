@@ -294,7 +294,7 @@ async fn serve_connect(
         return Ok(());
     }
 
-    let _conn = crate::app::stats::global().register(crate::app::stats::ConnectionInfo {
+    let conn = crate::app::stats::global().register(crate::app::stats::ConnectionInfo {
         peer,
         dest: decided.addr,
         dest_host: decided.host.clone(),
@@ -309,7 +309,7 @@ async fn serve_connect(
         .await
         .context("dial")?;
     let local: crate::outbound::BoxedStream = Box::new(stream);
-    relay(local, remote).await?;
+    conn.while_alive(relay(local, remote)).await?;
     Ok(())
 }
 
@@ -628,7 +628,7 @@ async fn handle_http(
         }
 
         tracing::debug!("{inbound} CONNECT {} → {:?} via {:?}", target, decided.host, decided.outbound);
-        let _conn = crate::app::stats::global().register(crate::app::stats::ConnectionInfo {
+        let conn = crate::app::stats::global().register(crate::app::stats::ConnectionInfo {
             peer,
             dest: decided.addr,
             dest_host: decided.host.clone(),
@@ -643,7 +643,7 @@ async fn handle_http(
             .await
             .context("dial")?;
         let local: crate::outbound::BoxedStream = Box::new(stream);
-        relay(local, remote).await?;
+        conn.while_alive(relay(local, remote)).await?;
         Ok(())
     } else {
         let url = target.to_string();
@@ -674,7 +674,7 @@ async fn handle_http(
                 .await?;
             return Ok(());
         }
-        let _conn = crate::app::stats::global().register(crate::app::stats::ConnectionInfo {
+        let conn = crate::app::stats::global().register(crate::app::stats::ConnectionInfo {
             peer,
             dest: decided.addr,
             dest_host: decided.host.clone(),
@@ -717,7 +717,7 @@ async fn handle_http(
         }
 
         let local: crate::outbound::BoxedStream = Box::new(stream);
-        relay(local, remote).await?;
+        conn.while_alive(relay(local, remote)).await?;
         Ok(())
     }
 }

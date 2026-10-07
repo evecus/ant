@@ -164,7 +164,7 @@ async fn handle_tproxy_tcp(
         tracing::debug!("tproxy tcp block {} ({:?})", dest, target.host);
         return Ok(());
     }
-    let _conn = crate::app::stats::global().register(crate::app::stats::ConnectionInfo {
+    let conn = crate::app::stats::global().register(crate::app::stats::ConnectionInfo {
         peer,
         dest: target.addr,
         dest_host: target.host.clone(),
@@ -179,7 +179,7 @@ async fn handle_tproxy_tcp(
         .await
         .with_context(|| format!("dial tcp {}", target.addr))?;
     let local: crate::outbound::BoxedStream = Box::new(stream);
-    crate::outbound::relay(local, remote).await?;
+    conn.while_alive(crate::outbound::relay(local, remote)).await?;
     Ok(())
 }
 
@@ -310,7 +310,7 @@ async fn udp_session_worker(
     // 入站类型统一为 tproxy（不区分 tcp/udp）；流量类型单独记录：
     // 首包被识别为 QUIC Initial → quic，否则 udp。
     let network = if sniff_quic_hit { "quic" } else { "udp" };
-    let _conn = crate::app::stats::global().register(crate::app::stats::ConnectionInfo {
+    let conn = crate::app::stats::global().register(crate::app::stats::ConnectionInfo {
         peer,
         dest: target.addr,
         dest_host: target.host.clone(),
@@ -363,6 +363,9 @@ async fn udp_session_worker(
                 }
             }
             _ = tokio::time::sleep_until(deadline) => {
+                break;
+            }
+            _ = conn.cancelled() => {
                 break;
             }
         }
