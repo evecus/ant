@@ -45,6 +45,8 @@ cargo build --release --features "tun,shadowsocks,vmess"
 | `trojan` | Trojan outbound (**default**) |
 | `wireguard` | WireGuard outbound (boringtun + smoltcp) |
 | `tun` | TUN virtual NIC + OS route/redirect |
+| `api` | HTTP dashboard + /connections /logs API |
+| `cache` | persistent redb cache (DNS/FakeIP/select/rulesets) |
 | `full` | all of the above |
 
 Using a disabled type in config fails fast at startup with a message to
