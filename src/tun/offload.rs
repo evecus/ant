@@ -39,11 +39,6 @@ pub fn tun_has_vnet_hdr(fd: std::os::fd::RawFd) -> bool {
     flags & IFF_VNET_HDR != 0
 }
 
-#[cfg(not(target_os = "linux"))]
-pub fn tun_has_vnet_hdr(_fd: i32) -> bool {
-    false
-}
-
 /// Probe and enable TUN offloads. Failure of TUNSETOFFLOAD does not clear
 /// `vnet_hdr` — if the flag is set, every R/W still carries virtio_net_hdr.
 #[cfg(target_os = "linux")]
