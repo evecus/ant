@@ -21,25 +21,30 @@ use tokio::net::{TcpListener, TcpStream, UdpSocket};
 
 pub async fn run_dns_server(cfg: Arc<Config>, router: Arc<Router>) -> Result<()> {
     let port = cfg.dns.listen_port();
+    // Effective DNS IPv6 requires top-level ipv6=true as well.
+    let effective_ipv6 = cfg.global.ipv6 && cfg.dns.ipv6;
     if cfg.dns.rule_follow_route {
         tracing::info!(
-            "dns rule-follow-route=true direct={} proxy={} ipv6={}",
+            "dns rule-follow-route=true direct={} proxy={} ipv6={} (global.ipv6={})",
             cfg.dns.direct_nameserver.as_deref().unwrap_or("-"),
             cfg.dns.proxy_nameserver.as_deref().unwrap_or("-"),
-            cfg.dns.ipv6
+            effective_ipv6,
+            cfg.global.ipv6
         );
     } else {
         tracing::info!(
-            "dns rule-follow-route=false rules={} nameserver={:?} ipv6={}",
+            "dns rule-follow-route=false rules={} nameserver={:?} ipv6={} (global.ipv6={})",
             cfg.dns.rules.len(),
             cfg.dns.nameserver,
-            cfg.dns.ipv6
+            effective_ipv6,
+            cfg.global.ipv6
         );
     }
 
     let mut handles = Vec::new();
 
-    for bind in crate::app::sockopt::listen_addrs(&cfg.global.bind_address, port) {
+    let ipv6 = cfg.global.ipv6;
+    for bind in crate::app::sockopt::listen_addrs(&cfg.global.bind_address, port, ipv6) {
         match crate::app::sockopt::bind_udp_listener(bind) {
             Ok((sock, bind)) => {
                 tracing::info!("DNS listening on UDP {bind}");
@@ -55,7 +60,7 @@ pub async fn run_dns_server(cfg: Arc<Config>, router: Arc<Router>) -> Result<()>
         }
     }
 
-    for bind in crate::app::sockopt::listen_addrs(&cfg.global.bind_address, port) {
+    for bind in crate::app::sockopt::listen_addrs(&cfg.global.bind_address, port, ipv6) {
         match crate::app::sockopt::bind_tcp_listener(bind) {
             Ok((listener, bind)) => {
                 tracing::info!("DNS listening on TCP {bind}");
