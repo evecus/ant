@@ -206,6 +206,17 @@ pub struct GlobalConfig {
     /// If 0 and TUN auto-route/redirect/detect-interface is on, a default (255) is applied at runtime.
     #[serde(default, rename = "mark")]
     pub mark: u32,
+    /// Inbound / DNS listen address family control.
+    /// - `true` (default / unset): dual-stack — IPv4 + IPv6 traffic, rulesets load both
+    ///   IPv4 and IPv6 CIDRs, DNS AAAA controlled independently by `dns.ipv6`.
+    /// - `false`: IPv4 only — inbound and DNS listen on IPv4 only, DNS ignores
+    ///   `dns.ipv6` (A records only), FakeIP allocates only IPv4, IP rulesets
+    ///   load only IPv4 CIDRs.
+    #[serde(default = "default_true")]
+    pub ipv6: bool,
+    /// Listen address for all inbounds and the DNS module.
+    /// Only `0.0.0.0` (LAN-accessible) or `127.0.0.1` (loopback-only) are accepted.
+    /// Whether IPv6 sockets are also opened is controlled solely by top-level `ipv6`.
     #[serde(default = "default_bind", rename = "bind-address")]
     pub bind_address: String,
     #[serde(default, rename = "api")]
@@ -239,7 +250,7 @@ pub struct GlobalConfig {
 }
 
 fn default_bind() -> String {
-    "::".into()
+    "0.0.0.0".into()
 }
 
 fn default_log_level() -> String {
@@ -1684,6 +1695,21 @@ impl Config {
         if self.dns.port == Some(0) {
             bail!("dns.port cannot be 0; omit `port` (hijack-only mode) or the whole dns block");
         }
+        // bind-address: only 0.0.0.0 (LAN) or 127.0.0.1 (loopback).
+        // Dual-stack vs IPv4-only is controlled solely by top-level `ipv6`.
+        {
+            let b = self.global.bind_address.trim();
+            if b == "localhost" {
+                self.global.bind_address = "127.0.0.1".into();
+            } else if b != "0.0.0.0" && b != "127.0.0.1" {
+                bail!(
+                    "bind-address must be \"0.0.0.0\" or \"127.0.0.1\" (got `{b}`); \
+                     use top-level `ipv6: true/false` to control IPv6 listening"
+                );
+            } else {
+                self.global.bind_address = b.to_string();
+            }
+        }
         // DNS 模块关闭时，任何依赖 DNS 模块应答的劫持路径都必须为空（fail-fast）。
         if !self.dns.enable {
             if self.dns.route_hijack {
@@ -1701,6 +1727,8 @@ impl Config {
                 bail!("dns.mode must be redir-host or fakeip");
             }
             self.dns.mode = mode;
+            // Effective DNS IPv6: top-level ipv6=false forces A-only regardless of dns.ipv6.
+            let effective_dns_ipv6 = self.global.ipv6 && self.dns.ipv6;
             if self.dns.mode == "fakeip" {
                 if self.dns.fakeip_range.as_ref().map(|s| s.is_empty()).unwrap_or(true)
                     && self.dns.fakeip6_range.as_ref().map(|s| s.is_empty()).unwrap_or(true)
@@ -1713,7 +1741,7 @@ impl Config {
                 if let Some(r) = &self.dns.fakeip6_range {
                     r.parse::<ipnet::IpNet>().map_err(|e| anyhow::anyhow!("fakeip6-range: {e}"))?;
                 }
-                if !self.dns.ipv6
+                if !effective_dns_ipv6
                     && self.dns.fakeip_range.as_ref().map(|s| s.is_empty()).unwrap_or(true)
                 {
                     bail!("ipv6=false requires fakeip-range");

@@ -165,7 +165,8 @@ async fn main() -> Result<()> {
     let mark = cfg.global.mark;
     app::sockopt::set_fwmark(mark);
     let bind = cfg.global.bind_address.clone();
-    tracing::info!("bind-address={bind}");
+    let ipv6 = cfg.global.ipv6;
+    tracing::info!("bind-address={bind} ipv6={ipv6}");
     let cache = if cfg.global.cache {
         let path = cfg.cache_db_path(base_dir.as_deref());
         match crate::cache::AppCache::open(&path) {
@@ -206,7 +207,7 @@ async fn main() -> Result<()> {
         let port = cfg.global.mixed_port.unwrap();
         let bind = bind.clone();
         handles.push(tokio::spawn(async move {
-            if let Err(e) = inbound::run_mixed(port, bind, r, o).await {
+            if let Err(e) = inbound::run_mixed(port, bind, ipv6, r, o).await {
                 tracing::error!("mixed inbound exited: {e:#}");
             }
         }));
@@ -218,7 +219,7 @@ async fn main() -> Result<()> {
         let port = cfg.global.http_port.unwrap();
         let bind = bind.clone();
         handles.push(tokio::spawn(async move {
-            if let Err(e) = inbound::run_http(port, bind, r, o).await {
+            if let Err(e) = inbound::run_http(port, bind, ipv6, r, o).await {
                 tracing::error!("http inbound exited: {e:#}");
             }
         }));
@@ -230,7 +231,7 @@ async fn main() -> Result<()> {
         let port = cfg.global.socks_port.unwrap();
         let bind = bind.clone();
         handles.push(tokio::spawn(async move {
-            if let Err(e) = inbound::run_socks(port, bind, r, o).await {
+            if let Err(e) = inbound::run_socks(port, bind, ipv6, r, o).await {
                 tracing::error!("socks inbound exited: {e:#}");
             }
         }));
@@ -245,7 +246,7 @@ async fn main() -> Result<()> {
         let port = cfg.global.tproxy_port.unwrap();
         let bind = bind.clone();
         handles.push(tokio::spawn(async move {
-            if let Err(e) = inbound::run_tproxy(port, bind, r, o).await {
+            if let Err(e) = inbound::run_tproxy(port, bind, ipv6, r, o).await {
                 tracing::error!("tproxy inbound exited: {e:#}");
             }
         }));
@@ -258,7 +259,7 @@ async fn main() -> Result<()> {
         let port = cfg.global.redir_port.unwrap();
         let bind = bind.clone();
         handles.push(tokio::spawn(async move {
-            if let Err(e) = inbound::run_redir(port, bind, r, o).await {
+            if let Err(e) = inbound::run_redir(port, bind, ipv6, r, o).await {
                 tracing::error!("redir inbound exited: {e:#}");
             }
         }));
