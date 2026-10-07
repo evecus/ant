@@ -1,21 +1,10 @@
-//! Active connection tracker for the API panel (mihomo clash-api style).
+//! Active connection tracker for the API panel.
 //!
-//! Design mirrors mihomo `tunnel/statistic`:
-//! - Each live session is registered (`Join`) and removed on end (`Leave`).
-//! - Removal is driven by `ConnGuard` Drop (normal path) **or** explicit
-//!   `close` / `close_all` (API), which also cancels the session so the
-//!   connection task can exit promptly instead of lingering as a "dead"
-//!   map entry.
-//! - A background sweeper periodically drops any cancelled leftovers so a
-//!   missed Drop cannot leak memory indefinitely.
-//!
-//! Behaviour is controlled by the top-level config key `api-connection-record`
-//! (default **true**):
-//!
-//! - **true** (default / omitted): always record live connections.
-//! - **false**: opt-in while the API UI (or `/connections`) is watched; closing
-//!   the browser stops registration and clears the map.
+//! Compiled only with `--features api`. Without it, a no-op stub keeps inbound
+//! call sites compiling without recording anything.
 
+#[cfg(feature = "api")]
+mod full {
 use portable_atomic::{AtomicBool, AtomicU64};
 use serde::Serialize;
 use std::collections::HashMap;
@@ -372,3 +361,54 @@ impl Drop for ConnGuard {
         self.tracker.leave(self.id);
     }
 }
+
+}
+
+#[cfg(feature = "api")]
+pub use full::*;
+
+#[cfg(not(feature = "api"))]
+mod stub {
+    use std::future::Future;
+    use std::net::SocketAddr;
+    use std::sync::Arc;
+
+    #[derive(Debug, Clone)]
+    pub struct ConnectionInfo {
+        pub peer: SocketAddr,
+        pub dest: SocketAddr,
+        pub dest_host: Option<String>,
+        pub network: &'static str,
+        pub inbound: &'static str,
+        pub rule: String,
+        pub outbound: String,
+    }
+
+    pub struct ConnGuard;
+
+    impl ConnGuard {
+        pub async fn while_alive<T, E, F>(&self, fut: F) -> Result<T, E>
+        where
+            F: Future<Output = Result<T, E>>,
+        {
+            fut.await
+        }
+    }
+
+    pub struct Tracker;
+
+    impl Tracker {
+        pub fn register(&self, _info: ConnectionInfo) -> ConnGuard {
+            ConnGuard
+        }
+    }
+
+    pub fn global() -> Arc<Tracker> {
+        use once_cell::sync::Lazy;
+        static T: Lazy<Arc<Tracker>> = Lazy::new(|| Arc::new(Tracker));
+        T.clone()
+    }
+}
+
+#[cfg(not(feature = "api"))]
+pub use stub::*;
