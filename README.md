@@ -18,30 +18,31 @@ Inspired by [clash-rs](https://github.com/Watfaq/clash-rs) (protocol code patter
 
 ## Build
 
-Default binary is **minimal**: only **Hysteria2 + VLESS** (+ direct / groups /
-DNS / rules). Extra outbounds and TUN are cargo features (compile-time).
+Default binary includes **Hysteria2 + VLESS + TUIC + Trojan + SOCKS**
+(those reuse core crates; no extra heavy deps). TUN and heavier protocols
+(WireGuard, SS, VMess, …) are opt-in cargo features.
 
 ```bash
-# Minimal (Hy2 + VLESS) — smallest binary / lowest idle RSS
+# Default (Hy2 / VLESS / TUIC / Trojan / SOCKS)
 cargo build --release
 
 # Everything (all protocols + TUN) — same as CI release artifacts
 cargo build --release --features full
 
-# Pick what you need
-cargo build --release --features "tun,shadowsocks,vmess,trojan,socks"
+# Pick extras on top of default
+cargo build --release --features "tun,shadowsocks,vmess"
 ```
 
 | Feature | What it enables |
 |---------|-----------------|
-| `tuic` | TUIC outbound |
+| `tuic` | TUIC outbound (**default**) |
 | `anytls` | AnyTLS outbound |
 | `naive` | NaiveProxy outbound |
 | `shadowquic` | shadowquic (JLS) outbound |
 | `vmess` | VMess outbound |
 | `shadowsocks` | Shadowsocks outbound |
-| `socks` | SOCKS4/4a/5 outbound |
-| `trojan` | Trojan outbound |
+| `socks` | SOCKS4/4a/5 outbound (**default**) |
+| `trojan` | Trojan outbound (**default**) |
 | `wireguard` | WireGuard outbound (boringtun + smoltcp) |
 | `tun` | TUN virtual NIC + OS route/redirect |
 | `full` | all of the above |

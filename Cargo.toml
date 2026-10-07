@@ -21,7 +21,9 @@ path = "src/main.rs"
 #   cargo build --release --features "tun,shadowsocks,vmess"
 # ---------------------------------------------------------------------------
 [features]
-default = []
+# Default: Hy2 + VLESS + protocols that reuse core deps (no extra crates).
+# Heavy extras (WG/smoltcp, SS/VMess crypto, JLS, TUN, …) stay opt-in.
+default = ["tuic", "socks", "trojan"]
 # Convenience meta-feature: every optional protocol + TUN.
 full = [
     "tuic",
