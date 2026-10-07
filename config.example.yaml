@@ -20,6 +20,9 @@ api: "127.0.0.1:9095"
 #                              # false：仅在面板打开期间记录（省内存，关闭面板后清空）。
 tproxy-port: 7878
 mixed-port: 7898
+# Dedicated HTTP / SOCKS inbounds (mihomo / clash compatible). Omit to disable.
+# http-port: 7890          # or top-level `port:` (alias)
+# socks-port: 7891         # SOCKS4/4a/5 + SOCKS5 UDP ASSOCIATE
 redir-port: 7892
 # 注意：所有入站端口显式配置 0 会直接校验失败；想关闭某个入站就省略该字段。
 # sniff: true  # sniff TLS SNI / HTTP Host / QUIC for domain routing (default off);

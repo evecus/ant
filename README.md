@@ -6,7 +6,7 @@ Inspired by [clash-rs](https://github.com/Watfaq/clash-rs) (protocol code patter
 
 ## Features (v0.1)
 
-- **Inbound**: `mixed-port` (HTTP CONNECT + SOCKS5 TCP/UDP), `tproxy-port` (Linux TProxy TCP+UDP), `redir-port`, TUN (system stack)
+- **Inbound**: `mixed-port` (HTTP CONNECT + SOCKS4/4a/5 TCP/UDP), `http-port` / `port` (HTTP only), `socks-port` (SOCKS4/4a/5 TCP/UDP), `tproxy-port` (Linux TProxy TCP+UDP), `redir-port`, TUN (system stack)
 - **Outbound**: Hysteria2 / TUIC / **shadowquic** (JLS over QUIC, 0-RTT, UDP over datagram or stream) / AnyTLS / **NaiveProxy** (HTTP/2 CONNECT, padding framing; UDP via sing UoT v2) / VLESS (ws / xhttp / REALITY / uTLS / ECH) / VMess (ws / xhttp / TLS / uTLS) / Trojan (ws / xhttp / TLS / uTLS) / **Shadowsocks** (AEAD + AEAD-2022, tcp / ws / xhttp, TLS / uTLS) / SOCKS5 (TCP + UDP ASSOCIATE, optional user/pass) / SOCKS4 + SOCKS4a (TCP CONNECT only) + direct / block
 - **Anti-loop**: every outbound socket (TCP + UDP, direct included) carries `SO_MARK` and binds the physical interface, so TUN auto-route never re-captures proxy traffic
 - **DNS**: local UDP/TCP DNS. `rule-follow-route: true`（默认）复用 `route:` 规则——
@@ -42,7 +42,7 @@ See `config.example.yaml`.
 
 Layout (mihomo-style):
 
-- Flat top-level: `mixed-port`, `tproxy-port`, `log-level`, `sniff`, … (`sniff: true` enables
+- Flat top-level: `mixed-port`, `http-port`/`port`, `socks-port`, `tproxy-port`, `log-level`, `sniff`, … (`sniff: true` enables
   TLS SNI / HTTP Host / QUIC sniffing for domain routing, default off; DNS sniffing follows
   `dns.route-hijack` independently)
 - `dns:` — `rule-follow-route` / `direct-nameserver` / `proxy-nameserver` / `rules` /
