@@ -431,7 +431,7 @@ async fn handle_tcp(
         debug!(dest = %dest, "tun: tcp blocked");
         return Ok(());
     }
-    let _conn = stats::global().register(stats::ConnectionInfo {
+    let conn = stats::global().register(stats::ConnectionInfo {
         peer,
         dest: decided.addr,
         dest_host: decided.host.clone(),
@@ -446,7 +446,7 @@ async fn handle_tcp(
         .await
         .with_context(|| format!("dial {}", decided.addr))?;
     let local: crate::outbound::BoxedStream = Box::new(stream);
-    relay(local, remote).await?;
+    conn.while_alive(relay(local, remote)).await?;
     Ok(())
 }
 
