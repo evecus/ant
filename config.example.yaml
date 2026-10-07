@@ -311,6 +311,20 @@ proxies:
     # xhttp-mode: auto                        # auto | stream-one | packet-up | stream-up
     skip-cert-verify: false
 
+  # WireGuard 出站（boringtun 数据面 + 隧道内用户态 TCP/IP 栈）。
+  # endpoint socket 与其他出站同源：SO_MARK / 物理网卡绑定防 TUN 回环。
+  - name: wg-out
+    type: wireguard
+    server: wg.example.com                  # endpoint（域名走 bootstrap DNS 解析）
+    port: 51820
+    private-key: "<base64 32B private key>" # 必填
+    peer-public-key: "<base64 32B server public key>" # 必填
+    # pre-shared-key: "<base64 32B psk>"    # 可选
+    local-address:                          # 隧道内本机地址（至少一个）
+      - 10.7.0.2/32
+    # mtu: 1420                             # 默认 1420
+    # persistent-keepalive: 25              # 秒，默认 25；0 关闭
+
 # Optional: load extra nodes from a local YAML file (mihomo-style).
 # The file is either a bare list of proxy objects or `{ proxies: [ ... ] }`.
 # proxy-providers:

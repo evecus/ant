@@ -334,6 +334,12 @@ pub struct ConnGuard {
 
 impl ConnGuard {
     /// Resolves when this connection is force-closed via the API or Leave.
+    /// Only tproxy (Linux/Android) polls cancellation today; on other platforms
+    /// this is dead code and would trip `-D warnings`.
+    #[cfg_attr(
+        not(any(target_os = "linux", target_os = "android")),
+        allow(dead_code)
+    )]
     pub fn cancelled(&self) -> tokio_util::sync::WaitForCancellationFuture<'_> {
         self.cancel.cancelled()
     }

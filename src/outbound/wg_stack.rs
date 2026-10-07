@@ -118,7 +118,7 @@ pub(crate) enum StackCmd {
 
 // ── TCP ring buffer（对齐 reflex netstack LockFreeRingBuffer）────────────────
 
-struct LockFreeRingBuffer {
+pub(crate) struct LockFreeRingBuffer {
     buffer: std::cell::UnsafeCell<Box<[u8]>>,
     capacity: usize,
     write_pos: AtomicUsize,
@@ -317,6 +317,10 @@ impl StackHandle {
         self.send_cmd(StackCmd::Nudge);
     }
 
+    pub(crate) fn alloc_port(&self) -> io::Result<u16> {
+        self.ports.lock().unwrap().alloc()
+    }
+
     /// dial TCP：创建 socket + connect，等待 Established（或失败）。
     pub(crate) async fn connect_tcp(
         &self,
@@ -495,7 +499,7 @@ impl WgStack {
     /// 返回 (StackHandle, tx_rx, rx_tx)：
     /// - `tx_rx`：栈产出的 IP 包（WG 出站，wire task 拿去 encapsulate）；
     /// - `rx_tx`：WG 解密出的明文 IP 包注入口（wire task 持有）。
-    pub(crate) fn new(
+    pub(crate) fn spawn(
         mtu: u32,
         local_cidrs: &[IpCidr],
         v4_gateway: Option<std::net::Ipv4Addr>,
@@ -530,10 +534,10 @@ impl WgStack {
         // Medium::Ip 无 ARP/NDISC，default route 的网关只是查表用，任意可达值即可；
         // WG 对端隧道地址（local + 1）是惯例取值（wireguard-go 同款语义）。
         if let Some(gw) = v4_gateway {
-            let _ = iface.routes_mut().add_default_ipv4_route(gw.into());
+            let _ = iface.routes_mut().add_default_ipv4_route(gw);
         }
         if let Some(gw) = v6_gateway {
-            let _ = iface.routes_mut().add_default_ipv6_route(gw.into());
+            let _ = iface.routes_mut().add_default_ipv6_route(gw);
         }
 
         let ports = Arc::new(StdMutex::new(PortAlloc::default()));
@@ -617,7 +621,7 @@ async fn poll_loop(
         let delay = iface.poll_delay(SmolInstant::now(), &sockets);
         let wait = match delay {
             Some(d) if d.total_millis() == 0 => Duration::ZERO,
-            Some(d) => Duration::from_millis(d.millis().max(1) as u64),
+            Some(d) => Duration::from_millis(d.millis().max(1)),
             None => Duration::from_millis(IDLE_POLL),
         };
         tokio::select! {
@@ -686,7 +690,7 @@ fn apply_cmd(
         } => {
             let bufs = || {
                 udp::PacketBuffer::new(
-                    vec![udp::PacketMetadata::default(); UDP_PACKETS],
+                    vec![udp::PacketMetadata::EMPTY; UDP_PACKETS],
                     vec![0u8; dgram_buf * UDP_PACKETS],
                 )
             };
@@ -826,7 +830,7 @@ fn pump_udp(socket: &mut udp::Socket, ctl: &UdpHandle) {
                 Ok(()) => {
                     q.pop_front();
                 }
-                Err(udp::SendError::Exhausted) => break, // tx buffer 满，下轮重试
+                Err(udp::SendError::BufferFull) => break, // tx buffer 满，下轮重试
                 Err(e) => {
                     // Unaddressable / Truncated：坏包直接丢（UDP 语义）。
                     tracing::debug!("wg udp send to {dst}: {e:?}");
@@ -837,11 +841,8 @@ fn pump_udp(socket: &mut udp::Socket, ctl: &UdpHandle) {
     }
     // 栈 → 应用
     let mut deliver: Vec<(Vec<u8>, SocketAddr)> = Vec::new();
-    loop {
-        match socket.recv() {
-            Ok((payload, meta)) => deliver.push((payload.to_vec(), meta.endpoint.into())),
-            Err(_) => break,
-        }
+    while let Ok((payload, meta)) = socket.recv() {
+        deliver.push((payload.to_vec(), meta.endpoint.into()));
     }
     if !deliver.is_empty() {
         let closed = {
@@ -873,7 +874,7 @@ fn reap_tcp(
         if ctl.abort_requested.load(Ordering::Acquire) {
             socket.abort();
             sockets.remove(*h);
-            finish_tcp(ctl, h, pending_connect, ports);
+            finish_tcp(ctl, *h, pending_connect, ports);
             return false;
         }
 
@@ -897,7 +898,7 @@ fn reap_tcp(
             true
         } else {
             sockets.remove(*h);
-            finish_tcp(ctl, h, pending_connect, ports);
+            finish_tcp(ctl, *h, pending_connect, ports);
             false
         }
     });

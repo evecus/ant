@@ -29,7 +29,6 @@ use async_trait::async_trait;
 use boringtun::noise::{Tunn, TunnResult};
 use smoltcp::wire::{IpCidr, IpAddress};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
 
@@ -132,7 +131,7 @@ impl WireGuardOutbound {
             IpAddr::V6(v) => Ipv6Addr::from(u128::from(v).wrapping_add(1)),
             _ => unreachable!(),
         });
-        let (stack, tx_rx, rx_tx) = WgStack::new(mtu, &cidrs, v4_gw, v6_gw);
+        let (stack, tx_rx, rx_tx) = WgStack::spawn(mtu, &cidrs, v4_gw, v6_gw);
 
         let tunn = Tunn::new(
             boringtun::x25519::StaticSecret::from(private),
@@ -249,8 +248,16 @@ async fn on_endpoint_packet(
                 udp.send(p).await?;
                 result = tunn.decapsulate(None, &[], enc_buf);
             }
-            TunnResult::WriteToTunnelV4(p, _src) | TunnResult::WriteToTunnelV6(p, _src) => {
-                // 隧道内明文 IP 包 → 注入 smoltcp 栈。
+            TunnResult::WriteToTunnelV4(p, _src) => {
+                // 隧道内明文 IPv4 包 → 注入 smoltcp 栈。
+                if rx_tx.send(p.to_vec()).is_err() {
+                    bail!("wg stack closed");
+                }
+                stack.nudge();
+                result = tunn.decapsulate(None, &[], enc_buf);
+            }
+            TunnResult::WriteToTunnelV6(p, _src) => {
+                // 隧道内明文 IPv6 包 → 注入 smoltcp 栈。
                 if rx_tx.send(p.to_vec()).is_err() {
                     bail!("wg stack closed");
                 }
