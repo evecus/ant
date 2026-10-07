@@ -3,7 +3,8 @@
 //! - **http**: HTTP CONNECT / absolute-URI only (like clash-rs `proxy/http/inbound`)
 //! - **socks**: SOCKS4 / SOCKS4a / SOCKS5 only (like clash-rs `proxy/socks/inbound`)
 //!
-//! All listen dual-stack according to `bind-address` (0.0.0.0 and/or [::]).
+//! Listen addresses follow `bind-address` + top-level `ipv6`
+//! (`0.0.0.0` / `127.0.0.1`; dual-stack when `ipv6: true`).
 
 use crate::outbound::{relay, OutboundManager, UdpSession};
 use crate::app::router::{Outbound, Router};
@@ -31,6 +32,7 @@ enum Mode {
 pub async fn run_mixed(
     port: u16,
     bind_address: String,
+    ipv6: bool,
     router: Arc<Router>,
     outbounds: Arc<OutboundManager>,
 ) -> Result<()> {
@@ -39,6 +41,7 @@ pub async fn run_mixed(
         "mixed (HTTP+SOCKS4/4a/5, TCP/UDP)",
         port,
         bind_address,
+        ipv6,
         router,
         outbounds,
         Mode::Mixed,
@@ -51,6 +54,7 @@ pub async fn run_mixed(
 pub async fn run_http(
     port: u16,
     bind_address: String,
+    ipv6: bool,
     router: Arc<Router>,
     outbounds: Arc<OutboundManager>,
 ) -> Result<()> {
@@ -59,6 +63,7 @@ pub async fn run_http(
         "http (CONNECT + absolute-URI)",
         port,
         bind_address,
+        ipv6,
         router,
         outbounds,
         Mode::Http,
@@ -71,6 +76,7 @@ pub async fn run_http(
 pub async fn run_socks(
     port: u16,
     bind_address: String,
+    ipv6: bool,
     router: Arc<Router>,
     outbounds: Arc<OutboundManager>,
 ) -> Result<()> {
@@ -79,6 +85,7 @@ pub async fn run_socks(
         "socks (SOCKS4/4a/5, TCP/UDP)",
         port,
         bind_address,
+        ipv6,
         router,
         outbounds,
         Mode::Socks,
@@ -91,12 +98,13 @@ async fn run_listener(
     log_label: &'static str,
     port: u16,
     bind_address: String,
+    ipv6: bool,
     router: Arc<Router>,
     outbounds: Arc<OutboundManager>,
     mode: Mode,
 ) -> Result<()> {
     let mut handles = Vec::new();
-    for bind in crate::app::sockopt::listen_addrs(&bind_address, port) {
+    for bind in crate::app::sockopt::listen_addrs(&bind_address, port, ipv6) {
         match crate::app::sockopt::bind_tcp_listener(bind) {
             Ok((listener, bind)) => {
                 tracing::info!("{log_label} listening on {bind}");
