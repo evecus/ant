@@ -8,7 +8,18 @@ log-level: info
 # cache: false
 # cache-file: cache.db
 # mark: 255
-# bind-address: "::"  # :: | 0.0.0.0 | 127.0.0.1
+#
+# Top-level IPv6 switch (default true). Controls dual-stack for all inbounds + DNS:
+#   ipv6: true   — listen IPv4+IPv6; rulesets load IPv4+IPv6 CIDRs;
+#                  DNS AAAA still gated by dns.ipv6 independently.
+#   ipv6: false  — IPv4 only: inbound/DNS listen IPv4 only; DNS ignores dns.ipv6
+#                  (A records only); FakeIP only allocates IPv4; IP rulesets
+#                  load only IPv4 CIDRs.
+# ipv6: true
+#
+# bind-address: only 0.0.0.0 (LAN-accessible) or 127.0.0.1 (loopback-only).
+# Whether IPv6 sockets are opened is controlled solely by top-level `ipv6`.
+# bind-address: "0.0.0.0"
 # Dashboard: 代理组 / 连接 / 信息  — http://ip:9095/ui
 api: "127.0.0.1:9095"
 # api-secret: "your-password"  # 面板访问密码（类似 clash-api secret，但只输密码）。
