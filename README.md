@@ -18,15 +18,42 @@ Inspired by [clash-rs](https://github.com/Watfaq/clash-rs) (protocol code patter
 
 ## Build
 
+Default binary is **minimal**: only **Hysteria2 + VLESS** (+ direct / groups /
+DNS / rules). Extra outbounds and TUN are cargo features (compile-time).
+
 ```bash
-# Linux / macOS / Windows, Rust 1.75+
+# Minimal (Hy2 + VLESS) — smallest binary / lowest idle RSS
 cargo build --release
-# macOS TUN needs root (or a Network Extension that hands over an fd)
+
+# Everything (all protocols + TUN) — same as CI release artifacts
+cargo build --release --features full
+
+# Pick what you need
+cargo build --release --features "tun,shadowsocks,vmess,trojan,socks"
 ```
 
+| Feature | What it enables |
+|---------|-----------------|
+| `tuic` | TUIC outbound |
+| `anytls` | AnyTLS outbound |
+| `naive` | NaiveProxy outbound |
+| `shadowquic` | shadowquic (JLS) outbound |
+| `vmess` | VMess outbound |
+| `shadowsocks` | Shadowsocks outbound |
+| `socks` | SOCKS4/4a/5 outbound |
+| `trojan` | Trojan outbound |
+| `wireguard` | WireGuard outbound (boringtun + smoltcp) |
+| `tun` | TUN virtual NIC + OS route/redirect |
+| `full` | all of the above |
+
+Using a disabled type in config fails fast at startup with a message to
+recompile with the matching `--features …`.
+
+macOS TUN needs root (or a Network Extension that hands over an fd).
+
 CI builds **linux aarch64**, **Windows**, and **macOS** (aarch64 + x86_64 +
-universal) — see Actions artifacts / workflows `arm64.yml`, `windows.yml`,
-`macos.yml`, `clippy-macos.yml`.
+universal) with `--features full` — see Actions artifacts / workflows
+`arm64.yml`, `windows.yml`, `macos.yml`, `clippy-macos.yml`.
 
 ## Run
 
