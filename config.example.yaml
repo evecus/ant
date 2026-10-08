@@ -65,6 +65,8 @@ redir-port: 7892
 #   stack: gvisor         # gvisor (default): user-space smoltcp stack, no kernel
 #                         #   socket pairs (Windows RAM ↓) / no per-packet NAT
 #                         #   rewrite (Linux CPU ↓). system: legacy kernel-NAT stack.
+#                         #   mixed: system for TCP/ICMP + gvisor for UDP (sing-tun style).
+#                         #   auto-route / strict-route / auto-redirect work with all three.
 #   device: tun0          # optional; Windows defaults to ant-tun; macOS uses utunX
 #   # file-descriptor: 42 # adopt existing TUN fd (Android VpnService / iOS)
 #   # close-fd-on-drop: true
