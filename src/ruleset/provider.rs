@@ -49,10 +49,11 @@ pub async fn refresh_remote(
         .as_deref()
         .filter(|u| !u.trim().is_empty())
         .with_context(|| format!("rule-provider `{}`: missing url", rs.name))?;
-    info!(name = %rs.name, %url, "updating remote ruleset");
+    // The URL can carry a token — log/echo the provider name only.
+    info!(name = %rs.name, "updating remote ruleset");
     let data = crate::app::http::http_get(url)
         .await
-        .with_context(|| format!("download ruleset `{}` from {url}", rs.name))?;
+        .with_context(|| format!("download ruleset `{}`", rs.name))?;
     write_storage(rs, &data, cache)?;
     info!(
         name = %rs.name,
@@ -88,10 +89,10 @@ async fn load_one(
             .as_deref()
             .filter(|u| !u.trim().is_empty())
             .with_context(|| format!("rule-provider `{}`: missing url", rs.name))?;
-        info!(name = %rs.name, %url, "downloading ruleset");
+        info!(name = %rs.name, "downloading ruleset");
         let data = crate::app::http::http_get(url)
             .await
-            .with_context(|| format!("download ruleset `{}` from {url}", rs.name))?;
+            .with_context(|| format!("download ruleset `{}`", rs.name))?;
         write_storage(rs, &data, cache)?;
         info!(
             name = %rs.name,

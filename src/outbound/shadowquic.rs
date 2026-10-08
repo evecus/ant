@@ -448,7 +448,7 @@ impl ShadowquicOutbound {
 
     async fn connect_once(&self) -> Result<Arc<SqConn>> {
         let server_addr = resolve_server(&self.opts.server, self.opts.port).await?;
-        tracing::info!(
+        tracing::debug!(
             "shadowquic connecting to {} (sni={}, alpn={:?}, cc={}, over-stream={})",
             server_addr,
             self.opts.sni,

@@ -144,13 +144,8 @@ impl OutboundManager {
             let dialer = build_dialer(cfg, &ech_dns)
                 .await
                 .with_context(|| format!("proxy node `{}`", cfg.name))?;
-            tracing::info!(
-                "proxy node `{}` ({}) = {}:{} ready",
-                cfg.name,
-                cfg.ty,
-                cfg.server,
-                cfg.port
-            );
+            // Server address/port come straight from the config — never logged.
+            tracing::info!("proxy node `{}` ({}) ready", cfg.name, cfg.ty);
             addr_map.insert(cfg.name.clone(), (cfg.server.clone(), cfg.port));
             static_nodes.push(cfg.name.clone());
             map.insert(cfg.name.clone(), dialer);

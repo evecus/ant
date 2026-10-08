@@ -257,13 +257,15 @@ impl ProxyProviderStore {
                     .as_deref()
                     .filter(|u| !u.trim().is_empty())
                     .with_context(|| format!("proxy-provider `{name}` requires `url`"))?;
-                tracing::info!(provider = %name, %url, "fetching subscription");
+                // The subscription URL is a credential (token in the query /
+                // path) — log the provider name only.
+                tracing::info!(provider = %name, "fetching subscription");
                 let headers = pp.header.clone().unwrap_or_default();
                 let resp = crate::app::http::http_get_ex(url, &headers)
                     .await
-                    .with_context(|| format!("download subscription `{name}` from {url}"))?;
+                    .with_context(|| format!("download subscription `{name}`"))?;
                 if !resp.is_success() {
-                    bail!("HTTP {} fetching {url}", resp.status);
+                    bail!("HTTP {} fetching subscription `{name}`", resp.status);
                 }
                 let sub = resp.header("subscription-userinfo").and_then(SubscriptionInfo::from_header);
                 if let Some(p) = path.as_deref() {

@@ -196,7 +196,8 @@ impl Hysteria2Outbound {
 
     async fn connect_once(&self) -> Result<Arc<Hy2Conn>> {
         let server_addr = resolve_server(&self.opts.server, self.opts.port).await?;
-        tracing::info!(
+        // Per-connection + carries the server address — debug only.
+        tracing::debug!(
             "hysteria2 connecting to {} (sni={}, alpn={:?})",
             server_addr,
             self.opts.sni,
@@ -239,7 +240,7 @@ impl Hysteria2Outbound {
         }
 
         let auth = self.auth(&quic).await?;
-        tracing::info!(
+        tracing::debug!(
             "hysteria2 authenticated (status={HYSTERIA_STATUS_OK}, udp={}, tx_bps={})",
             auth.udp_enabled,
             auth.tx_bps

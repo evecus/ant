@@ -113,12 +113,13 @@ impl Router {
         if !global_ipv6 {
             for (name, rs) in rulesets.iter_mut() {
                 rs.drop_ipv6();
-                tracing::info!("ruleset `{name}`: IPv6 CIDRs dropped (ipv6=false)");
+                tracing::debug!("ruleset `{name}`: IPv6 CIDRs dropped (ipv6=false)");
             }
         }
         for name in rulesets.keys() {
-            tracing::info!("ruleset `{name}` ready");
+            tracing::debug!("ruleset `{name}` loaded");
         }
+        tracing::info!("{} ruleset(s) ready", rulesets.len());
 
         let parsed = cfg.parsed_rules()?;
         let mut routes = Vec::new();
@@ -164,23 +165,17 @@ impl Router {
             None
         };
         if fakeip {
-            tracing::info!(
-                "fake-ip enabled v4={:?} v6={:?} ipv6={} mode={} filter={:?} persistent={}",
-                cfg.dns.fakeip_range,
-                if ipv6 {
-                    cfg.dns.fakeip6_range.clone()
-                } else {
-                    None
-                },
+            // Ranges / filter list are config data — debug only.
+            tracing::debug!(
+                "fake-ip enabled ipv6={} mode={} persistent={}",
                 ipv6,
                 cfg.dns.fakeip_filter_mode,
-                cfg.dns.fakeip_filter,
                 persist_store.is_some()
             );
         }
 
         let dns_cache = if dns_enabled && cfg.dns.cache_size > 0 {
-            tracing::info!(
+            tracing::debug!(
                 "dns cache size={} persistent={}",
                 cfg.dns.cache_size,
                 persist_store.is_some()
@@ -210,7 +205,7 @@ impl Router {
                     .as_deref()
                     .context("rule-follow-route=true requires dns.proxy-nameserver")?,
             )?;
-            tracing::info!("dns rule-follow-route=true direct={direct} proxy={proxy}");
+            tracing::debug!("dns rule-follow-route=true direct={direct} proxy={proxy}");
             DnsRoute::FollowRoute {
                 direct: DnsAction::Upstream(direct),
                 proxy: DnsAction::Upstream(proxy),
@@ -225,7 +220,7 @@ impl Router {
                     .as_deref()
                     .context("rule-follow-route=false without dns.rules requires dns.nameserver")?;
                 let up = parse_nameserver(ns)?;
-                tracing::info!("dns rule-follow-route=false rules=0 nameserver={up}");
+                tracing::debug!("dns rule-follow-route=false rules=0 nameserver={up}");
                 entries.push((crate::config::RuleKind::Match, DnsAction::Upstream(up)));
             } else {
                 for (i, line) in cfg.dns.rules.iter().enumerate() {
@@ -236,7 +231,7 @@ impl Router {
                     } else {
                         DnsAction::Upstream(parse_nameserver(&r.upstream)?)
                     };
-                    tracing::info!("dns rule {} -> {}", line.trim(), match &action {
+                    tracing::debug!("dns rule {} -> {}", line.trim(), match &action {
                         DnsAction::Upstream(u) => u.to_string(),
                         DnsAction::Block => "rcode://success".into(),
                     });

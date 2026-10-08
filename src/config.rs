@@ -198,6 +198,9 @@ fn default_tun_mtu() -> u32 {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct GlobalConfig {
+    /// `error` | `warn` | `info` | `debug` | `trace` | `off`.
+    /// `off` disables logging entirely — runtime output *and* the in-memory
+    /// log buffer behind the API/UI. `RUST_LOG` overrides it when set.
     #[serde(default = "default_log_level", rename = "log-level")]
     pub log_level: String,
     /// None = 入站未启用；显式 `0` 会被校验拒绝（想关闭就省略字段）。

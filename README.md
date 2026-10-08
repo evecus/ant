@@ -46,6 +46,10 @@ Layout (mihomo-style):
 - Flat top-level: `mixed-port`, `http-port`/`port`, `socks-port`, `tproxy-port`, `log-level`, `sniff`, … (`sniff: true` enables
   TLS SNI / HTTP Host / QUIC sniffing for domain routing, default off; DNS sniffing follows
   `dns.route-hijack` independently)
+- `log-level`: `error` | `warn` | `info` | `debug` | `trace` | `off` — `off` disables logging
+  completely (runtime output **and** the in-memory log buffer behind the API/UI). `RUST_LOG`
+  overrides it when set. Logs never echo config secrets: node addresses, subscription URLs and
+  rule/dns contents are not printed.
 - `dns:` — `rule-follow-route` / `direct-nameserver` / `proxy-nameserver` / `rules` /
   `nameserver` / `mode` / `fakeip-range` / …
 - `proxies:` — node list（节点名不得使用保留名 `direct` / `block` / `reject`，大小写不限）

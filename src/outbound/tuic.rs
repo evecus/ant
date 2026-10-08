@@ -541,7 +541,7 @@ impl TuicOutbound {
 
     async fn connect_once(&self) -> Result<Arc<TuicConn>> {
         let server_addr = resolve_server(&self.opts.server, self.opts.port).await?;
-        tracing::info!(
+        tracing::debug!(
             "tuic connecting to {} (sni={}, alpn={:?}, cc={})",
             server_addr,
             self.opts.sni,

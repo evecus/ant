@@ -2,6 +2,8 @@
 # Rule-providers: binary `.ars` or plaintext (yaml/json/list/text).
 # Optional offline convert: ant ruleset-convert -i in.yaml -o out.ars
 
+# error | warn | info | debug | trace | off  (`off` disables logging entirely)
+# RUST_LOG, when set, overrides this value.
 log-level: info
 
 # Global persistent cache (redb). Default false.

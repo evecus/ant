@@ -250,7 +250,8 @@ pub async fn resolve_host_via_bootstrap(host: &str, port: u16) -> Result<SocketA
         match lookup_via(boot, host, port).await {
             Ok(a) => return Ok(a),
             Err(e) => {
-                tracing::warn!(
+                // Per-query; the queried name is user traffic — debug only.
+                tracing::debug!(
                     "resolve {host} via default-nameserver failed: {e:#}; falling back to system resolver"
                 );
             }

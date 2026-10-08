@@ -80,11 +80,16 @@ async fn main() -> Result<()> {
             return Ok(());
         }
         Some(Commands::Check { path }) => {
-            // Runtime logs to stderr so stdout stays a clean check report.
+            // `ant check` prints exactly one line on stdout; runtime logs are
+            // off by default (set RUST_LOG to see them while debugging a
+            // config). stderr keeps the few warnings that are not part of the
+            // report.
             tracing_subscriber::fmt()
                 .with_ansi(false)
                 .with_writer(std::io::stderr)
-                .with_env_filter(EnvFilter::new("info"))
+                .with_env_filter(
+                    EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("off")),
+                )
                 .init();
             let (path, base_dir) = match (&path, &cli.dir) {
                 (Some(p), _) => (p.clone(), None),
@@ -123,12 +128,19 @@ async fn main() -> Result<()> {
             .as_deref()
             .context("dns.enable=true requires dns.default-nameserver")?;
         crate::dns::set_bootstrap(crate::dns::parse_nameserver(ns).context("invalid default-nameserver")?);
-        tracing::info!("default-nameserver {}", ns);
+        // Upstream address is config data — debug only.
+        tracing::debug!("default-nameserver {}", ns);
     } else {
         tracing::info!("dns module disabled; internal resolution uses the system resolver");
     }
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new(&cfg.global.log_level));
+    // `log-level: off` disables logging entirely (including the in-memory
+    // buffer behind the API/UI). RUST_LOG still wins when it is set.
+    let level = cfg.global.log_level.trim();
+    let filter = if level.eq_ignore_ascii_case("off") {
+        EnvFilter::new("off")
+    } else {
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(level))
+    };
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
     tracing_subscriber::registry()
@@ -451,21 +463,37 @@ fn resolve_config_in_dir(dir: &std::path::Path) -> Result<std::path::PathBuf> {
 
 /// `ant check <config.yaml>` — walk the full startup path except dialing:
 /// YAML parse + validate, bootstrap DNS resolution, .ars ruleset loading,
-/// and outbound (dialer) construction. Exits non-zero on the first failure.
+/// and outbound (dialer) construction.
+///
+/// Output is a single line on stdout — no config digest, so node addresses,
+/// subscription URLs and rule contents never leave the process:
+///   success → `config ok: <path> (N proxy node(s), M route rule(s))`
+///   failure → `config error: <path>: <where>: <reason>` (exit 1)
 ///
 /// `base_dir` (from `-d/--dir`) resolves relative rule-provider paths.
 async fn cmd_check(path: &str, base_dir: Option<&std::path::Path>) -> Result<()> {
-    println!("checking config: {path}");
+    match check_config(path, base_dir).await {
+        Ok((nodes, rules)) => {
+            println!("config ok: {path} ({nodes} proxy node(s), {rules} route rule(s))");
+            Ok(())
+        }
+        Err(e) => {
+            // Collapse the anyhow chain (`where: reason`) onto one line.
+            let msg = format!("{e:#}").replace(['\n', '\r'], " ");
+            println!("config error: {path}: {msg}");
+            std::process::exit(1);
+        }
+    }
+}
 
-    let mut cfg = Config::load(path).context("config invalid")?;
+/// The full check pipeline. Each stage adds a context label so the single-line
+/// failure report points at the offending section (`dns.rules[2]`, `proxy node
+/// \`foo\``, …).
+async fn check_config(path: &str, base_dir: Option<&std::path::Path>) -> Result<(usize, usize)> {
+    let mut cfg = Config::load(path).context("YAML parse + validate")?;
     if let Some(base) = base_dir {
         cfg.resolve_ruleset_paths(base);
     }
-    println!(
-        "  ok    YAML parse + validate ({} proxy node(s), {} route rule(s))",
-        cfg.proxies.len(),
-        cfg.route.len()
-    );
 
     anyhow::ensure!(
         cfg.global.mixed_port.unwrap_or(0) > 0
@@ -486,18 +514,14 @@ async fn cmd_check(path: &str, base_dir: Option<&std::path::Path>) -> Result<()>
             .as_deref()
             .context("dns.enable=true requires dns.default-nameserver")?;
         crate::dns::set_bootstrap(
-            crate::dns::parse_nameserver(ns).context("invalid default-nameserver")?,
+            crate::dns::parse_nameserver(ns).context("invalid dns.default-nameserver")?,
         );
-        println!("  ok    bootstrap dns: default={}", ns);
-    } else {
-        println!("  ok    dns module disabled (system resolver)");
     }
 
-    Router::from_config(&cfg, None, None).await.context("router build failed")?;
-    println!(
-        "  ok    router: {} ruleset(s) loaded from .ars files",
-        cfg.rule_providers.len()
-    );
+    // .ars rulesets are loaded here; the reader reports the failing file.
+    Router::from_config(&cfg, None, None)
+        .await
+        .context("router build failed")?;
 
     // proxy-providers: offline mode — a http provider that has no cache file
     // yet is reported instead of being downloaded during a config check.
@@ -514,21 +538,15 @@ async fn cmd_check(path: &str, base_dir: Option<&std::path::Path>) -> Result<()>
             .context("proxy-provider load failed")?,
         )
     };
-    let mut provider_error = false;
-    if let Some(p) = &providers {
-        for v in p.snapshot() {
-            let name = v.get("name").and_then(|x| x.as_str()).unwrap_or("?");
-            let vehicle = v.get("vehicleType").and_then(|x| x.as_str()).unwrap_or("?");
-            let count = v.get("count").and_then(|x| x.as_u64()).unwrap_or(0);
-            let err = v.get("error").and_then(|x| x.as_str()).unwrap_or("");
-            if err.is_empty() {
-                println!("  prov  {} ({}) {} node(s)", name, vehicle, count);
-            } else {
-                provider_error = true;
-                println!("  prov  {} ({}) {} node(s)  error: {}", name, vehicle, count, err);
-            }
-        }
-    }
+    // Offline check: an http provider that has no cache file yet reports an
+    // error instead of downloading, so groups referencing it have no members.
+    let provider_error = providers.as_ref().is_some_and(|p| {
+        p.snapshot().iter().any(|v| {
+            v.get("error")
+                .and_then(|x| x.as_str())
+                .is_some_and(|s| !s.is_empty())
+        })
+    });
     let dns_ref = if cfg.dns.enable { Some(&cfg.dns) } else { None };
     // An offline check cannot load http providers, so groups that reference
     // them have no members yet — report instead of failing the whole check.
@@ -541,104 +559,15 @@ async fn cmd_check(path: &str, base_dir: Option<&std::path::Path>) -> Result<()>
     )
     .await
     {
-        Ok(_) => println!("  ok    outbounds built ({} node(s), no dial)", cfg.proxies.len()),
-        Err(e) if provider_error => println!(
-            "  warn  outbounds not built ({}); proxy-providers are unavailable offline",
-            format!("{e:#}").lines().next().unwrap_or("error")
+        Ok(_) => {}
+        Err(e) if provider_error => tracing::debug!(
+            error = format!("{e:#}"),
+            "outbounds not built: proxy-providers are unavailable offline"
         ),
         Err(e) => return Err(e).context("outbound build failed (no dial attempted)"),
     }
 
-    print_summary(&cfg);
-    println!("config ok: {path}");
-    Ok(())
-}
-
-/// Short human-readable digest of the validated config.
-fn print_summary(cfg: &Config) {
-    for p in &cfg.proxies {
-        let mut tags = Vec::new();
-        let net = p.network.to_ascii_lowercase();
-        if net != "tcp" {
-            tags.push(net);
-        }
-        if p.reality_public_key.as_ref().is_some_and(|s| !s.is_empty()) {
-            tags.push("reality".into());
-        }
-        if p.tls {
-            tags.push("tls".into());
-        }
-        let tag = if tags.is_empty() {
-            String::new()
-        } else {
-            format!(" [{}]", tags.join("+"))
-        };
-        println!("  node   {} {} {}:{}{}", p.name, p.ty, p.server, p.port, tag);
-    }
-    if let Ok(list) = cfg.ruleset_list(None) {
-        for rs in &list {
-            let crate::config::RulesetStorage::File(p) = &rs.storage;
-            let src = p.display().to_string();
-            let extra = rs.url.as_ref().map(|u| format!(" url={u}")).unwrap_or_default();
-            println!("  rules  {} ({}) <- {}{}", rs.name, rs.ty, src, extra);
-        }
-    }
-    for line in &cfg.route {
-        println!("  route  {line}");
-    }
-    if !cfg.dns.enable {
-        println!("  dns    disabled (no dns block / enable=false; system resolver)");
-    } else {
-        let dns_mode = if cfg.dns.mode == "fakeip" {
-            format!(
-                "fakeip/{} ({} fakeip-filter rule(s))",
-                cfg.dns.fakeip_filter_mode,
-                cfg.dns.fakeip_filter.len()
-            )
-        } else {
-            "redir-host".to_string()
-        };
-        let port_disp = if cfg.dns.listen_port() > 0 {
-            cfg.dns.listen_port().to_string()
-        } else {
-            "-".into()
-        };
-        if cfg.dns.rule_follow_route {
-            println!(
-                "  dns    mode={dns_mode} rule-follow-route=true port={} direct={} proxy={} default={}",
-                port_disp,
-                cfg.dns.direct_nameserver.as_deref().unwrap_or("-"),
-                cfg.dns.proxy_nameserver.as_deref().unwrap_or("-"),
-                cfg.dns.default_nameserver.as_deref().unwrap_or("-")
-            );
-        } else {
-            println!(
-                "  dns    mode={dns_mode} rule-follow-route=false port={} rules={} nameserver={} default={}",
-                port_disp,
-                cfg.dns.rules.len(),
-                cfg.dns.nameserver.as_deref().unwrap_or("-"),
-                cfg.dns.default_nameserver.as_deref().unwrap_or("-")
-            );
-            for line in &cfg.dns.rules {
-                println!("  dns    rule  {line}");
-            }
-        }
-    }
-    println!(
-        "  listen mixed-port={} http-port={} socks-port={} tproxy-port={} redir-port={} api={} sniff={} auth={}",
-        cfg.global.mixed_port.unwrap_or(0),
-        cfg.global.http_port.unwrap_or(0),
-        cfg.global.socks_port.unwrap_or(0),
-        cfg.global.tproxy_port.unwrap_or(0),
-        cfg.global.redir_port.unwrap_or(0),
-        if cfg.global.api.is_empty() {
-            "-"
-        } else {
-            cfg.global.api.as_str()
-        },
-        if cfg.global.sniff { "on" } else { "off" },
-        if cfg.global.api_secret.is_empty() { "off" } else { "on" }
-    );
+    Ok((cfg.proxies.len(), cfg.route.len()))
 }
 
 #[cfg(test)]

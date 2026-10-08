@@ -143,11 +143,8 @@ impl WireGuardOutbound {
         );
         tokio::spawn(wire_task(tunn, udp, endpoint, tx_rx, rx_tx, stack.clone()));
 
-        tracing::info!(
-            "proxy node `{tag}` (wireguard) = {}:{} ready (mtu={mtu}, keepalive={keepalive}s)",
-            cfg.server,
-            cfg.port
-        );
+        // Endpoint address is config data — never logged.
+        tracing::info!("proxy node `{tag}` (wireguard) ready (mtu={mtu}, keepalive={keepalive}s)");
         Ok(Self {
             tag,
             stack,
