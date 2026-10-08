@@ -45,6 +45,9 @@ pub enum TunStack {
     Gvisor,
     /// 内核 NAT 栈（旧行为）。
     System,
+    /// 混合栈（sing-tun `mixed` 语义）：TCP/ICMP 走 system 栈（内核 NAT +
+    /// 本地 listener），UDP 走 gvisor 用户态栈。
+    Mixed,
 }
 
 /// Flat `tun:` block. Creates a virtual NIC and runs the selected stack
@@ -60,6 +63,7 @@ pub struct TunConfig {
     /// clash-netstack / mihomo mipstack 路线），TCP/UDP 全在用户态终结，
     /// 无内核 socket 对（Windows 内存 ↓）、无逐包 NAT 改写（Linux CPU ↓）。
     /// `system`：内核 NAT + 本地 listener 转发（旧行为）。
+    /// `mixed`：TCP/ICMP 走 system 栈，UDP 走 gvisor 栈（sing-tun 同名语义）。
     #[serde(default)]
     pub stack: TunStack,
     /// Interface name. Empty → OS assigns (Linux `tunN`; Windows defaults to `ant-tun`).
