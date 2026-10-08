@@ -5,6 +5,7 @@
 //! gvisor = user-space smoltcp netstack (`gvisor.rs` + `gvisor_*.rs`, ported from clash-rs
 //! clash-netstack): no kernel socket pairs, no per-packet NAT rewrite.
 //! system = kernel NAT + local TCP listener (legacy, `system_stack.rs` + `system_nat.rs`).
+//! mixed = system for TCP/ICMP + gvisor for UDP (sing-tun `mixed` semantics).
 //!
 //! Platforms: Linux + Windows + macOS + Android (external FD). Address
 //! configuration uses `ip` (Linux), `ifconfig` (macOS), or `netsh` (Windows).
@@ -320,6 +321,27 @@ pub async fn run_tun(
         crate::config::TunStack::System => {
             info!("tun: system stack (kernel NAT + local listener)");
             system_stack::run_system_stack(system_stack::TunStackParams {
+                dev,
+                if_name,
+                cfg: tun_cfg,
+                addrs: system_stack::StackAddrs {
+                    inet4_server,
+                    inet4_client,
+                    inet6_server,
+                    inet6_client,
+                    prefixes_v4,
+                },
+                router,
+                outbounds,
+                vnet_hdr,
+                gro_flags,
+                dns_hijack,
+            })
+            .await
+        }
+        crate::config::TunStack::Mixed => {
+            info!("tun: mixed stack (system TCP/ICMP + gvisor UDP)");
+            system_stack::run_mixed_stack(system_stack::TunStackParams {
                 dev,
                 if_name,
                 cfg: tun_cfg,

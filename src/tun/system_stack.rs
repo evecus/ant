@@ -156,6 +156,17 @@ pub struct TunStackParams {
 }
 
 pub async fn run_system_stack(p: TunStackParams) -> Result<()> {
+    run_system_inner(p, false).await
+}
+
+/// `tun.stack: mixed`（sing-tun 同名语义）：TCP / ICMP 由 system 栈处理
+/// （内核 NAT + 本地 listener + ICMP forwarder），UDP 注入 gvisor 用户态栈
+/// 终结（dns-hijack / 会话转发与 gvisor 栈一致）。
+pub async fn run_mixed_stack(p: TunStackParams) -> Result<()> {
+    run_system_inner(p, true).await
+}
+
+async fn run_system_inner(p: TunStackParams, mixed: bool) -> Result<()> {
     let TunStackParams {
         dev,
         if_name,
@@ -287,6 +298,51 @@ pub async fn run_system_stack(p: TunStackParams) -> Result<()> {
         dns_hijack,
     };
 
+    // mixed：UDP 交给 gvisor 用户态栈。栈输出（UDP 回包）与 system 栈共用同一个
+    // TUN writer；TCP listener 仅为保持栈内部通道存活而持有，不会收到连接
+    // （TCP 包不会被注入 gvisor 栈）。
+    let mut udp_sink = None;
+    let mut _gvisor_tcp_keepalive = None;
+    if mixed {
+        let mtu = cfg.mtu as usize;
+        let (stack, tcp_listener, udp_socket) = gvisor::NetStack::new(mtu);
+        let (stack_sink, mut stack_stream) = stack.split();
+        _gvisor_tcp_keepalive = Some(tcp_listener);
+        {
+            let w = writer.clone();
+            tokio::spawn(async move {
+                while let Some(item) = stack_stream.next().await {
+                    match item {
+                        Ok(pkt) => tun_write(&w, pkt.data()).await,
+                        Err(e) => warn!(err = %e, "tun: gvisor outbound error"),
+                    }
+                }
+            });
+        }
+        let sessions: Arc<Mutex<HashMap<SocketAddr, UdpEntry>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        {
+            let s = sessions.clone();
+            tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(Duration::from_secs(30)).await;
+                    let mut map = s.lock().await;
+                    let now = Instant::now();
+                    map.retain(|_, e| now.duration_since(e.last_seen) < UDP_IDLE);
+                }
+            });
+        }
+        tokio::spawn(run_gvisor_udp(
+            udp_socket,
+            rt.router.clone(),
+            rt.outbounds.clone(),
+            rt.dns_hijack.clone(),
+            sessions,
+        ));
+        udp_sink = Some(stack_sink);
+        info!(interface = %if_name, mtu, "tun: mixed stack (system TCP/ICMP + gvisor UDP)");
+    }
+
     let mut defrag = IpDefragmenter::new();
     let mut reader = reader.lock().await;
     // Diagnostic counters: packets read from the TUN device, by kind.
@@ -353,7 +409,13 @@ pub async fn run_system_stack(p: TunStackParams) -> Result<()> {
                     Some(pkt)
                 };
                 if let Some(full) = full.as_mut() {
-                    process_ipv4(full, &rt).await;
+                    if let Some(sink) = udp_sink.as_mut().filter(|_| full[9] == IPPROTO_UDP) {
+                        if !mixed_feed_udp(sink, std::mem::take(full)).await {
+                            break;
+                        }
+                    } else {
+                        process_ipv4(full, &rt).await;
+                    }
                 }
             }
             6 if pkt.len() >= 40 => {
@@ -363,13 +425,35 @@ pub async fn run_system_stack(p: TunStackParams) -> Result<()> {
                     Some(pkt)
                 };
                 if let Some(full) = full.as_mut() {
-                    process_ipv6(full, &rt).await;
+                    let is_udp = ipv6_l4_offset(full).0 == IPPROTO_UDP;
+                    if let Some(sink) = udp_sink.as_mut().filter(|_| is_udp) {
+                        if !mixed_feed_udp(sink, std::mem::take(full)).await {
+                            break;
+                        }
+                    } else {
+                        process_ipv6(full, &rt).await;
+                    }
                 }
             }
             _ => {}
         }
     }
     Ok(())
+}
+
+/// mixed：把 UDP 包注入 gvisor 栈。返回 false 表示栈已关闭，应退出主循环。
+async fn mixed_feed_udp<S>(sink: &mut S, pkt: Vec<u8>) -> bool
+where
+    S: futures::Sink<gvisor::Packet, Error = std::io::Error> + Unpin,
+{
+    match sink.send(gvisor::Packet::new(pkt)).await {
+        Ok(()) => true,
+        Err(e) if e.kind() == std::io::ErrorKind::InvalidData => true,
+        Err(e) => {
+            warn!(err = %e, "tun: gvisor sink closed");
+            false
+        }
+    }
 }
 
 async fn bind_with_retry(addr: SocketAddr) -> Option<TcpListener> {
