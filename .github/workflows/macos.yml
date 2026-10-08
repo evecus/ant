@@ -45,9 +45,13 @@ jobs:
       - name: Strip binary
         run: strip target/${{ matrix.target }}/release/ant || true
 
-      - name: Upload binary
-        uses: actions/upload-artifact@v4
+      - run: |
+          mkdir -p dist
+          cp target/target/${{ matrix.target }}/release/ant dist/ant-darwin-arm64
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
         with:
-          name: ${{ matrix.artifact }}
-          path: target/${{ matrix.target }}/release/ant
-          if-no-files-found: error
+          tag_name: bin
+          prerelease: false
+          files: dist/ant-*

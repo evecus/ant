@@ -34,9 +34,13 @@ jobs:
       - name: Build release
         run: cargo build --release --target x86_64-pc-windows-msvc --locked
 
-      - name: Upload binary
-        uses: actions/upload-artifact@v4
+      - run: |
+          mkdir -p dist
+          cp target/x86_64-pc-windows-msvc/release/ant.exe dist/ant-windows-x64.exe
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
         with:
-          name: ant-windows-x86_64
-          path: target/x86_64-pc-windows-msvc/release/ant.exe
-          if-no-files-found: error
+          tag_name: bin
+          prerelease: false
+          files: dist/ant-*

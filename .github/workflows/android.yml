@@ -9,10 +9,6 @@ env:
 jobs:
 
   build-android:
-    # Official NDK + cargo-ndk instead of cross: cross's android image still
-    # ships an ancient NDK (gcc 4.9 / clang 9) that lacks libunwind.a, while
-    # Rust >= 1.68 links -lunwind for aarch64-linux-android. NDK r23+ bundles
-    # LLVM libunwind, so the modern toolchain links cleanly.
     name: android-aarch64
     runs-on: ubuntu-latest
     steps:
@@ -68,9 +64,13 @@ jobs:
         env:
           ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
 
-      - name: Upload binary
-        uses: actions/upload-artifact@v4
+      - run: |
+          mkdir -p dist
+          cp target/aarch64-linux-android/release/ant dist/ant-android-arm64
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
         with:
-          name: ant-android-aarch64
-          path: target/aarch64-linux-android/release/ant
-          if-no-files-found: error
+          tag_name: bin
+          prerelease: false
+          files: dist/ant-*

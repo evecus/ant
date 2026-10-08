@@ -38,9 +38,13 @@ jobs:
       - name: Build release (aarch64)
         run: cross build --release --target aarch64-unknown-linux-musl --locked
 
-      - name: Upload binary
-        uses: actions/upload-artifact@v4
+      - run: |
+          mkdir -p dist
+          cp target/aarch64-unknown-linux-musl/release/ant dist/ant-linux-aarch64
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
         with:
-          name: ant-linux-aarch64
-          path: target/aarch64-unknown-linux-musl/release/ant
-          if-no-files-found: error
+          tag_name: bin
+          prerelease: false
+          files: dist/ant-*
