@@ -40,7 +40,7 @@ jobs:
 
       - run: |
           mkdir -p dist
-          cp target/aarch64-unknown-linux-musl/release/ant dist/ant-linux-aarch64
+          cp target/aarch64-unknown-linux-musl/release/ant dist/ant-linux-arm64
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
