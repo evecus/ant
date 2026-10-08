@@ -29,12 +29,11 @@ fn fold_sum(mut sum: u64) -> u16 {
 /// ~4x fewer adds. u64 accumulator defers folding across payloads up to 64 KiB.
 #[inline]
 fn ones_complement_sum(mut sum: u64, data: &[u8]) -> u64 {
-    let mut chunks = data.chunks_exact(8);
-    for c in &mut chunks {
+    let (chunks, r) = data.as_chunks::<8>();
+    for c in chunks {
         sum += u64::from(u32::from_be_bytes([c[0], c[1], c[2], c[3]]));
         sum += u64::from(u32::from_be_bytes([c[4], c[5], c[6], c[7]]));
     }
-    let r = chunks.remainder();
     let mut i = 0;
     while i + 1 < r.len() {
         sum += u16::from_be_bytes([r[i], r[i + 1]]) as u64;

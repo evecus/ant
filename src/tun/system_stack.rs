@@ -434,7 +434,7 @@ async fn run_system_inner(p: TunStackParams, mixed: bool) -> Result<()> {
         };
         // mixed：重组后的 UDP 包注入 netstack，其余（TCP/ICMP 等）走 system 栈。
         if let Some(sink) = udp_sink.as_mut() {
-            let is_udp = full.as_deref().map_or(false, |f| {
+            let is_udp = full.as_deref().is_some_and(|f| {
                 if version == 4 {
                     f[9] == IPPROTO_UDP
                 } else {
