@@ -136,7 +136,7 @@ windows-sys = { version = "0.52", features = [
 libc = "0.2"
 nftables = "0.6"
 rtnetlink = "0.16"
-netlink-packet-route = "0.21"
+netlink-packet-route = "0.22"
 
 [profile.release]
 lto = true
