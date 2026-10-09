@@ -489,3 +489,29 @@ route:
   - RULE-SET,cn-ip,DIRECT
   # - RULE-SET,cn-ip,DIRECT,no-resolve
   - MATCH,PROXY
+
+# ---------------------------------------------------------------------------
+# ip-auto-route — Linux system-wide transparent proxy (nft preferred, iptables
+# fallback) + policy routing. Mutually exclusive with tun.auto-route /
+# tun.auto-redirect. Related base configs must be present for each mode:
+#   tcp-mode: redir   → redir-port
+#   * tproxy          → tproxy-port
+#   * tun             → tun.enable + tun.address
+#   dns-hijack-to-port → dns.enable + dns.port
+#   fakeip-ping-hijack → dns.mode=fakeip + fakeip-range
+#   lan-proxy: true   → lan-interface (required, non-empty)
+# Mark is shared with top-level `mark` (default 255) for anti-loop.
+# ---------------------------------------------------------------------------
+# ip-auto-route:
+#   enable: true
+#   ipv6: true
+#   dns-hijack-to-port: true
+#   fakeip-ping-hijack: false
+#   tcp-mode: redir          # redir | tproxy | tun
+#   udp-mode: tproxy         # tproxy | tun
+#   lan-proxy: true
+#   lan-interface:
+#     - eth0
+#   bypass-uid: []
+#   bypass-gid: []
+#   bypass-cgroup: []
