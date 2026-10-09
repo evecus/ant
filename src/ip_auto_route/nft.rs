@@ -1,4 +1,17 @@
 //! nftables rules for ip-auto-route (table `inet ant-ip-auto-route`).
+//!
+//! TPROXY constraints (kernel / nftables):
+//! - Only valid in **filter** chains on hooks **prerouting** and **output**
+//! - NOT valid in `type route` (mangle) chains — that yields "Operation not supported"
+//! - Mark + tproxy: set mark after/with tproxy; policy routing uses the mark
+//!
+//! Local vs LAN:
+//! - prerouting: LAN ingress (lan-proxy)
+//! - output (filter): locally generated traffic
+//!
+//! DNS:
+//! - When `dns-hijack-to-port` is on, port 53 is redirected via NAT to dns.port
+//!   and is **excluded** from tproxy rules (avoid double-hijack).
 
 use super::{Params, TcpMode, UdpMode};
 use anyhow::{Context, Result};
@@ -51,6 +64,7 @@ fn mask_hex(p: &Params) -> String {
 
 fn bypass_rules(p: &Params) -> String {
     let mut lines = String::new();
+    // Anti-loop: our own marked outbound
     lines.push_str(&format!(
         "    meta mark and {} == {} return\n",
         mask_hex(p),
@@ -80,16 +94,29 @@ fn bypass_rules(p: &Params) -> String {
     lines
 }
 
-/// Core hijack expressions shared by output + lan chains (filter/tproxy/mark).
+/// Exclude DNS from tproxy when NAT redirect owns port 53.
+fn not_dns_expr(p: &Params) -> &'static str {
+    if p.dns_hijack && p.dns_port > 0 {
+        " th dport != 53"
+    } else {
+        ""
+    }
+}
+
+/// TPROXY / mark rules for a **filter** chain (prerouting or output).
 fn filter_hijack(p: &Params) -> String {
     let mut s = String::new();
     let mark = mark_hex(p);
     let mask = mask_hex(p);
+    let not_dns = not_dns_expr(p);
 
-    // tproxy DNS (when not using pure redirect nat)
-    if p.dns_hijack && p.tproxy_port > 0 && p.tcp_mode != Some(TcpMode::Redir) {
+    // DNS → tproxy only when NOT using dns-hijack NAT redirect
+    if p.dns_hijack && p.dns_port == 0 && p.tproxy_port > 0 {
+        // no listen port — fall through to tproxy path if available
+    }
+    if !p.dns_hijack && p.tproxy_port > 0 {
         s.push_str(&format!(
-            "    meta l4proto {{ tcp, udp }} th dport 53 meta mark set meta mark & {mask} | {mark} tproxy to :{}\n",
+            "    meta l4proto {{ tcp, udp }} th dport 53 tproxy to :{} meta mark set meta mark & {mask} | {mark}\n",
             p.tproxy_port
         ));
     }
@@ -97,14 +124,17 @@ fn filter_hijack(p: &Params) -> String {
     match p.tcp_mode {
         Some(TcpMode::Tproxy) if p.tproxy_port > 0 => {
             s.push_str(&format!(
-                "    meta l4proto tcp meta mark set meta mark & {mask} | {mark} tproxy to :{}\n",
+                "    meta l4proto tcp{not_dns} tproxy to :{} meta mark set meta mark & {mask} | {mark}\n",
                 p.tproxy_port
             ));
         }
         Some(TcpMode::Tun) => {
             s.push_str(&format!(
-                "    meta l4proto tcp meta mark set meta mark & {mask} | {mark}\n"
+                "    meta l4proto tcp{not_dns} meta mark set meta mark & {mask} | {mark}\n"
             ));
+        }
+        Some(TcpMode::Redir) => {
+            // handled in nat
         }
         _ => {}
     }
@@ -112,24 +142,29 @@ fn filter_hijack(p: &Params) -> String {
     match p.udp_mode {
         Some(UdpMode::Tproxy) if p.tproxy_port > 0 => {
             s.push_str(&format!(
-                "    meta l4proto udp meta mark set meta mark & {mask} | {mark} tproxy to :{}\n",
+                "    meta l4proto udp{not_dns} tproxy to :{} meta mark set meta mark & {mask} | {mark}\n",
                 p.tproxy_port
             ));
         }
         Some(UdpMode::Tun) => {
             s.push_str(&format!(
-                "    meta l4proto udp meta mark set meta mark & {mask} | {mark}\n"
+                "    meta l4proto udp{not_dns} meta mark set meta mark & {mask} | {mark}\n"
             ));
         }
         _ => {}
     }
 
+    // Fake-IP ICMP: accept so local stack can answer (inet family syntax)
     if p.fakeip_ping {
         if let Some(ref r) = p.fakeip_v4 {
-            s.push_str(&format!("    ip protocol icmp ip daddr {r} accept\n"));
+            s.push_str(&format!(
+                "    ip protocol icmp ip daddr {r} accept\n"
+            ));
         }
         if let Some(ref r) = p.fakeip_v6 {
-            s.push_str(&format!("    ip6 nexthdr ipv6-icmp ip6 daddr {r} accept\n"));
+            s.push_str(&format!(
+                "    meta l4proto ipv6-icmp ip6 daddr {r} accept\n"
+            ));
         }
     }
     s
@@ -168,7 +203,8 @@ fn build_script(p: &Params) -> String {
         ));
     }
 
-    // filter prerouting — tproxy / mark
+    // ── filter prerouting: TPROXY for LAN ──────────────────────────
+    // priority mangle (-150): same class as iptables mangle PREROUTING
     s.push_str("  chain prerouting {\n");
     s.push_str("    type filter hook prerouting priority mangle; policy accept;\n");
     if p.lan_proxy {
@@ -183,14 +219,15 @@ fn build_script(p: &Params) -> String {
         s.push_str("  }\n");
     }
 
-    // filter output
+    // ── filter output: TPROXY for locally-generated traffic ────────
+    // Must be type **filter** (not route) — otherwise "Operation not supported"
     s.push_str("  chain output {\n");
-    s.push_str("    type route hook output priority mangle; policy accept;\n");
+    s.push_str("    type filter hook output priority mangle; policy accept;\n");
     s.push_str(&bypass_rules(p));
     s.push_str(&filter_hijack(p));
     s.push_str("  }\n");
 
-    // NAT for redir + DNS redirect-to-port
+    // ── NAT: redir + DNS redirect-to-port ───────────────────────────
     let need_nat = p.tcp_mode == Some(TcpMode::Redir) || (p.dns_hijack && p.dns_port > 0);
     if need_nat {
         s.push_str("  chain dstnat {\n");

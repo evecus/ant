@@ -167,7 +167,21 @@ pub async fn apply(cfg: &Config) -> Result<Guard> {
         let backend = backend::detect();
         tracing::info!(?backend, "ip-auto-route: firewall backend");
         let fw = match backend {
-            backend::Backend::Nftables => nft::apply(&params),
+            backend::Backend::Nftables => {
+                match nft::apply(&params) {
+                    Ok(()) => Ok(()),
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            "ip-auto-route: nftables apply failed, trying iptables fallback"
+                        );
+                        nft::cleanup();
+                        iptables::apply(&params).map_err(|e2| {
+                            e.context(format!("iptables fallback also failed: {e2}"))
+                        })
+                    }
+                }
+            }
             backend::Backend::Iptables => iptables::apply(&params),
             backend::Backend::None => Err(anyhow::anyhow!(
                 "neither nftables nor iptables is available"
@@ -175,11 +189,8 @@ pub async fn apply(cfg: &Config) -> Result<Guard> {
         };
 
         if let Err(e) = fw {
-            match backend {
-                backend::Backend::Nftables => nft::cleanup(),
-                backend::Backend::Iptables => iptables::cleanup(&params),
-                backend::Backend::None => {}
-            }
+            nft::cleanup();
+            iptables::cleanup(&params);
             let _ = route::cleanup(&params).await;
             return Err(e.context("ip-auto-route: firewall rules"));
         }
