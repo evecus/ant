@@ -140,15 +140,6 @@ pub struct Guard {
     inner: Option<Params>,
 }
 
-impl Guard {
-    pub fn inactive() -> Self {
-        Self {
-            #[cfg(target_os = "linux")]
-            inner: None,
-        }
-    }
-}
-
 /// Apply ip-auto-route. On failure, cleans partial state and returns Err.
 pub async fn apply(cfg: &Config) -> Result<Guard> {
     #[cfg(not(target_os = "linux"))]
