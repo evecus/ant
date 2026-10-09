@@ -104,7 +104,8 @@ async fn cleanup_with_handle(handle: &rtnetlink::Handle, p: &Params) {
                 .attributes
                 .iter()
                 .find_map(|a| match a {
-                    RuleAttribute::Table(t) => Some(t),
+                    // iter() yields &RuleAttribute → field binds as &u32
+                    RuleAttribute::Table(t) => Some(*t),
                     _ => None,
                 })
                 .unwrap_or(msg.header.table as u32);
@@ -142,7 +143,8 @@ async fn flush_table_routes(handle: &rtnetlink::Handle, table: u32, v6: bool) {
             .attributes
             .iter()
             .find_map(|a| match a {
-                RouteAttribute::Table(t) => Some(t),
+                // iter() yields &RouteAttribute → field binds as &u32
+                RouteAttribute::Table(t) => Some(*t),
                 _ => None,
             })
             .unwrap_or(msg.header.table as u32);
