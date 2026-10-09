@@ -128,20 +128,15 @@ windows-sys = { version = "0.52", features = [
     "Win32_System_Rpc",
 ] }
 
-# Linux/Android-only: transparent proxy inbounds (tproxy / redir) use netfilter
-# sockopts via libc; etherparse is for raw-packet re-injection in tproxy,
-# and on all platforms for tun netstack UDP 封包/解包 (clash-rs netstack 同款)。
+# Linux/Android-only: netfilter sockopts (tproxy/redir), nftables, and netlink
+# auto-route (root TUN). netlink-packet-route >= 0.20 hardcodes AddressFamily
+# (Bridge=7) so it compiles against bionic (no AF_BRIDGE). rtnetlink 0.16 tracks
+# that packet crate. VpnService external-FD mode still skips auto-route.
 [target.'cfg(any(target_os = "linux", target_os = "android"))'.dependencies]
 libc = "0.2"
 nftables = "0.6"
-
-# Linux-only OS control plane (sing-tun equivalent): routes/rules via netlink.
-# rtnetlink 0.14 cannot compile on Android (AddressFamily::Bridge references
-# AF_BRIDGE, absent from bionic libc); Android uses external-FD mode where
-# auto-route is force-disabled and netlink is never needed.
-[target.'cfg(target_os = "linux")'.dependencies]
-rtnetlink = "0.14"
-netlink-packet-route = "0.19"
+rtnetlink = "0.16"
+netlink-packet-route = "0.21"
 
 [profile.release]
 lto = true
