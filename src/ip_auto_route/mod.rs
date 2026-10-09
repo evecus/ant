@@ -176,9 +176,12 @@ pub async fn apply(cfg: &Config) -> Result<Guard> {
                             "ip-auto-route: nftables apply failed, trying iptables fallback"
                         );
                         nft::cleanup();
-                        iptables::apply(&params).map_err(|e2| {
-                            e.context(format!("iptables fallback also failed: {e2}"))
-                        })
+                        match iptables::apply(&params) {
+                            Ok(()) => Ok(()),
+                            Err(e2) => Err(e2.context(format!(
+                                "iptables fallback failed (nft error was: {e})"
+                            ))),
+                        }
                     }
                 }
             }
