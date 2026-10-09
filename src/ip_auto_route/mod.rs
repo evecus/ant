@@ -117,7 +117,7 @@ impl Params {
                 .filter(|s| !s.is_empty())
                 .collect(),
             mark,
-            mark_mask: 0xff,
+            mark_mask: 0xffff_ffff, // full match; SO_MARK uses exact value
             tproxy_table: 80,
             tproxy_pref: 1024,
             tun_table: 81,

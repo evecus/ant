@@ -57,6 +57,10 @@ fn mark_hex(p: &Params) -> String {
 fn mask_hex(p: &Params) -> String {
     format!("0x{:x}", p.mark_mask)
 }
+fn umask_hex(p: &Params) -> String {
+    // bits to *preserve* when setting mark (nexa TproxyFwUmask = !mask)
+    format!("0x{:x}", !p.mark_mask)
+}
 
 /// Bypass: own mark + user uid/gid/cgroup lists.
 fn bypass_rules(p: &Params) -> String {
@@ -107,9 +111,10 @@ fn need_nat(p: &Params) -> bool {
 
 /// nexa `router_tproxy` / `router_tun`: **mark only** (no tproxy statement).
 fn mark_set_accept(p: &Params) -> String {
+    // nexa: meta mark set meta mark & umask | mark
     format!(
         "\t\tmeta l4proto {{ tcp, udp }} meta mark set meta mark & {} | {} accept\n",
-        mask_hex(p),
+        umask_hex(p),
         mark_hex(p)
     )
 }
@@ -164,7 +169,7 @@ fn build_script(p: &Params) -> String {
         // nexa: meta mark set ... tproxy to :port
         s.push_str(&format!(
             "\t\tmeta l4proto {{ tcp, udp }} meta mark set meta mark & {} | {} tproxy to :{} accept\n",
-            mask_hex(p),
+            umask_hex(p),
             mark_hex(p),
             p.tproxy_port
         ));
