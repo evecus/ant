@@ -2820,6 +2820,7 @@ rules:
         // Do not use `\` line-continuations for indented YAML: Rust strips
         // leading whitespace after `\`, which would un-indent keys under
         // `dns:` and leave an empty dns block (enable defaults to true).
+        // `concat!` + `format!` cannot use named `{extra}` capture — use `{}`.
         format!(
             concat!(
                 "mixed-port: 7898\n",
@@ -2827,10 +2828,11 @@ rules:
                 "tproxy-port: 7893\n",
                 "dns:\n",
                 "  enable: false\n",
-                "{extra}",
+                "{}",
                 "{}",
                 "{}",
             ),
+            extra,
             two_nodes(),
             rules_and_routes("direct")
         )
