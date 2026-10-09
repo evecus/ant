@@ -7,7 +7,7 @@
 
 use super::Params;
 use anyhow::{Context, Result};
-use futures::StreamExt;
+use futures::TryStreamExt;
 use netlink_packet_route::route::{RouteScope, RouteType};
 use netlink_packet_route::rule::{RuleAction, RuleAttribute};
 use std::net::{Ipv4Addr, Ipv6Addr};
@@ -99,15 +99,16 @@ async fn cleanup_with_handle(handle: &rtnetlink::Handle, p: &Params) {
             handle.rule().get(rtnetlink::IpVersion::V4).execute()
         };
         let mut to_del = Vec::new();
-        while let Some(item) = rules.next().await {
-            let Ok(msg) = item else { continue };
-            let table = msg.attributes.iter().find_map(|a| match a {
-                RuleAttribute::Table(t) => Some(*t),
-                _ => None,
-            });
-            let hdr_table = msg.header.table as u32;
-            let t = table.unwrap_or(hdr_table);
-            if t == p.tproxy_table || t == p.tun_table {
+        while let Ok(Some(msg)) = rules.try_next().await {
+            let table = msg
+                .attributes
+                .iter()
+                .find_map(|a| match a {
+                    RuleAttribute::Table(t) => Some(t),
+                    _ => None,
+                })
+                .unwrap_or(msg.header.table as u32);
+            if table == p.tproxy_table || table == p.tun_table {
                 to_del.push(msg);
             }
         }
@@ -129,23 +130,20 @@ async fn cleanup_with_handle(handle: &rtnetlink::Handle, p: &Params) {
 }
 
 async fn flush_table_routes(handle: &rtnetlink::Handle, table: u32, v6: bool) {
+    use netlink_packet_route::route::RouteAttribute;
     let mut routes = if v6 {
         handle.route().get(rtnetlink::IpVersion::V6).execute()
     } else {
         handle.route().get(rtnetlink::IpVersion::V4).execute()
     };
     let mut to_del = Vec::new();
-    while let Some(item) = routes.next().await {
-        let Ok(msg) = item else { continue };
+    while let Ok(Some(msg)) = routes.try_next().await {
         let t = msg
             .attributes
             .iter()
-            .find_map(|a| {
-                use netlink_packet_route::route::RouteAttribute;
-                match a {
-                    RouteAttribute::Table(t) => Some(*t),
-                    _ => None,
-                }
+            .find_map(|a| match a {
+                RouteAttribute::Table(t) => Some(t),
+                _ => None,
             })
             .unwrap_or(msg.header.table as u32);
         if t == table {
@@ -210,21 +208,36 @@ async fn add_fwmark_rule(
     table: u32,
     v6: bool,
 ) -> Result<()> {
-    let mut req = if v6 {
-        handle.rule().add().v6()
+    // v4/v6 RuleAddRequest are distinct types — cannot share one binding.
+    let result = if v6 {
+        let mut req = handle
+            .rule()
+            .add()
+            .v6()
+            .priority(pref)
+            .fw_mark(mark)
+            .table_id(table)
+            .action(RuleAction::ToTable);
+        req.message_mut()
+            .attributes
+            .push(RuleAttribute::FwMask(mask));
+        req.execute().await
     } else {
-        handle.rule().add().v4()
+        let mut req = handle
+            .rule()
+            .add()
+            .v4()
+            .priority(pref)
+            .fw_mark(mark)
+            .table_id(table)
+            .action(RuleAction::ToTable);
+        req.message_mut()
+            .attributes
+            .push(RuleAttribute::FwMask(mask));
+        req.execute().await
     };
-    req = req
-        .priority(pref)
-        .fw_mark(mark)
-        .table_id(table)
-        .action(RuleAction::ToTable);
-    {
-        let msg = req.message_mut();
-        msg.attributes.push(RuleAttribute::FwMask(mask));
-    }
-    match req.execute().await {
+
+    match result {
         Ok(()) => Ok(()),
         Err(e) => {
             let s = e.to_string();
