@@ -165,111 +165,9 @@ fn delete_nft_table() -> Result<()> {
 
 /// Collect local address set like sing-tun `setupNFTables`:
 /// `lo` prefixes as-is + any **global unicast** on other interfaces, keeping
-/// the interface prefix length (masked network) — not collapsed to /32.
-///
-/// Prefers **rtnetlink** address dump (same crates as auto-route). Falls back
-/// to `ip -o addr show` only if netlink is unavailable.
+/// the interface prefix length (masked network) — not collapsed to /32, so a
+/// /24 LAN subnet excludes forwarded traffic to the whole subnet like sing-tun.
 fn collect_local_addrs(has_v4: bool, has_v6: bool) -> (Vec<String>, Vec<String>) {
-    match collect_local_addrs_netlink(has_v4, has_v6) {
-        Ok(v) => v,
-        Err(e) => {
-            warn!(err = %e, "tun: netlink addr dump failed, falling back to `ip`");
-            collect_local_addrs_ip_cmd(has_v4, has_v6)
-        }
-    }
-}
-
-fn collect_local_addrs_netlink(has_v4: bool, has_v6: bool) -> Result<(Vec<String>, Vec<String>)> {
-    use futures::stream::TryStreamExt;
-    use netlink_packet_route::address::AddressAttribute;
-    use rtnetlink::new_connection;
-    use std::collections::HashMap;
-    use std::net::IpAddr;
-
-    // Redirect setup runs on a worker thread / async runtime; prefer current
-    // handle, otherwise spin a tiny current-thread runtime.
-    let fut = async {
-        let (conn, handle, _) = new_connection().context("rtnetlink connect")?;
-        tokio::spawn(conn);
-
-        // ifindex → name
-        let mut names: HashMap<u32, String> = HashMap::new();
-        let mut links = handle.link().get().execute();
-        while let Some(link) = links.try_next().await.context("link dump")? {
-            use netlink_packet_route::link::LinkAttribute;
-            let idx = link.header.index;
-            for a in link.attributes {
-                if let LinkAttribute::IfName(n) = a {
-                    names.insert(idx, n);
-                }
-            }
-        }
-
-        let mut v4 = vec!["127.0.0.0/8".to_string()];
-        let mut v6 = vec!["::1/128".to_string()];
-
-        let mut addrs = handle.address().get().execute();
-        while let Some(msg) = addrs.try_next().await.context("addr dump")? {
-            let ifname = names.get(&msg.header.index).map(|s| s.as_str()).unwrap_or("");
-            let prefix = msg.header.prefix_len;
-            let mut local: Option<IpAddr> = None;
-            for a in &msg.attributes {
-                match a {
-                    AddressAttribute::Address(ip) | AddressAttribute::Local(ip) => {
-                        local = Some(*ip);
-                    }
-                    _ => {}
-                }
-            }
-            let Some(ip) = local else { continue };
-            match ip {
-                IpAddr::V4(a) if has_v4 => {
-                    let cidr = format!("{a}/{prefix}");
-                    let entry = if ifname == "lo" {
-                        Some(cidr)
-                    } else if is_global_unicast_v4(&cidr) {
-                        mask_prefix_v4(&cidr)
-                    } else {
-                        None
-                    };
-                    if let Some(e) = entry.filter(|e| !v4.iter().any(|x| x == e)) {
-                        v4.push(e);
-                    }
-                }
-                IpAddr::V6(a) if has_v6 => {
-                    let cidr = format!("{a}/{prefix}");
-                    let entry = if ifname == "lo" {
-                        Some(cidr)
-                    } else if is_global_unicast_v6(&cidr) {
-                        mask_prefix_v6(&cidr)
-                    } else {
-                        None
-                    };
-                    if let Some(e) = entry.filter(|e| !v6.iter().any(|x| x == e)) {
-                        v6.push(e);
-                    }
-                }
-                _ => {}
-            }
-        }
-        if has_v6 && !v6.iter().any(|x| x.starts_with("fe80:")) {
-            v6.push("fe80::/10".into());
-        }
-        Ok((v4, v6))
-    };
-
-    if let Ok(handle) = tokio::runtime::Handle::try_current() {
-        handle.block_on(fut)
-    } else {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .context("tokio runtime")?;
-        rt.block_on(fut)
-    }
-}
-
-fn collect_local_addrs_ip_cmd(has_v4: bool, has_v6: bool) -> (Vec<String>, Vec<String>) {
     let mut v4 = vec!["127.0.0.0/8".to_string()];
     let mut v6 = vec!["::1/128".to_string()];
 
@@ -281,6 +179,7 @@ fn collect_local_addrs_ip_cmd(has_v4: bool, has_v6: bool) -> (Vec<String>, Vec<S
             let text = String::from_utf8_lossy(&out.stdout);
             for line in text.lines() {
                 let parts: Vec<&str> = line.split_whitespace().collect();
+                // 2: eth0    inet 1.2.3.4/24 ...
                 let ifname = parts.get(1).copied().unwrap_or("");
                 if let Some(i) = parts.iter().position(|p| *p == "inet") {
                     if let Some(cidr) = parts.get(i + 1) {
@@ -325,6 +224,7 @@ fn collect_local_addrs_ip_cmd(has_v4: bool, has_v6: bool) -> (Vec<String>, Vec<S
                 }
             }
         }
+        // Always include link-local block so local LLA traffic is not redirected
         if !v6.iter().any(|x| x.starts_with("fe80:")) {
             v6.push("fe80::/10".into());
         }

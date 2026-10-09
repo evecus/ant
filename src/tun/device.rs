@@ -47,7 +47,7 @@ pub async fn create_device(cfg: &TunConfig) -> Result<(tun::AsyncDevice, String)
     // Android without an external FD: root self-create via /dev/tun +
     // TUNSETIFF (requires root / CAP_NET_ADMIN). The resulting fd is wrapped
     // exactly like a VpnService fd; auto-route is then handled by route.rs
-    // with `ip rule` / `ip route` (rtnetlink enabled for root mode).
+    // with `ip rule` / `ip route` (rtnetlink cannot compile on Android).
     #[cfg(target_os = "android")]
     {
         let (fd, if_name) = open_tun_root(cfg.device.as_deref())?;
