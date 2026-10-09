@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">AFA</string>
+    <string name="vpn_session">ant</string>
+    <string name="notification_channel">VPN 服务</string>
+    <string name="notification_title">AFA 代理</string>
+    <string name="notification_running">VPN 运行中</string>
+    <string name="btn_start">启动 VPN</string>
+    <string name="btn_stop">停止 VPN</string>
+    <string name="btn_import">导入配置</string>
+    <string name="toggle_start">启动</string>
+    <string name="toggle_stop">停止</string>
+    <string name="btn_logs">日志</string>
+    <string name="btn_settings">设置</string>
+    <string name="title_logs">运行日志</string>
+    <string name="btn_clear">清空</string>
+    <string name="title_settings">设置</string>
+    <string name="btn_save">保存</string>
+    <string name="settings_stack_label">TUN 协议栈</string>
+    <string name="stack_gvisor">gVisor</string>
+    <string name="stack_system">System（系统栈）</string>
+    <string name="stack_mixed">Mixed（混合栈）</string>
+    <string name="settings_mtu_label">MTU</string>
+    <string name="settings_dns_hijack">DNS 劫持（any:53）</string>
+    <string name="settings_loglevel_label">核心日志级别</string>
+    <string name="settings_note">TUN 地址固定为 172.19.0.1/30。全部 TUN 参数在启动 VPN 时由应用写入，覆盖导入配置中的 tun 段；修改后需重启 VPN 生效。</string>
+    <string name="settings_saved">已保存，重启 VPN 后生效</string>
+    <string name="settings_mtu_invalid">MTU 需在 576 – 10000 之间</string>
+    <string name="status_stopped">已停止</string>
+    <string name="status_starting">正在启动…</string>
+    <string name="status_running">运行中</string>
+    <string name="status_error">错误</string>
+    <string name="config_none">配置：默认（未导入文件）</string>
+    <string name="config_loaded">配置：%1$s（%2$d 字节）</string>
+    <string name="config_import_ok">配置导入成功，重启 VPN 后生效。TUN 参数由应用统一管理。</string>
+    <string name="config_import_fail">配置导入失败：%1$s</string>
+    <string name="hint_config">导入 mihomo 风格的 YAML 配置文件。TUN 参数由应用统一管理，无需在文件中配置 tun 段。</string>
+</resources>

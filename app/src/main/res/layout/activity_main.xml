@@ -1,0 +1,97 @@
+<?xml version="1.0" encoding="utf-8"?>
+<androidx.constraintlayout.widget.ConstraintLayout
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:padding="20dp">
+
+    <TextView
+        android:id="@+id/title"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:text="@string/app_name"
+        android:textSize="26sp"
+        android:textStyle="bold"
+        app:layout_constraintTop_toTopOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toEndOf="parent" />
+
+    <TextView
+        android:id="@+id/statusText"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="10dp"
+        android:text="@string/status_stopped"
+        android:textSize="16sp"
+        android:textColor="@color/status_stopped"
+        app:layout_constraintTop_toBottomOf="@id/title"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toEndOf="parent" />
+
+    <TextView
+        android:id="@+id/configStatus"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="6dp"
+        android:text="@string/config_none"
+        android:textSize="13sp"
+        android:textColor="?android:attr/textColorSecondary"
+        app:layout_constraintTop_toBottomOf="@id/statusText"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toEndOf="parent" />
+
+    <!-- 大圆形 VPN 开关：停止时蓝色电源图标，运行时绿色停止图标 -->
+    <com.google.android.material.button.MaterialButton
+        android:id="@+id/btnToggle"
+        android:layout_width="190dp"
+        android:layout_height="190dp"
+        android:insetTop="0dp"
+        android:insetBottom="0dp"
+        android:insetLeft="0dp"
+        android:insetRight="0dp"
+        android:text="@string/toggle_start"
+        android:textColor="#FFFFFF"
+        android:textSize="20sp"
+        android:stateListAnimator="@null"
+        app:backgroundTint="@color/toggle_idle"
+        app:shapeAppearanceOverlay="@style/ShapeAppearanceOverlay.Ant.Circle"
+        app:icon="@drawable/ic_power"
+        app:iconGravity="textTop"
+        app:iconPadding="10dp"
+        app:iconSize="52dp"
+        app:iconTint="#FFFFFF"
+        app:layout_constraintTop_toBottomOf="@id/configStatus"
+        app:layout_constraintBottom_toTopOf="@id/btnLogs"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintVertical_bias="0.5" />
+
+    <com.google.android.material.button.MaterialButton
+        android:id="@+id/btnLogs"
+        style="@style/Widget.Material3.Button.OutlinedButton"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_marginEnd="8dp"
+        android:text="@string/btn_logs"
+        app:icon="@drawable/ic_log"
+        app:iconGravity="textStart"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toStartOf="@id/btnSettings"
+        app:layout_constraintHorizontal_weight="1" />
+
+    <com.google.android.material.button.MaterialButton
+        android:id="@+id/btnSettings"
+        style="@style/Widget.Material3.Button.OutlinedButton"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:text="@string/btn_settings"
+        app:icon="@drawable/ic_settings"
+        app:iconGravity="textStart"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintStart_toEndOf="@id/btnLogs"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintHorizontal_weight="1" />
+
+</androidx.constraintlayout.widget.ConstraintLayout>

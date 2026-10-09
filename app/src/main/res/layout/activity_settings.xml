@@ -1,0 +1,137 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:fillViewport="true">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:padding="20dp">
+
+        <TextView
+            android:id="@+id/title"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/title_settings"
+            android:textSize="22sp"
+            android:textStyle="bold" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="24dp"
+            android:text="@string/settings_stack_label"
+            android:textSize="15sp"
+            android:textStyle="bold" />
+
+        <RadioGroup
+            android:id="@+id/rgStack"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:orientation="vertical">
+
+            <RadioButton
+                android:id="@+id/rbGvisor"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:checked="true"
+                android:text="@string/stack_gvisor" />
+
+            <RadioButton
+                android:id="@+id/rbSystem"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/stack_system" />
+
+            <RadioButton
+                android:id="@+id/rbMixed"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/stack_mixed" />
+        </RadioGroup>
+
+        <com.google.android.material.textfield.TextInputLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="20dp"
+            android:hint="@string/settings_mtu_label">
+
+            <com.google.android.material.textfield.TextInputEditText
+                android:id="@+id/etMtu"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:inputType="number"
+                android:text="1500" />
+        </com.google.android.material.textfield.TextInputLayout>
+
+        <com.google.android.material.materialswitch.MaterialSwitch
+            android:id="@+id/swDnsHijack"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="20dp"
+            android:checked="true"
+            android:text="@string/settings_dns_hijack" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="24dp"
+            android:text="@string/settings_loglevel_label"
+            android:textSize="15sp"
+            android:textStyle="bold" />
+
+        <RadioGroup
+            android:id="@+id/rgLogLevel"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:orientation="horizontal">
+
+            <RadioButton
+                android:id="@+id/rbDebug"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="debug" />
+
+            <RadioButton
+                android:id="@+id/rbInfo"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:checked="true"
+                android:text="info" />
+
+            <RadioButton
+                android:id="@+id/rbWarn"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="warn" />
+
+            <RadioButton
+                android:id="@+id/rbError"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="error" />
+        </RadioGroup>
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/btnSave"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="32dp"
+            android:text="@string/btn_save" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:text="@string/settings_note"
+            android:textSize="12sp"
+            android:textColor="?android:attr/textColorSecondary" />
+
+    </LinearLayout>
+</ScrollView>

@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.AntProxy" parent="Theme.Material3.DayNight.NoActionBar">
+        <item name="colorPrimary">#FF1976D2</item>
+        <item name="colorPrimaryContainer">#FFBBDEFB</item>
+    </style>
+
+    <!-- 大圆形 VPN 开关的形状 -->
+    <style name="ShapeAppearanceOverlay.Ant.Circle" parent="">
+        <item name="cornerFamily">rounded</item>
+        <item name="cornerSize">50%</item>
+    </style>
+</resources>
