@@ -2805,6 +2805,15 @@ rules:
     }
 
     #[test]
+    fn validate_dns_upstream_accepts_nameserver_and_rcode() {
+        let nodes = vec!["hy2-main".to_string()];
+        validate_dns_upstream("udp://1.1.1.1:53", &nodes).unwrap();
+        validate_dns_upstream("https://1.1.1.1/dns-query", &nodes).unwrap();
+        validate_dns_upstream("rcode://success", &nodes).unwrap();
+        for bad in ["direct", "BLOCK", "reject", "hy2-main", "rcode://nxdomain"] {
+            assert!(validate_dns_upstream(bad, &nodes).is_err(), "{bad}");
+        }
+    }
 
     // ── ip-auto-route validation ─────────────────────────────────
 
