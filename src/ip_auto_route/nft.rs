@@ -290,22 +290,20 @@ fn build_script(p: &Params) -> String {
     }
 
     // Fake-IP ping hijack (nexa: icmp echo-request redirect)
-    if p.fakeip_ping {
-        if p.fakeip_v4.is_some() || p.fakeip_v6.is_some() {
-            s.push_str("\tchain fakeip_ping {\n");
-            s.push_str("\t\ttype nat hook output priority filter - 1; policy accept;\n");
-            if let Some(ref r) = p.fakeip_v4 {
-                s.push_str(&format!(
-                    "\t\ticmp type echo-request ip daddr {r} redirect\n"
-                ));
-            }
-            if let Some(ref r) = p.fakeip_v6 {
-                s.push_str(&format!(
-                    "\t\ticmpv6 type echo-request ip6 daddr {r} redirect\n"
-                ));
-            }
-            s.push_str("\t}\n");
+    if p.fakeip_ping && (p.fakeip_v4.is_some() || p.fakeip_v6.is_some()) {
+        s.push_str("\tchain fakeip_ping {\n");
+        s.push_str("\t\ttype nat hook output priority filter - 1; policy accept;\n");
+        if let Some(ref r) = p.fakeip_v4 {
+            s.push_str(&format!(
+                "\t\ticmp type echo-request ip daddr {r} redirect\n"
+            ));
         }
+        if let Some(ref r) = p.fakeip_v6 {
+            s.push_str(&format!(
+                "\t\ticmpv6 type echo-request ip6 daddr {r} redirect\n"
+            ));
+        }
+        s.push_str("\t}\n");
     }
 
     s.push_str("}\n");
