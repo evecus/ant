@@ -34,7 +34,8 @@ pub struct RouteGuard {
 struct NetlinkInstalled {
     #[allow(dead_code)]
     if_index: u32,
-    /// Interface name (needed for Android Drop route del by dev).
+    /// Kept for diagnostics / future Drop by interface name.
+    #[allow(dead_code)]
     if_name: String,
     table: u32,
     /// Base priority used for this install (for full window cleanup on Drop).
