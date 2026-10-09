@@ -2817,13 +2817,20 @@ rules:
 
     fn iar_base(extra: &str) -> String {
         // Minimal valid proxy stack + optional ip-auto-route block.
+        // Do not use `\` line-continuations for indented YAML: Rust strips
+        // leading whitespace after `\`, which would un-indent keys under
+        // `dns:` and leave an empty dns block (enable defaults to true).
         format!(
-            "mixed-port: 7898\n\
-             redir-port: 7892\n\
-             tproxy-port: 7893\n\
-             dns:\n\
-               enable: false\n\
-             {extra}{}{}",
+            concat!(
+                "mixed-port: 7898\n",
+                "redir-port: 7892\n",
+                "tproxy-port: 7893\n",
+                "dns:\n",
+                "  enable: false\n",
+                "{extra}",
+                "{}",
+                "{}",
+            ),
             two_nodes(),
             rules_and_routes("direct")
         )
