@@ -66,6 +66,7 @@ jobs:
 
       - run: |
           mkdir -p dist
+          cp target/aarch64-linux-android/release/ant dist/libant.so
           cp target/aarch64-linux-android/release/ant dist/ant-android-arm64
 
       - name: Create GitHub Release
@@ -74,3 +75,25 @@ jobs:
           tag_name: bin
           prerelease: false
           files: dist/ant-*
+
+      - name: Checkout afa branch
+        uses: actions/checkout@v4
+        with:
+          ref: afa
+          path: afa-branch
+          fetch-depth: 0
+
+      - name: Push libant.so to afa branch (jniLibs/arm64-v8a)
+        run: |
+          mkdir -p afa-branch/app/src/main/jniLibs/arm64-v8a
+          cp dist/libant.so afa-branch/app/src/main/jniLibs/arm64-v8a/libant.so
+          cd afa-branch
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add app/src/main/jniLibs/arm64-v8a/libant.so
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "chore: update libant.so (arm64-v8a) from CI"
+            git push origin afa
+          fi
