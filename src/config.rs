@@ -2286,18 +2286,16 @@ impl Config {
                 }
             }
 
-            if iar.lan_proxy {
-                if iar.lan_interface.is_empty()
+            if iar.lan_proxy
+                && (iar.lan_interface.is_empty()
                     || iar
                         .lan_interface
                         .iter()
-                        .all(|s| s.trim().is_empty())
-                {
-                    bail!(
-                        "ip-auto-route.lan-proxy=true requires a non-empty lan-interface list \
-                         (to avoid hijacking the wrong NIC)"
-                    );
-                }
+                        .all(|s| s.trim().is_empty()))
+            {
+                bail!(
+                    "ip-auto-route.lan-proxy=true requires a non-empty lan-interface list                      (to avoid hijacking the wrong NIC)"
+                );
             }
         }
 
