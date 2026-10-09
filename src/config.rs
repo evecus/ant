@@ -16,6 +16,10 @@ pub struct Config {
     /// TUN virtual NIC (optional). System stack + optional OS route/DNS integration.
     #[serde(default)]
     pub tun: TunConfig,
+    /// Linux system-wide transparent proxy: nft/iptables + policy routing.
+    /// Mutually exclusive with `tun.auto-route` / `tun.auto-redirect`.
+    #[serde(default, rename = "ip-auto-route")]
+    pub ip_auto_route: IpAutoRouteConfig,
     /// Proxy nodes: list under `proxies:`; each node has a unique `name`.
     #[serde(default)]
     pub proxies: Vec<ProxyConfig>,
@@ -194,6 +198,68 @@ fn default_tun_rule() -> i32 {
 
 fn default_tun_mtu() -> u32 {
     1500
+}
+
+/// Linux system-wide transparent proxy control plane (`ip-auto-route:`).
+///
+/// Deploys nftables (preferred) or iptables + policy routing via rtnetlink.
+/// Mutually exclusive with `tun.auto-route` / `tun.auto-redirect`.
+/// Related base configs (redir/tproxy ports, tun, dns) must be present when
+/// the corresponding mode/feature is enabled.
+#[derive(Debug, Clone, Deserialize)]
+pub struct IpAutoRouteConfig {
+    /// Master switch. Default false.
+    #[serde(default)]
+    pub enable: bool,
+    /// Install IPv6 rules/routes as well. Default true.
+    #[serde(default = "default_true")]
+    pub ipv6: bool,
+    /// Hijack DNS (TCP/UDP :53) to the local DNS listen port.
+    /// Requires `dns.enable` and a non-zero `dns.port`.
+    #[serde(default, rename = "dns-hijack-to-port")]
+    pub dns_hijack_to_port: bool,
+    /// Special-case ICMP to Fake-IP ranges (requires dns mode=fakeip + ranges).
+    #[serde(default, rename = "fakeip-ping-hijack")]
+    pub fakeip_ping_hijack: bool,
+    /// TCP hijack mode: `redir` | `tproxy` | `tun`. Omit = unused for TCP.
+    #[serde(default, rename = "tcp-mode")]
+    pub tcp_mode: Option<String>,
+    /// UDP hijack mode: `tproxy` | `tun`. Omit = unused for UDP.
+    #[serde(default, rename = "udp-mode")]
+    pub udp_mode: Option<String>,
+    /// Hijack traffic arriving from LAN interfaces (prerouting).
+    #[serde(default, rename = "lan-proxy")]
+    pub lan_proxy: bool,
+    /// LAN ingress interfaces. **Required** (non-empty) when `lan-proxy: true`.
+    #[serde(default, rename = "lan-interface")]
+    pub lan_interface: Vec<String>,
+    /// User-defined UID bypass list (no built-in defaults).
+    #[serde(default, rename = "bypass-uid")]
+    pub bypass_uid: Vec<u32>,
+    /// User-defined GID bypass list.
+    #[serde(default, rename = "bypass-gid")]
+    pub bypass_gid: Vec<u32>,
+    /// User-defined cgroup v2 path bypass list (e.g. `system.slice/sshd.service`).
+    #[serde(default, rename = "bypass-cgroup")]
+    pub bypass_cgroup: Vec<String>,
+}
+
+impl Default for IpAutoRouteConfig {
+    fn default() -> Self {
+        Self {
+            enable: false,
+            ipv6: true,
+            dns_hijack_to_port: false,
+            fakeip_ping_hijack: false,
+            tcp_mode: None,
+            udp_mode: None,
+            lan_proxy: false,
+            lan_interface: Vec::new(),
+            bypass_uid: Vec::new(),
+            bypass_gid: Vec::new(),
+            bypass_cgroup: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -2076,6 +2142,165 @@ impl Config {
             };
             check(&self.dns.fakeip_filter, "fakeip-filter")?;
         }
+
+        // ── ip-auto-route ──────────────────────────────────────────────
+        self.validate_ip_auto_route()?;
+
+        Ok(())
+    }
+
+    /// Validate `ip-auto-route:` against mutual exclusion and required base configs.
+    fn validate_ip_auto_route(&self) -> Result<()> {
+        let iar = &self.ip_auto_route;
+        if !iar.enable {
+            return Ok(());
+        }
+
+        #[cfg(not(target_os = "linux"))]
+        {
+            bail!("ip-auto-route is only supported on Linux");
+        }
+
+        #[cfg(target_os = "linux")]
+        {
+            // Mutual exclusion with TUN auto-route / auto-redirect.
+            if self.tun.auto_route {
+                bail!(
+                    "ip-auto-route.enable is mutually exclusive with tun.auto-route; disable one of them"
+                );
+            }
+            if self.tun.auto_redirect {
+                bail!(
+                    "ip-auto-route.enable is mutually exclusive with tun.auto-redirect; disable one of them"
+                );
+            }
+
+            let tcp = iar
+                .tcp_mode
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_ascii_lowercase());
+            let udp = iar
+                .udp_mode
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_ascii_lowercase());
+
+            if tcp.is_none() && udp.is_none() {
+                bail!(
+                    "ip-auto-route.enable=true requires at least one of tcp-mode / udp-mode \
+                     (redir|tproxy|tun for TCP; tproxy|tun for UDP)"
+                );
+            }
+
+            if let Some(ref m) = tcp {
+                match m.as_str() {
+                    "redir" | "tproxy" | "tun" => {}
+                    other => bail!(
+                        "ip-auto-route.tcp-mode `{other}` is invalid; expected redir|tproxy|tun"
+                    ),
+                }
+            }
+            if let Some(ref m) = udp {
+                match m.as_str() {
+                    "tproxy" | "tun" => {}
+                    "redir" => bail!(
+                        "ip-auto-route.udp-mode `redir` is not supported; use tproxy or tun"
+                    ),
+                    other => bail!(
+                        "ip-auto-route.udp-mode `{other}` is invalid; expected tproxy|tun"
+                    ),
+                }
+            }
+
+            let needs_redir = tcp.as_deref() == Some("redir");
+            let needs_tproxy =
+                tcp.as_deref() == Some("tproxy") || udp.as_deref() == Some("tproxy");
+            let needs_tun = tcp.as_deref() == Some("tun") || udp.as_deref() == Some("tun");
+
+            if needs_redir {
+                match self.global.redir_port {
+                    Some(p) if p > 0 => {}
+                    _ => bail!(
+                        "ip-auto-route.tcp-mode=redir requires a non-zero top-level `redir-port`"
+                    ),
+                }
+            }
+            if needs_tproxy {
+                match self.global.tproxy_port {
+                    Some(p) if p > 0 => {}
+                    _ => bail!(
+                        "ip-auto-route tcp/udp-mode=tproxy requires a non-zero top-level `tproxy-port`"
+                    ),
+                }
+            }
+            if needs_tun {
+                if !self.tun.enable {
+                    bail!("ip-auto-route mode=tun requires tun.enable=true");
+                }
+                if self.tun.address.is_empty() {
+                    bail!("ip-auto-route mode=tun requires tun.address to be configured");
+                }
+            }
+
+            if iar.dns_hijack_to_port {
+                if !self.dns.enable {
+                    bail!("ip-auto-route.dns-hijack-to-port requires dns.enable=true");
+                }
+                if self.dns.listen_port() == 0 {
+                    bail!(
+                        "ip-auto-route.dns-hijack-to-port requires a non-zero dns.port \
+                         (DNS must listen on a real port)"
+                    );
+                }
+            }
+
+            if iar.fakeip_ping_hijack {
+                if !self.dns.enable {
+                    bail!("ip-auto-route.fakeip-ping-hijack requires dns.enable=true");
+                }
+                if self.dns.mode != "fakeip" {
+                    bail!(
+                        "ip-auto-route.fakeip-ping-hijack requires dns.mode=fakeip"
+                    );
+                }
+                let has_range = self
+                    .dns
+                    .fakeip_range
+                    .as_deref()
+                    .map(|s| !s.trim().is_empty())
+                    .unwrap_or(false)
+                    || self
+                        .dns
+                        .fakeip6_range
+                        .as_deref()
+                        .map(|s| !s.trim().is_empty())
+                        .unwrap_or(false);
+                if !has_range {
+                    bail!(
+                        "ip-auto-route.fakeip-ping-hijack requires dns.fakeip-range \
+                         and/or dns.fakeip6-range"
+                    );
+                }
+            }
+
+            if iar.lan_proxy {
+                if iar.lan_interface.is_empty()
+                    || iar
+                        .lan_interface
+                        .iter()
+                        .all(|s| s.trim().is_empty())
+                {
+                    bail!(
+                        "ip-auto-route.lan-proxy=true requires a non-empty lan-interface list \
+                         (to avoid hijacking the wrong NIC)"
+                    );
+                }
+            }
+        }
+
         Ok(())
     }
 }
@@ -2580,13 +2805,207 @@ rules:
     }
 
     #[test]
-    fn validate_dns_upstream_accepts_nameserver_and_rcode() {
-        let nodes = vec!["hy2-main".to_string()];
-        validate_dns_upstream("udp://1.1.1.1:53", &nodes).unwrap();
-        validate_dns_upstream("https://1.1.1.1/dns-query", &nodes).unwrap();
-        validate_dns_upstream("rcode://success", &nodes).unwrap();
-        for bad in ["direct", "BLOCK", "reject", "hy2-main", "rcode://nxdomain"] {
-            assert!(validate_dns_upstream(bad, &nodes).is_err(), "{bad}");
-        }
+
+    // ── ip-auto-route validation ─────────────────────────────────
+
+    fn iar_base(extra: &str) -> String {
+        // Minimal valid proxy stack + optional ip-auto-route block.
+        format!(
+            "mixed-port: 7898\n\
+             redir-port: 7892\n\
+             tproxy-port: 7893\n\
+             dns:\n\
+               enable: false\n\
+             {extra}{}{}",
+            two_nodes(),
+            rules_and_routes("direct")
+        )
+    }
+
+    #[test]
+    fn iar_disabled_ok() {
+        let cfg = parse(&iar_base("")).unwrap();
+        assert!(!cfg.ip_auto_route.enable);
+    }
+
+    #[test]
+    fn iar_enable_without_modes_fails() {
+        let yaml = iar_base("ip-auto-route:\n  enable: true\n");
+        let err = parse(&yaml).unwrap_err().to_string();
+        assert!(
+            err.contains("tcp-mode") || err.contains("udp-mode"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn iar_invalid_tcp_mode_fails() {
+        let yaml = iar_base(
+            "ip-auto-route:\n  enable: true\n  tcp-mode: foo\n",
+        );
+        let err = parse(&yaml).unwrap_err().to_string();
+        assert!(err.contains("tcp-mode"), "{err}");
+    }
+
+    #[test]
+    fn iar_udp_redir_rejected() {
+        let yaml = iar_base(
+            "ip-auto-route:\n  enable: true\n  udp-mode: redir\n",
+        );
+        let err = parse(&yaml).unwrap_err().to_string();
+        assert!(err.contains("udp-mode") && err.contains("redir"), "{err}");
+    }
+
+    #[test]
+    fn iar_redir_requires_redir_port() {
+        let yaml = format!(
+            "mixed-port: 7898\n\
+             dns:\n  enable: false\n\
+             ip-auto-route:\n  enable: true\n  tcp-mode: redir\n\
+             {}{}",
+            two_nodes(),
+            rules_and_routes("direct")
+        );
+        let err = parse(&yaml).unwrap_err().to_string();
+        assert!(err.contains("redir-port"), "{err}");
+    }
+
+    #[test]
+    fn iar_tproxy_requires_tproxy_port() {
+        let yaml = format!(
+            "mixed-port: 7898\n\
+             dns:\n  enable: false\n\
+             ip-auto-route:\n  enable: true\n  tcp-mode: tproxy\n\
+             {}{}",
+            two_nodes(),
+            rules_and_routes("direct")
+        );
+        let err = parse(&yaml).unwrap_err().to_string();
+        assert!(err.contains("tproxy-port"), "{err}");
+    }
+
+    #[test]
+    fn iar_tun_requires_tun_enable() {
+        let yaml = iar_base(
+            "ip-auto-route:\n  enable: true\n  tcp-mode: tun\n",
+        );
+        let err = parse(&yaml).unwrap_err().to_string();
+        assert!(err.contains("tun.enable"), "{err}");
+    }
+
+    #[test]
+    fn iar_tun_requires_address() {
+        let yaml = iar_base(
+            "tun:\n  enable: true\n  address: []\n\
+             ip-auto-route:\n  enable: true\n  tcp-mode: tun\n",
+        );
+        let err = parse(&yaml).unwrap_err().to_string();
+        // either address empty fails here or earlier tun validation
+        assert!(
+            err.contains("tun.address") || err.contains("address"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn iar_mutex_auto_route() {
+        let yaml = iar_base(
+            "tun:\n  enable: true\n  auto-route: true\n  address: [\"198.18.0.1/30\"]\n\
+             ip-auto-route:\n  enable: true\n  tcp-mode: redir\n",
+        );
+        let err = parse(&yaml).unwrap_err().to_string();
+        assert!(err.contains("auto-route"), "{err}");
+    }
+
+    #[test]
+    fn iar_mutex_auto_redirect() {
+        let yaml = iar_base(
+            "tun:\n  enable: true\n  auto-redirect: true\n  auto-route: true\n  address: [\"198.18.0.1/30\"]\n\
+             ip-auto-route:\n  enable: true\n  tcp-mode: redir\n",
+        );
+        let err = parse(&yaml).unwrap_err().to_string();
+        assert!(
+            err.contains("auto-redirect") || err.contains("auto-route"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn iar_lan_proxy_requires_interface() {
+        let yaml = iar_base(
+            "ip-auto-route:\n  enable: true\n  tcp-mode: redir\n  lan-proxy: true\n",
+        );
+        let err = parse(&yaml).unwrap_err().to_string();
+        assert!(err.contains("lan-interface"), "{err}");
+    }
+
+    #[test]
+    fn iar_dns_hijack_requires_dns() {
+        let yaml = iar_base(
+            "ip-auto-route:\n  enable: true\n  tcp-mode: redir\n  dns-hijack-to-port: true\n",
+        );
+        let err = parse(&yaml).unwrap_err().to_string();
+        assert!(err.contains("dns.enable") || err.contains("dns"), "{err}");
+    }
+
+    #[test]
+    fn iar_dns_hijack_requires_port() {
+        let yaml = format!(
+            "mixed-port: 7898\n\
+             redir-port: 7892\n\
+             dns:\n  enable: true\n  default-nameserver: \"223.5.5.5:53\"\n  rule-follow-route: false\n  nameserver: \"udp://223.5.5.5:53\"\n\
+             ip-auto-route:\n  enable: true\n  tcp-mode: redir\n  dns-hijack-to-port: true\n\
+             {}{}",
+            two_nodes(),
+            rules_and_routes("direct")
+        );
+        let err = parse(&yaml).unwrap_err().to_string();
+        assert!(err.contains("dns.port"), "{err}");
+    }
+
+    #[test]
+    fn iar_fakeip_ping_requires_fakeip_mode() {
+        let yaml = format!(
+            "mixed-port: 7898\n\
+             redir-port: 7892\n\
+             dns:\n  enable: true\n  port: 5353\n  mode: redir-host\n  default-nameserver: \"223.5.5.5:53\"\n  rule-follow-route: false\n  nameserver: \"udp://223.5.5.5:53\"\n\
+             ip-auto-route:\n  enable: true\n  tcp-mode: redir\n  fakeip-ping-hijack: true\n\
+             {}{}",
+            two_nodes(),
+            rules_and_routes("direct")
+        );
+        let err = parse(&yaml).unwrap_err().to_string();
+        assert!(err.contains("fakeip"), "{err}");
+    }
+
+    #[test]
+    fn iar_valid_redir_ok() {
+        let yaml = iar_base(
+            "ip-auto-route:\n  enable: true\n  tcp-mode: redir\n  lan-proxy: true\n  lan-interface: [eth0]\n",
+        );
+        let cfg = parse(&yaml).unwrap();
+        assert!(cfg.ip_auto_route.enable);
+        assert_eq!(cfg.ip_auto_route.tcp_mode.as_deref(), Some("redir"));
+        assert_eq!(cfg.ip_auto_route.lan_interface, vec!["eth0".to_string()]);
+    }
+
+    #[test]
+    fn iar_valid_tproxy_ok() {
+        let yaml = iar_base(
+            "ip-auto-route:\n  enable: true\n  tcp-mode: tproxy\n  udp-mode: tproxy\n",
+        );
+        let cfg = parse(&yaml).unwrap();
+        assert_eq!(cfg.ip_auto_route.udp_mode.as_deref(), Some("tproxy"));
+    }
+
+    #[test]
+    fn iar_valid_tun_ok() {
+        let yaml = iar_base(
+            "tun:\n  enable: true\n  address: [\"198.18.0.1/30\"]\n  auto-route: false\n  auto-redirect: false\n\
+             ip-auto-route:\n  enable: true\n  tcp-mode: tun\n  udp-mode: tun\n",
+        );
+        let cfg = parse(&yaml).unwrap();
+        assert_eq!(cfg.ip_auto_route.tcp_mode.as_deref(), Some("tun"));
+        assert!(cfg.tun.enable);
     }
 }

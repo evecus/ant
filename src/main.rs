@@ -7,6 +7,8 @@ mod app;
 mod config;
 mod dns;
 mod inbound;
+#[cfg(target_os = "linux")]
+mod ip_auto_route;
 #[cfg(any(target_os = "linux", target_os = "android", target_os = "windows", target_os = "macos"))]
 mod tun;
 mod outbound;
@@ -400,9 +402,23 @@ async fn main() -> Result<()> {
         );
     }
 
+    // System-wide transparent proxy (Linux): nft/iptables + policy routing.
+    // On failure: cleanup partial state and abort startup.
+    #[cfg(target_os = "linux")]
+    let _ip_auto_route_guard = if cfg.ip_auto_route.enable {
+        Some(
+            ip_auto_route::apply(&cfg)
+                .await
+                .context("ip-auto-route apply failed")?,
+        )
+    } else {
+        None
+    };
+
     tracing::info!("ant ready");
     // Graceful shutdown: abort tasks so TUN RouteGuard/RedirectGuard Drop runs
     // and cleans ip rule / nftables (same responsibility as sing-tun Close).
+    // `_ip_auto_route_guard` Drop also runs on scope exit.
     let aborts: Vec<_> = handles.iter().map(|h| h.abort_handle()).collect();
     tokio::select! {
         _ = futures::future::join_all(handles) => {}
