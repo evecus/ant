@@ -13,7 +13,7 @@
 use crate::config::TunConfig;
 use anyhow::{Context, Result};
 use std::net::IpAddr;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::process::Command;
 use tracing::info;
@@ -21,22 +21,21 @@ use tracing::info;
 use tracing::warn;
 
 pub struct RouteGuard {
-    #[cfg(target_os = "linux")]
-    linux: Option<LinuxInstalled>,
-    /// Android root mode: `ip` command based auto-route (rtnetlink cannot
-    /// compile on Android; VpnService external-FD mode never routes itself).
-    #[cfg(target_os = "android")]
-    android: Option<AndroidInstalled>,
+    /// Linux + Android root: netlink-installed routes/rules (sing-tun topology).
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    netlink: Option<NetlinkInstalled>,
     #[cfg(target_os = "windows")]
     win: Option<WindowsGuard>,
     #[cfg(target_os = "macos")]
     macos: Option<MacosGuard>,
 }
 
-#[cfg(target_os = "linux")]
-struct LinuxInstalled {
+#[cfg(any(target_os = "linux", target_os = "android"))]
+struct NetlinkInstalled {
     #[allow(dead_code)]
     if_index: u32,
+    /// Interface name (needed for Android Drop route del by dev).
+    if_name: String,
     table: u32,
     /// Base priority used for this install (for full window cleanup on Drop).
     rule_start: u32,
@@ -65,21 +64,10 @@ struct MacosGuard {
 
 impl Drop for RouteGuard {
     fn drop(&mut self) {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "android"))]
         {
-            if let Some(ref inst) = self.linux {
-                // 1) Routes we installed in the TUN table
-                for (v6, dest) in &inst.routes {
-                    let fam = if *v6 { "-6" } else { "-4" };
-                    let _ = Command::new("ip")
-                        .args([fam, "route", "del", dest, "table", &inst.table.to_string()])
-                        .output();
-                }
-                // 2) sing-tun unsetRules: delete *entire* priority window, not only
-                //    rules we tracked (avoids leftovers after EEXIST / partial install).
-                let start = inst.rule_start;
-                cleanup_rule_window(start);
-                // Also delete any remaining tracked priorities (idempotent)
+            if let Some(ref inst) = self.netlink {
+                // 1) Rules first so we do not blackhole while routes are gone.
                 for (prio, v6) in &inst.rules {
                     let mut cmd = Command::new("ip");
                     if *v6 {
@@ -91,6 +79,15 @@ impl Drop for RouteGuard {
                         .args(["rule", "del", "priority", &prio.to_string()])
                         .output();
                 }
+                let start = inst.rule_start;
+                cleanup_rule_window(start);
+                // 2) Routes in the TUN table
+                for (v6, dest) in &inst.routes {
+                    let fam = if *v6 { "-6" } else { "-4" };
+                    let _ = Command::new("ip")
+                        .args([fam, "route", "del", dest, "table", &inst.table.to_string()])
+                        .output();
+                }
                 let _ = Command::new("ip")
                     .args(["route", "flush", "table", &inst.table.to_string()])
                     .output();
@@ -98,49 +95,6 @@ impl Drop for RouteGuard {
                     table = inst.table,
                     rule_start = start,
                     "tun: auto-route fully cleaned (routes + rule priority window)"
-                );
-            }
-        }
-        #[cfg(target_os = "android")]
-        {
-            if let Some(ref inst) = self.android {
-                // 1) Rules first (marked / iif exceptions + catch-all), so no
-                //    blackhole window while routes are already gone.
-                for (prio, v6) in &inst.rules {
-                    let mut cmd = Command::new("ip");
-                    if *v6 {
-                        cmd.arg("-6");
-                    } else {
-                        cmd.arg("-4");
-                    }
-                    let _ = cmd
-                        .args(["rule", "del", "pref", &prio.to_string()])
-                        .output();
-                }
-                cleanup_rule_window(inst.rule_start);
-                // 2) Routes we installed in the TUN table.
-                for (v6, dest) in &inst.routes {
-                    let fam = if *v6 { "-6" } else { "-4" };
-                    let _ = Command::new("ip")
-                        .args([
-                            fam,
-                            "route",
-                            "del",
-                            dest,
-                            "dev",
-                            &inst.if_name,
-                            "table",
-                            &inst.table.to_string(),
-                        ])
-                        .output();
-                }
-                let _ = Command::new("ip")
-                    .args(["route", "flush", "table", &inst.table.to_string()])
-                    .output();
-                info!(
-                    table = inst.table,
-                    rule_start = inst.rule_start,
-                    "tun: android auto-route fully cleaned (rules + routes)"
                 );
             }
         }
@@ -326,12 +280,12 @@ fn is_excluded(cfg: &TunConfig, cidr: &str) -> bool {
 }
 
 /// Parse TUN interface address CIDRs from config for lo-src rules.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 type AddrPrefix4 = Vec<(Ipv4Addr, u8)>;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 type AddrPrefix6 = Vec<(Ipv6Addr, u8)>;
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 fn tun_address_prefixes(cfg: &TunConfig) -> (AddrPrefix4, AddrPrefix6) {
     let mut v4 = Vec::new();
     let mut v6 = Vec::new();
@@ -369,16 +323,10 @@ pub async fn install_routes(
 ) -> Result<RouteGuard> {
     let pfx = prefixes(cfg)?;
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     {
-        let linux = install_linux(if_name, cfg, has_v4, has_v6, &pfx).await?;
-        return Ok(RouteGuard { linux: Some(linux) });
-    }
-
-    #[cfg(target_os = "android")]
-    {
-        let android = install_android(if_name, cfg, has_v4, has_v6, &pfx).await?;
-        return Ok(RouteGuard { android: Some(android) });
+        let netlink = install_netlink(if_name, cfg, has_v4, has_v6, &pfx).await?;
+        return Ok(RouteGuard { netlink: Some(netlink) });
     }
 
     #[cfg(target_os = "windows")]
@@ -448,15 +396,15 @@ fn cleanup_rule_window(rule_start: u32) {
     );
 }
 
-#[cfg(target_os = "linux")]
-async fn install_linux(
+#[cfg(any(target_os = "linux", target_os = "android"))]
+async fn install_netlink(
     if_name: &str,
     cfg: &TunConfig,
     has_v4: bool,
     has_v6: bool,
     pfx: &[(String, bool)],
-) -> Result<LinuxInstalled> {
-    use crate::tun::marks::{DEFAULT_RULE_PRIORITY, DEFAULT_TABLE};
+) -> Result<NetlinkInstalled> {
+    use crate::tun::marks::DEFAULT_TABLE;
     use futures::stream::TryStreamExt;
     use rtnetlink::new_connection;
     use tracing::warn;
@@ -484,11 +432,21 @@ async fn install_linux(
     let rule_start = if cfg.iproute2_rule_index != 0 {
         cfg.iproute2_rule_index as u32
     } else {
-        DEFAULT_RULE_PRIORITY as u32
+        #[cfg(target_os = "android")]
+        {
+            use crate::tun::marks::DEFAULT_ANDROID_RULE_PRIORITY;
+            DEFAULT_ANDROID_RULE_PRIORITY as u32
+        }
+        #[cfg(target_os = "linux")]
+        {
+            use crate::tun::marks::DEFAULT_RULE_PRIORITY;
+            DEFAULT_RULE_PRIORITY as u32
+        }
     };
 
-    let mut installed = LinuxInstalled {
+    let mut installed = NetlinkInstalled {
         if_index,
+        if_name: if_name.to_string(),
         table,
         rule_start,
         routes: Vec::new(),
@@ -505,17 +463,34 @@ async fn install_linux(
         }
     }
 
-    add_rules_classic_mihomo(
-        &handle,
-        if_name,
-        cfg,
-        has_v4,
-        has_v6,
-        table,
-        rule_start,
-        &mut installed,
-    )
-    .await;
+    #[cfg(target_os = "linux")]
+    {
+        add_rules_classic_mihomo(
+            &handle,
+            if_name,
+            cfg,
+            has_v4,
+            has_v6,
+            table,
+            rule_start,
+            &mut installed,
+        )
+        .await;
+    }
+    #[cfg(target_os = "android")]
+    {
+        add_rules_android_netlink(
+            &handle,
+            if_name,
+            cfg,
+            has_v4,
+            has_v6,
+            table,
+            rule_start,
+            &mut installed,
+        )
+        .await?;
+    }
 
     info!(
         interface = %if_name,
@@ -523,12 +498,12 @@ async fn install_linux(
         table,
         routes = installed.routes.len(),
         rules = installed.rules.len(),
-        "tun: auto-route installed (sing-tun / mihomo classic topology)"
+        "tun: auto-route installed via rtnetlink (sing-tun topology)"
     );
     Ok(installed)
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 async fn add_route(
     handle: &rtnetlink::Handle,
     if_index: u32,
@@ -536,31 +511,34 @@ async fn add_route(
     dest: &str,
     v6: bool,
 ) -> Result<()> {
+    use rtnetlink::RouteMessageBuilder;
     let (ip_s, pl_s) = dest
         .split_once('/')
         .ok_or_else(|| anyhow::anyhow!("bad CIDR {dest}"))?;
     let pl: u8 = pl_s.parse()?;
     if v6 {
         let ip: Ipv6Addr = ip_s.parse()?;
-        handle
-            .route()
-            .add()
-            .v6()
+        let msg = RouteMessageBuilder::<Ipv6Addr>::new()
             .destination_prefix(ip, pl)
             .output_interface(if_index)
             .table_id(table)
+            .build();
+        handle
+            .route()
+            .add(msg)
             .execute()
             .await
             .map_err(|e| anyhow::anyhow!("{e}"))?;
     } else {
         let ip: Ipv4Addr = ip_s.parse()?;
-        handle
-            .route()
-            .add()
-            .v4()
+        let msg = RouteMessageBuilder::<Ipv4Addr>::new()
             .destination_prefix(ip, pl)
             .output_interface(if_index)
             .table_id(table)
+            .build();
+        handle
+            .route()
+            .add(msg)
             .execute()
             .await
             .map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -579,9 +557,9 @@ async fn add_rules_classic_mihomo(
     has_v6: bool,
     table: u32,
     rule_start: u32,
-    inst: &mut LinuxInstalled,
+    inst: &mut NetlinkInstalled,
 ) {
-    use netlink_packet_route::rule::{RuleAction, RuleAttribute, RuleFlag, RulePortRange};
+    use netlink_packet_route::rule::{RuleAction, RuleAttribute, RuleFlags, RulePortRange};
     use tracing::warn;
 
     let nop = rule_start + 10;
@@ -657,7 +635,7 @@ async fn add_rules_classic_mihomo(
             .action(RuleAction::ToTable);
         {
             let msg = req.message_mut();
-            msg.header.flags.push(RuleFlag::Invert);
+            msg.header.flags |= RuleFlags::Invert;
             msg.attributes
                 .push(RuleAttribute::DestinationPortRange(RulePortRange {
                     start: 53,
@@ -682,7 +660,7 @@ async fn add_rules_classic_mihomo(
             .action(RuleAction::ToTable);
         {
             let msg = req.message_mut();
-            msg.header.flags.push(RuleFlag::Invert);
+            msg.header.flags |= RuleFlags::Invert;
             msg.attributes
                 .push(RuleAttribute::DestinationPortRange(RulePortRange {
                     start: 53,
@@ -742,7 +720,7 @@ async fn add_rules_classic_mihomo(
             .input_interface("lo".into())
             .table_id(table)
             .action(RuleAction::ToTable);
-        req.message_mut().header.flags.push(RuleFlag::Invert);
+        req.message_mut().header.flags |= RuleFlags::Invert;
         match req.execute().await {
             Ok(()) => inst.rules.push((prio, false)),
             Err(e) => warn!(err = %e, "not iif lo v4"),
@@ -759,7 +737,7 @@ async fn add_rules_classic_mihomo(
             .input_interface("lo".into())
             .table_id(table)
             .action(RuleAction::ToTable);
-        req.message_mut().header.flags.push(RuleFlag::Invert);
+        req.message_mut().header.flags |= RuleFlags::Invert;
         match req.execute().await {
             Ok(()) => inst.rules.push((prio, true)),
             Err(e) => warn!(err = %e, "not iif lo v6"),
@@ -920,143 +898,74 @@ async fn add_rules_classic_mihomo(
     let _ = prio6;
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 fn parse_v4_cidr(s: &str) -> Result<(Ipv4Addr, u8)> {
     let (ip, pl) = s.split_once('/').ok_or_else(|| anyhow::anyhow!("cidr"))?;
     Ok((ip.parse()?, pl.parse()?))
 }
 
 // ---------------------------------------------------------------------------
-// Android root auto-route — `ip rule` / `ip route` implementation.
+// Android root auto-route via rtnetlink (same crates as Linux).
 //
-// rtnetlink cannot compile on Android (AF_BRIDGE missing from bionic libc),
-// so the classic topology is reproduced with the `ip` command instead.
-//
-// Android-specific differences from the Linux topology:
-// - **main table is empty**: netd keeps default routes in per-network tables
-//   (e.g. table 1021 for wlan0). Loop prevention / route-exclude rules must
-//   therefore look up the *detected physical table*, not `main`.
-// - **no DNS-suppress rule**: the classic `not dport 53 … suppress_prefixlen`
-//   selector is not reliably supported by Android's `ip`; DNS is handled by
-//   the TUN-side dns-hijack / system stack instead (anti-leak is even better).
-// - **rule priority default 8000**: netd owns 9000–18000; our window must be
-//   evaluated *before* netd's per-network lookups so the catch-all wins.
-// - **no iif-lo rules**: the catch-all covers locally-generated traffic; the
-//   two exception rules (fwmark / iif-tun) provide loop prevention and reply
-//   routing.
-//
-// Topology per family (P = rule_start, T = route table, N = physical table,
-// M = fwmark):
-//   pref P+0: fwmark M      → lookup N   (our own dialer sockets escape)
-//   pref P+1: iif <tun>     → lookup main (TUN replies: client addrs are
-//                             connected routes in main — `ip addr add` puts
-//                             them there even on Android)
-//   pref P+2: to <exclude>  → lookup N   (per route-exclude-address)
-//   pref P+3: unreachable   (strict-route, missing family only)
-//   pref P+4:               → lookup T   (catch-all into the TUN)
+// Topology differs from classic mihomo because Android netd owns main and
+// keeps defaults in per-network tables:
+//   pref P+0: fwmark M      → lookup <phys table>
+//   pref P+1: iif <tun>     → lookup main
+//   pref P+2: to <exclude>  → lookup <phys table>
+//   pref P+3:               → lookup <TUN table>
+// Missing family under strict-route gets Unreachable.
 // ---------------------------------------------------------------------------
 
-#[cfg(target_os = "android")]
-struct AndroidInstalled {
-    if_name: String,
-    table: u32,
-    /// Base priority used for this install (for full window cleanup on Drop).
-    rule_start: u32,
-    routes: Vec<(bool, String)>,
-    rules: Vec<(u32, bool)>,
-}
-
-#[cfg(target_os = "android")]
-fn ip_cmd(args: &[&str]) -> bool {
-    match Command::new("ip").args(args).output() {
-        Ok(out) if out.status.success() => true,
-        Ok(out) => {
-            warn!(
-                cmd = ?args,
-                stderr = %String::from_utf8_lossy(&out.stderr).trim(),
-                "ip command failed"
-            );
-            false
-        }
-        Err(e) => {
-            warn!(cmd = ?args, err = %e, "failed to run ip");
-            false
-        }
-    }
-}
-
-/// Find the per-network routing table that holds the current default route
-/// (Android netd puts it in a netId table; `main` is empty). Returns 254 when
-/// the default route sits in `main` (some ROMs / APN quirks).
+/// Detect the table that holds the default route (netd per-network table).
 #[cfg(target_os = "android")]
 fn detect_phys_table(v6: bool) -> Result<u32> {
     let fam = if v6 { "-6" } else { "-4" };
     let out = Command::new("ip")
-        .args([fam, "route", "show", "table", "all"])
+        .args([fam, "route", "show", "default"])
         .output()
-        .map_err(|e| anyhow::anyhow!("ip route show table all: {e}"))?;
-    if !out.status.success() {
-        anyhow::bail!(
-            "ip route show table all failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
-    }
-    let text = String::from_utf8_lossy(&out.stdout);
-    for line in text.lines() {
-        let line = line.trim();
-        if !line.starts_with("default") {
+        .context("ip route show default")?;
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    for tok in stdout.split_whitespace() {
+        if tok == "table" {
             continue;
         }
-        let mut it = line.split_whitespace();
-        while let Some(tok) = it.next() {
-            if tok == "table" {
-                let id = it.next().unwrap_or("main");
-                return Ok(if id == "main" {
-                    254
-                } else {
-                    id.parse().context("parse route table id")?
-                });
+        // pattern: ... table 1021 ...
+    }
+    // Parse "table N"
+    let mut it = stdout.split_whitespace().peekable();
+    while let Some(w) = it.next() {
+        if w == "table" {
+            if let Some(n) = it.next() {
+                if let Ok(v) = n.parse::<u32>() {
+                    return Ok(v);
+                }
             }
         }
-        // default line without an explicit table → main
-        return Ok(254);
     }
-    anyhow::bail!("no default route found (physical network down?)")
+    // Fall back to main (254) when parsing fails.
+    Ok(254)
 }
 
-/// Android auto-route via `ip` commands (root mode). See the module docs
-/// above for the topology. IPv6 is skipped (warn) when no v6 default route
-/// exists — installing a v6 catch-all without a marked-socket escape would
-/// loop our own v6 dialers into the TUN.
 #[cfg(target_os = "android")]
-async fn install_android(
+#[allow(clippy::too_many_arguments)]
+async fn add_rules_android_netlink(
+    handle: &rtnetlink::Handle,
     if_name: &str,
     cfg: &TunConfig,
     has_v4: bool,
     has_v6: bool,
-    pfx: &[(String, bool)],
-) -> Result<AndroidInstalled> {
-    use crate::tun::marks::{DEFAULT_ANDROID_RULE_PRIORITY, DEFAULT_TABLE};
+    table: u32,
+    rule_start: u32,
+    inst: &mut NetlinkInstalled,
+) -> Result<()> {
+    use netlink_packet_route::rule::RuleAction;
+    use tracing::warn;
 
-    let table = if cfg.iproute2_table_index != 0 {
-        cfg.iproute2_table_index as u32
-    } else {
-        DEFAULT_TABLE as u32
-    };
-    let rule_start = if cfg.iproute2_rule_index != 0 {
-        cfg.iproute2_rule_index as u32
-    } else {
-        DEFAULT_ANDROID_RULE_PRIORITY as u32
-    };
-
-    // Loop prevention depends on dialer marks escaping the catch-all.
     let mark = crate::app::sockopt::fwmark();
     if mark == 0 {
         anyhow::bail!("tun: Android auto-route requires a non-zero fwmark (loop prevention)");
     }
-    let mark_s = mark.to_string();
 
-    // Physical tables per family.
     let phys_v4 = detect_phys_table(false).context("detect v4 route table")?;
     let phys_v6 = if has_v6 {
         match detect_phys_table(true) {
@@ -1070,141 +979,153 @@ async fn install_android(
         None
     };
 
-    let mut inst = AndroidInstalled {
-        if_name: if_name.to_string(),
-        table,
-        rule_start,
-        routes: Vec::new(),
-        rules: Vec::new(),
-    };
-
-    // 1) Split default routes (or user route-address) into the TUN table as
-    //    device routes — no nexthop needed on a point-to-point TUN.
-    for (dest, v6) in pfx {
-        let fam_ok = if *v6 { phys_v6.is_some() } else { has_v4 };
-        if !fam_ok {
-            continue;
-        }
-        let fam = if *v6 { "-6" } else { "-4" };
-        if ip_cmd(&[
-            fam,
-            "route",
-            "add",
-            dest.as_str(),
-            "dev",
-            if_name,
-            "table",
-            &table.to_string(),
-        ]) {
-            inst.routes.push((*v6, dest.clone()));
-        }
-    }
-
-    // 2) Policy rules per family.
     for (v6, phys) in [(false, Some(phys_v4)), (true, phys_v6)] {
-        let fam = if v6 { "-6" } else { "-4" };
         let has = if v6 { phys.is_some() } else { has_v4 };
         let mut prio = rule_start;
 
         if !has {
-            // strict-route: block leaks for the missing family.
-            if cfg.strict_route
-                && ip_cmd(&[fam, "rule", "add", "pref", &prio.to_string(), "unreachable"])
-            {
-                inst.rules.push((prio, v6));
+            if cfg.strict_route {
+                let r = if v6 {
+                    handle.rule().add().v6().priority(prio).action(RuleAction::Unreachable).execute().await
+                } else {
+                    handle.rule().add().v4().priority(prio).action(RuleAction::Unreachable).execute().await
+                };
+                match r {
+                    Ok(()) => inst.rules.push((prio, v6)),
+                    Err(e) => warn!(err = %e, "strict unreachable"),
+                }
             }
             continue;
         }
-        let phys_s = phys.unwrap().to_string();
+        let phys_table = phys.unwrap();
 
-        // fwmark → physical table (marked dialer sockets escape the TUN).
-        if ip_cmd(&[
-            fam,
-            "rule",
-            "add",
-            "pref",
-            &prio.to_string(),
-            "fwmark",
-            &mark_s,
-            "lookup",
-            &phys_s,
-        ]) {
-            inst.rules.push((prio, v6));
+        // fwmark → physical table
+        let r = if v6 {
+            handle
+                .rule()
+                .add()
+                .v6()
+                .priority(prio)
+                .fw_mark(mark)
+                .table_id(phys_table)
+                .action(RuleAction::ToTable)
+                .execute()
+                .await
+        } else {
+            handle
+                .rule()
+                .add()
+                .v4()
+                .priority(prio)
+                .fw_mark(mark)
+                .table_id(phys_table)
+                .action(RuleAction::ToTable)
+                .execute()
+                .await
+        };
+        match r {
+            Ok(()) => inst.rules.push((prio, v6)),
+            Err(e) => warn!(err = %e, "fwmark rule"),
         }
         prio += 1;
 
-        // iif <tun> → main: reply packets ant writes into the TUN must reach
-        // the client address (connected route lives in main).
-        if ip_cmd(&[
-            fam,
-            "rule",
-            "add",
-            "pref",
-            &prio.to_string(),
-            "iif",
-            if_name,
-            "lookup",
-            "main",
-        ]) {
-            inst.rules.push((prio, v6));
+        // iif tun → main
+        let r = if v6 {
+            handle
+                .rule()
+                .add()
+                .v6()
+                .priority(prio)
+                .input_interface(if_name.to_string())
+                .table_id(254)
+                .action(RuleAction::ToTable)
+                .execute()
+                .await
+        } else {
+            handle
+                .rule()
+                .add()
+                .v4()
+                .priority(prio)
+                .input_interface(if_name.to_string())
+                .table_id(254)
+                .action(RuleAction::ToTable)
+                .execute()
+                .await
+        };
+        match r {
+            Ok(()) => inst.rules.push((prio, v6)),
+            Err(e) => warn!(err = %e, "iif tun rule"),
         }
         prio += 1;
 
-        // route-exclude-address → physical table (silent-skip invalid entries,
-        // same as the Linux netlink path).
+        // route-exclude-address → physical table
         for s in &cfg.route_exclude_address {
             if s.contains(':') != v6 {
                 continue;
             }
-            let Some((ip, _)) = s.split_once('/') else {
-                continue;
+            let Some((ip_s, pl_s)) = s.split_once('/') else { continue };
+            let Ok(pl) = pl_s.parse::<u8>() else { continue };
+            let r = if v6 {
+                let Ok(ip) = ip_s.parse::<Ipv6Addr>() else { continue };
+                handle
+                    .rule()
+                    .add()
+                    .v6()
+                    .priority(prio)
+                    .destination_prefix(ip, pl)
+                    .table_id(phys_table)
+                    .action(RuleAction::ToTable)
+                    .execute()
+                    .await
+            } else {
+                let Ok(ip) = ip_s.parse::<Ipv4Addr>() else { continue };
+                handle
+                    .rule()
+                    .add()
+                    .v4()
+                    .priority(prio)
+                    .destination_prefix(ip, pl)
+                    .table_id(phys_table)
+                    .action(RuleAction::ToTable)
+                    .execute()
+                    .await
             };
-            if ip.parse::<IpAddr>().is_err() {
-                continue;
-            }
-            if ip_cmd(&[
-                fam,
-                "rule",
-                "add",
-                "pref",
-                &prio.to_string(),
-                "to",
-                s.as_str(),
-                "lookup",
-                &phys_s,
-            ]) {
-                inst.rules.push((prio, v6));
+            match r {
+                Ok(()) => inst.rules.push((prio, v6)),
+                Err(e) => warn!(err = %e, "exclude rule"),
             }
         }
         prio += 1;
 
-        // strict-route has no extra rule for the *present* family here (the
-        // Linux netlink path behaves the same: unreachable only for missing).
-
-        // Catch-all → TUN table.
-        if ip_cmd(&[
-            fam,
-            "rule",
-            "add",
-            "pref",
-            &prio.to_string(),
-            "lookup",
-            &table.to_string(),
-        ]) {
-            inst.rules.push((prio, v6));
+        // catch-all → TUN table
+        let r = if v6 {
+            handle
+                .rule()
+                .add()
+                .v6()
+                .priority(prio)
+                .table_id(table)
+                .action(RuleAction::ToTable)
+                .execute()
+                .await
+        } else {
+            handle
+                .rule()
+                .add()
+                .v4()
+                .priority(prio)
+                .table_id(table)
+                .action(RuleAction::ToTable)
+                .execute()
+                .await
+        };
+        match r {
+            Ok(()) => inst.rules.push((prio, v6)),
+            Err(e) => warn!(err = %e, "catch-all rule"),
         }
     }
-
-    info!(
-        interface = %if_name,
-        table,
-        rule_start,
-        mark,
-        routes = inst.routes.len(),
-        rules = inst.rules.len(),
-        "tun: android auto-route installed (ip rule/route, root mode)"
-    );
-    Ok(inst)
+    Ok(())
 }
 
 #[cfg(target_os = "windows")]
