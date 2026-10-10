@@ -4,7 +4,6 @@
 log-level: info
 # mark: 255
 # bind-address: "::"  # :: | 0.0.0.0 | 127.0.0.1
-# api: "0.0.0.0:9095"  # connection panel http://ip:9095/ui
 tproxy-port: 7878
 mixed-port: 7898
 redir-port: 7892
