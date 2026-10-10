@@ -352,7 +352,7 @@ async fn read_socks_addr(
 
 async fn handle_http(
     mut stream: TcpStream,
-    peer: SocketAddr,
+    _peer: SocketAddr,
     router: Arc<Router>,
     outbounds: Arc<OutboundManager>,
 ) -> Result<()> {
