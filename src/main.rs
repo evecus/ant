@@ -138,19 +138,6 @@ async fn main() -> Result<()> {
         }));
     }
 
-    if !cfg.global.api.trim().is_empty() {
-        match app::api::parse_listen(&cfg.global.api) {
-            Ok(addr) => {
-                handles.push(tokio::spawn(async move {
-                    if let Err(e) = app::api::run_api(addr).await {
-                        tracing::error!("api exited: {e:#}");
-                    }
-                }));
-            }
-            Err(e) => tracing::error!("invalid api={}: {e:#}", cfg.global.api),
-        }
-    }
-
     if cfg.dns.port > 0 {
         let c = Arc::new(cfg.clone());
         let r = router.clone();
