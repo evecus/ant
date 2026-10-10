@@ -159,7 +159,7 @@ async fn handle_tproxy_tcp(
         return hijack_dns_tcp(stream, router).await;
     }
 
-    let target = target::decide(&router, dest, domain).await;
+    let target = target::decide(&router, dest, domain, Some(peer)).await;
     if target.outbound == Outbound::Block {
         tracing::debug!("tproxy tcp block {} ({:?})", dest, target.host);
         return Ok(());
@@ -288,7 +288,7 @@ async fn udp_session_worker(
         return hijack_dns_udp(raw, peer, dest, first, rx, router).await;
     }
     let sniffed = sniffed.domain;
-    let target = target::decide(&router, dest, sniffed).await;
+    let target = target::decide(&router, dest, sniffed, Some(peer)).await;
     if let Some(ref d) = target.host {
         tracing::debug!("tproxy udp sniff {} -> domain={d} via {:?}", dest, target.outbound);
     }

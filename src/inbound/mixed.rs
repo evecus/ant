@@ -1,5 +1,7 @@
-//! Mixed inbound: HTTP CONNECT + SOCKS5 (TCP CONNECT + UDP ASSOCIATE).
-//! Listens dual-stack: 0.0.0.0 and [::].
+//! Inbounds for proxy clients:
+//! - **mixed**: auto-detect HTTP CONNECT + SOCKS5 (TCP + UDP ASSOCIATE)
+//! - **http**: HTTP CONNECT / absolute-URI only
+//! - **socks**: SOCKS5 only (TCP + UDP ASSOCIATE)
 
 use crate::outbound::{relay, OutboundManager, UdpSession};
 use crate::app::router::{Outbound, Router};
@@ -13,17 +15,87 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpStream, UdpSocket};
 use tokio::sync::Mutex;
 
+/// Protocol mode for a TCP client handler.
+#[derive(Clone, Copy)]
+enum Mode {
+    /// Peek first byte: 0x05 → SOCKS5, else HTTP.
+    Mixed,
+    /// Force HTTP CONNECT / absolute-form proxy requests only.
+    Http,
+    /// Force SOCKS5 only.
+    Socks,
+}
+
 pub async fn run_mixed(
     port: u16,
     bind_address: String,
     router: Arc<Router>,
     outbounds: Arc<OutboundManager>,
 ) -> Result<()> {
+    run_listener(
+        "mixed",
+        "mixed (HTTP+SOCKS5, TCP/UDP)",
+        port,
+        bind_address,
+        router,
+        outbounds,
+        Mode::Mixed,
+    )
+    .await
+}
+
+/// Dedicated HTTP inbound (HTTP CONNECT + absolute-URI GET/POST/…).
+pub async fn run_http(
+    port: u16,
+    bind_address: String,
+    router: Arc<Router>,
+    outbounds: Arc<OutboundManager>,
+) -> Result<()> {
+    run_listener(
+        "http",
+        "http (CONNECT + absolute-URI)",
+        port,
+        bind_address,
+        router,
+        outbounds,
+        Mode::Http,
+    )
+    .await
+}
+
+/// Dedicated SOCKS inbound (SOCKS5 TCP + UDP ASSOCIATE).
+pub async fn run_socks(
+    port: u16,
+    bind_address: String,
+    router: Arc<Router>,
+    outbounds: Arc<OutboundManager>,
+) -> Result<()> {
+    run_listener(
+        "socks",
+        "socks (SOCKS5, TCP/UDP)",
+        port,
+        bind_address,
+        router,
+        outbounds,
+        Mode::Socks,
+    )
+    .await
+}
+
+async fn run_listener(
+    name: &'static str,
+    log_label: &'static str,
+    port: u16,
+    bind_address: String,
+    router: Arc<Router>,
+    outbounds: Arc<OutboundManager>,
+    mode: Mode,
+) -> Result<()> {
     let mut handles = Vec::new();
     for bind in crate::app::sockopt::listen_addrs(&bind_address, port) {
         match crate::app::sockopt::bind_tcp_listener(bind) {
             Ok((listener, bind)) => {
-                tracing::info!("mixed (HTTP+SOCKS5 TCP/UDP) listening on {}", bind);
+                tracing::info!("{log_label} listening on {bind}");
                 let router = router.clone();
                 let outbounds = outbounds.clone();
                 handles.push(tokio::spawn(async move {
@@ -31,46 +103,55 @@ pub async fn run_mixed(
                         let (stream, peer) = match listener.accept().await {
                             Ok((s, p)) => (s, crate::app::sockopt::canonical(p)),
                             Err(e) => {
-                                tracing::warn!("mixed accept: {e}");
+                                tracing::warn!("{name} accept: {e}");
                                 continue;
                             }
                         };
                         let router = router.clone();
                         let outbounds = outbounds.clone();
                         tokio::spawn(async move {
-                            if let Err(e) = handle_client(stream, peer, router, outbounds).await {
-                                tracing::debug!("mixed client {}: {}", peer, e);
+                            if let Err(e) =
+                                handle_client(mode, stream, peer, router, outbounds).await
+                            {
+                                tracing::debug!("{name} client {peer}: {e}");
                             }
                         });
                     }
                 }));
             }
-            Err(e) => tracing::warn!("mixed bind {}: {e}", bind),
+            Err(e) => tracing::warn!("{name} bind {bind}: {e}"),
         }
     }
     if handles.is_empty() {
-        anyhow::bail!("mixed: no bind succeeded");
+        anyhow::bail!("{name}: no bind succeeded");
     }
     futures::future::join_all(handles).await;
     Ok(())
 }
 
 async fn handle_client(
+    mode: Mode,
     stream: TcpStream,
     peer: SocketAddr,
     router: Arc<Router>,
     outbounds: Arc<OutboundManager>,
 ) -> Result<()> {
     stream.set_nodelay(true)?;
-    let mut peek = [0u8; 1];
-    let n = stream.peek(&mut peek).await?;
-    if n == 0 {
-        return Ok(());
-    }
-    if peek[0] == 0x05 {
-        handle_socks5(stream, peer, router, outbounds).await
-    } else {
-        handle_http(stream, peer, router, outbounds).await
+    match mode {
+        Mode::Http => handle_http(stream, peer, router, outbounds).await,
+        Mode::Socks => handle_socks5(stream, peer, router, outbounds).await,
+        Mode::Mixed => {
+            let mut peek = [0u8; 1];
+            let n = stream.peek(&mut peek).await?;
+            if n == 0 {
+                return Ok(());
+            }
+            if peek[0] == 0x05 {
+                handle_socks5(stream, peer, router, outbounds).await
+            } else {
+                handle_http(stream, peer, router, outbounds).await
+            }
+        }
     }
 }
 
@@ -128,7 +209,7 @@ async fn handle_socks5(
             }
 
             let dest_addr = resolve_or_ip(&host, port, dest_ip).await?;
-            let decided = target::decide(&router, dest_addr, domain).await;
+            let decided = target::decide(&router, dest_addr, domain, Some(peer)).await;
             tracing::debug!("socks5 TCP {} → {:?} via {:?}", host, decided.host, decided.outbound);
 
             if decided.outbound == Outbound::Block {
@@ -236,7 +317,7 @@ async fn socks5_udp_relay(
         } else {
             None
         };
-        let decided = target::decide(&router, dest, domain_owned).await;
+        let decided = target::decide(&router, dest, domain_owned, Some(peer)).await;
         if decided.outbound == Outbound::Block {
             continue;
         }
@@ -352,7 +433,7 @@ async fn read_socks_addr(
 
 async fn handle_http(
     mut stream: TcpStream,
-    _peer: SocketAddr,
+    peer: SocketAddr,
     router: Arc<Router>,
     outbounds: Arc<OutboundManager>,
 ) -> Result<()> {
@@ -408,7 +489,7 @@ async fn handle_http(
                 }
             }
         }
-        let decided = target::decide(&router, dest_addr, domain).await;
+        let decided = target::decide(&router, dest_addr, domain, Some(peer)).await;
         if decided.outbound == Outbound::Block {
             return Ok(());
         }
@@ -444,7 +525,7 @@ async fn handle_http(
         };
 
         let dest_addr = resolve_or_ip(&h, port, None).await?;
-        let decided = target::decide(&router, dest_addr, Some(h.clone())).await;
+        let decided = target::decide(&router, dest_addr, Some(h.clone()), Some(peer)).await;
         if decided.outbound == Outbound::Block {
             stream
                 .write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n")

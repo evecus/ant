@@ -11,12 +11,47 @@ pub struct DialTarget {
 }
 
 /// Sniffed domain wins; otherwise recover the domain from a fake-ip.
-/// Direct connections to a fake-ip are resolved to a real address first so
-/// `DirectOutbound` does not dial the fake range.
-pub async fn decide(router: &Router, dest: SocketAddr, sniffed: Option<String>) -> DialTarget {
+///
+/// When `route-resolve: true`, a domain host is resolved up-front so IP
+/// rule-providers / IP-CIDR rules can match against the resolved addresses
+/// (unless a rule carries `no-resolve`). Direct connections to a fake-ip are
+/// always resolved to a real address so `DirectOutbound` does not dial the
+/// fake range.
+///
+/// `src` is the client address (for `SRC-IP-CIDR` rules); pass `None` when unknown.
+pub async fn decide(
+    router: &Router,
+    dest: SocketAddr,
+    sniffed: Option<String>,
+    src: Option<SocketAddr>,
+) -> DialTarget {
     let mapped = router.domain_for_fakeip(dest.ip());
     let host = sniffed.or(mapped.clone());
-    let m = router.match_route(host.as_deref(), Some(dest.ip()));
+
+    let resolved_ips: Vec<IpAddr> = if router.route_resolve() {
+        if let Some(ref h) = host {
+            if h.parse::<IpAddr>().is_err() {
+                resolve_all(h).await
+            } else {
+                Vec::new()
+            }
+        } else {
+            Vec::new()
+        }
+    } else {
+        Vec::new()
+    };
+
+    if !resolved_ips.is_empty() {
+        tracing::debug!(
+            host = host.as_deref().unwrap_or(""),
+            ips = ?resolved_ips,
+            "route-resolve: resolved domain for IP rule matching"
+        );
+    }
+
+    let src_ip = src.map(|s| s.ip());
+    let m = router.match_route_ex(host.as_deref(), Some(dest.ip()), src_ip, &resolved_ips);
     let mut addr = dest;
     if m.outbound == Outbound::Direct && mapped.is_some() {
         if let Some(ref h) = host {
@@ -29,6 +64,21 @@ pub async fn decide(router: &Router, dest: SocketAddr, sniffed: Option<String>) 
         outbound: m.outbound,
         addr,
         host,
+    }
+}
+
+async fn resolve_all(host: &str) -> Vec<IpAddr> {
+    match tokio::net::lookup_host((host, 0)).await {
+        Ok(iter) => {
+            let mut ips: Vec<IpAddr> = iter.map(|sa| sa.ip()).collect();
+            ips.sort_unstable();
+            ips.dedup();
+            ips
+        }
+        Err(e) => {
+            tracing::debug!(host, error = %e, "route-resolve: DNS lookup failed");
+            Vec::new()
+        }
     }
 }
 

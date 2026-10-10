@@ -91,7 +91,7 @@ async fn handle_redir(
         return hijack_dns_tcp(stream, router).await;
     }
 
-    let target = target::decide(&router, dest, domain).await;
+    let target = target::decide(&router, dest, domain, Some(peer)).await;
     if target.outbound == Outbound::Block {
         tracing::debug!("redir block {dest} ({:?})", target.host);
         return Ok(());

@@ -10,9 +10,8 @@ mod target;
 #[cfg(any(target_os = "linux", target_os = "android"))]
 mod tproxy;
 
-pub use mixed::run_mixed;
+pub use mixed::{run_http, run_mixed, run_socks};
 #[cfg(any(target_os = "linux", target_os = "android"))]
 pub use redir::run_redir;
 #[cfg(any(target_os = "linux", target_os = "android"))]
 pub use tproxy::run_tproxy;
-
