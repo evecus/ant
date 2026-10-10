@@ -1,0 +1,648 @@
+use anyhow::{Context, Result};
+use clap::{Parser, Subcommand};
+use std::path::PathBuf;
+use tracing_subscriber::EnvFilter;
+
+mod app;
+mod config;
+mod dns;
+mod inbound;
+#[cfg(target_os = "linux")]
+mod ip_auto_route;
+#[cfg(any(target_os = "linux", target_os = "android", target_os = "windows", target_os = "macos"))]
+mod tun;
+mod outbound;
+mod ruleset;
+
+use app::router::Router;
+use config::Config;
+use outbound::OutboundManager;
+
+#[derive(Parser, Debug)]
+#[command(name = "ant", about = "Minimal proxy (Hysteria2 + .ars rulesets; Linux/macOS/Windows)")]
+struct Cli {
+    #[command(subcommand)]
+    cmd: Option<Commands>,
+
+    /// Path to YAML config (when running proxy)
+    #[arg(
+        short = 'c',
+        long = "config",
+        default_value = "config.yaml",
+        global = true,
+        conflicts_with = "dir"
+    )]
+    config: String,
+
+    /// Directory mode: use <dir>/config.yaml, or the single *.yaml file in
+    /// <dir> when config.yaml is absent; relative rule-provider paths in the
+    /// config resolve against <dir>
+    #[arg(short = 'd', long = "dir", global = true, value_name = "DIR")]
+    dir: Option<String>,
+}
+
+#[derive(Subcommand, Debug)]
+enum Commands {
+    /// Convert sing-box JSON / mihomo YAML-text rule-set → binary `.ars` (by input extension)
+    #[command(name = "ruleset-convert")]
+    RulesetConvert {
+        #[arg(short = 'i', long = "input")]
+        input: PathBuf,
+        #[arg(short = 'o', long = "output")]
+        output: PathBuf,
+        /// mihomo sources only: domain | ipcidr | classical (default: auto-detect / YAML `behavior:`)
+        #[arg(short = 'b', long = "behavior")]
+        behavior: Option<String>,
+    },
+    /// Validate a YAML config, then exit (no proxy is started)
+    Check {
+        /// Config file to check (defaults to the -c/--config value)
+        #[arg(value_name = "CONFIG")]
+        path: Option<String>,
+    },
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
+    let cli = Cli::parse();
+
+    match cli.cmd {
+        Some(Commands::RulesetConvert { input, output, behavior }) => {
+            tracing_subscriber::fmt()
+                .with_ansi(false)
+                .with_env_filter(EnvFilter::new("info"))
+                .init();
+            let beh = behavior
+                .as_deref()
+                .map(ruleset::ProviderBehavior::parse)
+                .transpose()?;
+            ruleset::convert_to_ars(&input, &output, beh)?;
+            return Ok(());
+        }
+        Some(Commands::Check { path }) => {
+            // `ant check` prints exactly one line on stdout; runtime logs are
+            // off by default (set RUST_LOG to see them while debugging a
+            // config). stderr keeps the few warnings that are not part of the
+            // report.
+            tracing_subscriber::fmt()
+                .with_ansi(false)
+                .with_writer(std::io::stderr)
+                .with_env_filter(
+                    EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("off")),
+                )
+                .init();
+            let (path, base_dir) = match (&path, &cli.dir) {
+                (Some(p), _) => (p.clone(), None),
+                (None, Some(d)) => {
+                    let dir = std::path::PathBuf::from(d);
+                    (resolve_config_in_dir(&dir)?.display().to_string(), Some(dir))
+                }
+                (None, None) => (cli.config.clone(), None),
+            };
+            return cmd_check(&path, base_dir.as_deref()).await;
+        }
+        None => {}
+    }
+
+    let (config_path, base_dir) = match &cli.dir {
+        Some(d) => {
+            let dir = std::path::PathBuf::from(d);
+            (resolve_config_in_dir(&dir)?.display().to_string(), Some(dir))
+        }
+        None => (cli.config.clone(), None),
+    };
+    let mut cfg_val = Config::load(&config_path)?;
+    if let Some(base) = &base_dir {
+        cfg_val.resolve_ruleset_paths(base);
+    }
+    let cfg = std::sync::Arc::new(cfg_val);
+    // 注册 bootstrap 上游（default-nameserver，纯 IP）。这里只做内存注册，
+    // 不发起任何网络请求：所有域名解析都推迟到实际使用点（DNS 查询 / 拨号），
+    // 失败仅影响当次操作并自然重试，绝不阻塞或终止启动。
+    // DNS 模块关闭（无 dns: 块或 enable=false）时不注册 bootstrap：
+    // resolve_host_via_bootstrap 直接走系统 resolver（tokio lookup_host）。
+    if cfg.dns.enable {
+        let ns = cfg
+            .dns
+            .default_nameserver
+            .as_deref()
+            .context("dns.enable=true requires dns.default-nameserver")?;
+        crate::dns::set_bootstrap(crate::dns::parse_nameserver(ns).context("invalid default-nameserver")?);
+        // Upstream address is config data — debug only.
+        tracing::debug!("default-nameserver {}", ns);
+    } else {
+        tracing::info!("dns module disabled; internal resolution uses the system resolver");
+    }
+    // `log-level: off` disables logging entirely (including the in-memory
+    // buffer behind the API/UI). RUST_LOG still wins when it is set.
+    let level = cfg.global.log_level.trim();
+    let filter = if level.eq_ignore_ascii_case("off") {
+        EnvFilter::new("off")
+    } else {
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(level))
+    };
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+    tracing_subscriber::registry()
+        .with(filter)
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_ansi(false)
+                .with_writer(std::io::stderr),
+        )
+        .with(app::log_buffer::BufferLayer)
+        .init();
+
+    tracing::info!("ant starting, config={}", config_path);
+
+    // Resolve SO_MARK (Linux) / route mark bookkeeping. On macOS SO_MARK is a
+    // no-op but the value is still stored for logging consistency.
+    #[cfg(any(target_os = "linux", target_os = "android", target_os = "windows", target_os = "macos"))]
+    let mark = if cfg.tun.enable {
+        let m = tun::marks_resolve(
+            cfg.global.mark,
+            cfg.tun.auto_route,
+            cfg.tun.auto_redirect,
+            cfg.tun.auto_detect_interface,
+        );
+        if m != 0 && cfg.global.mark == 0 {
+            tracing::info!(mark = format!("0x{m:x}"), "TUN auto mark (user mark was 0)");
+        }
+        m
+    } else {
+        cfg.global.mark
+    };
+    #[cfg(not(any(target_os = "linux", target_os = "android", target_os = "windows", target_os = "macos")))]
+    let mark = cfg.global.mark;
+    app::sockopt::set_fwmark(mark);
+    let bind = cfg.global.bind_address.clone();
+    let ipv6 = cfg.global.ipv6;
+    tracing::info!("bind-address={bind} ipv6={ipv6}");
+    let cache = if cfg.global.cache {
+        let path = cfg.cache_db_path(base_dir.as_deref());
+        match crate::app::cache::AppCache::open(&path) {
+            Ok(c) => Some(c),
+            Err(e) => {
+                tracing::warn!(error = %e, path = %path.display(), "cache=true but redb open failed");
+                None
+            }
+        }
+    } else {
+        tracing::debug!("cache=false; DNS/FakeIP/select memory-only, rulesets use files");
+        None
+    };
+    let router = Router::from_config(&cfg, base_dir.as_deref(), cache.clone()).await?;
+    if let Ok(list) = cfg.ruleset_list(base_dir.as_deref()) {
+        router.spawn_ruleset_updater(list.clone(), cache.clone());
+        crate::app::api::set_ruleset_ctx(list, cache.clone());
+    }
+    // Proxy-providers: pull subscriptions (or read local files) before the
+    // outbound table is built so proxy-groups can reference their nodes.
+    let run_dir = base_dir
+        .clone()
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    let providers = if cfg.proxy_providers.is_empty() {
+        None
+    } else {
+        Some(
+            crate::app::proxy_provider::ProxyProviderStore::load_all(
+                &cfg.proxy_providers,
+                Some(&run_dir),
+                false,
+            )
+            .await?,
+        )
+    };
+    // DNS 模块关闭时整个 dns 配置对下游（ECH upstream 等）不可见。
+    let dns_ref = if cfg.dns.enable { Some(&cfg.dns) } else { None };
+    let select_cache = cache.clone();
+    let outbounds = OutboundManager::new(
+        &cfg.proxies,
+        &cfg.proxy_groups,
+        providers.clone(),
+        dns_ref,
+        select_cache,
+    )
+    .await?;
+    crate::app::api::set_outbounds(outbounds.clone());
+    crate::app::api::set_router(router.clone());
+    crate::app::api::set_config(cfg.clone());
+    if let Some(p) = &providers {
+        crate::app::api::set_providers(p.clone());
+    }
+
+    let mut handles = Vec::new();
+
+    // proxy-providers auto refresh: `interval-time` is in hours.
+    if let Some(p) = &providers {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        for name in p.auto_update_names() {
+            let hours = p.interval_time(&name);
+            if hours == 0 {
+                continue;
+            }
+            let period = std::time::Duration::from_secs(hours.saturating_mul(3600));
+            // First tick: when the cached payload is already older than the
+            // interval (or was never fetched), refresh shortly after startup
+            // instead of waiting a whole period.
+            let age_ms = p
+                .last_updated_ms(&name)
+                .map(|t| (now_ms - t).max(0) as u64)
+                .unwrap_or(u64::MAX);
+            let first = if age_ms >= period.as_millis() as u64 {
+                std::time::Duration::from_secs(2)
+            } else {
+                std::time::Duration::from_millis(period.as_millis() as u64 - age_ms)
+            };
+            let om = outbounds.clone();
+            let nm = name.clone();
+            tracing::info!(provider = %nm, hours, "proxy-provider auto-update scheduled");
+            handles.push(tokio::spawn(async move {
+                let mut wait = first;
+                loop {
+                    tokio::time::sleep(wait).await;
+                    match om.update_provider(&nm).await {
+                        Ok(n) => tracing::info!(
+                            provider = %nm,
+                            nodes = n,
+                            "proxy-provider auto-updated"
+                        ),
+                        Err(e) => tracing::warn!(
+                            provider = %nm,
+                            error = %e,
+                            "proxy-provider auto-update failed"
+                        ),
+                    }
+                    wait = period;
+                }
+            }));
+        }
+    }
+
+    if cfg.global.mixed_port.unwrap_or(0) > 0 {
+        let r = router.clone();
+        let o = outbounds.clone();
+        let port = cfg.global.mixed_port.unwrap();
+        let bind = bind.clone();
+        handles.push(tokio::spawn(async move {
+            if let Err(e) = inbound::run_mixed(port, bind, ipv6, r, o).await {
+                tracing::error!("mixed inbound exited: {e:#}");
+            }
+        }));
+    }
+
+    if cfg.global.http_port.unwrap_or(0) > 0 {
+        let r = router.clone();
+        let o = outbounds.clone();
+        let port = cfg.global.http_port.unwrap();
+        let bind = bind.clone();
+        handles.push(tokio::spawn(async move {
+            if let Err(e) = inbound::run_http(port, bind, ipv6, r, o).await {
+                tracing::error!("http inbound exited: {e:#}");
+            }
+        }));
+    }
+
+    if cfg.global.socks_port.unwrap_or(0) > 0 {
+        let r = router.clone();
+        let o = outbounds.clone();
+        let port = cfg.global.socks_port.unwrap();
+        let bind = bind.clone();
+        handles.push(tokio::spawn(async move {
+            if let Err(e) = inbound::run_socks(port, bind, ipv6, r, o).await {
+                tracing::error!("socks inbound exited: {e:#}");
+            }
+        }));
+    }
+
+    // TPROXY / REDIRECT inbounds are Linux/Android-only (netfilter sockopts);
+    // excluded from Windows builds at compile time.
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    if cfg.global.tproxy_port.unwrap_or(0) > 0 {
+        let r = router.clone();
+        let o = outbounds.clone();
+        let port = cfg.global.tproxy_port.unwrap();
+        let bind = bind.clone();
+        handles.push(tokio::spawn(async move {
+            if let Err(e) = inbound::run_tproxy(port, bind, ipv6, r, o).await {
+                tracing::error!("tproxy inbound exited: {e:#}");
+            }
+        }));
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    if cfg.global.redir_port.unwrap_or(0) > 0 {
+        let r = router.clone();
+        let o = outbounds.clone();
+        let port = cfg.global.redir_port.unwrap();
+        let bind = bind.clone();
+        handles.push(tokio::spawn(async move {
+            if let Err(e) = inbound::run_redir(port, bind, ipv6, r, o).await {
+                tracing::error!("redir inbound exited: {e:#}");
+            }
+        }));
+    }
+
+    // TUN: Linux / Android / Windows / macOS (system stack + optional OS integration).
+    #[cfg(any(target_os = "linux", target_os = "android", target_os = "windows", target_os = "macos"))]
+    if cfg.tun.enable {
+        let r = router.clone();
+        let o = outbounds.clone();
+        let c = cfg.clone();
+        handles.push(tokio::spawn(async move {
+            if let Err(e) = tun::run_tun(c, r, o).await {
+                tracing::error!("tun inbound exited: {e:#}");
+            }
+        }));
+    }
+
+    // tproxy/redir are Linux-only; warn if configured on other platforms.
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    {
+        if cfg.global.tproxy_port.unwrap_or(0) > 0 {
+            tracing::warn!("tproxy-port is Linux/Android-only; ignored on this platform");
+        }
+        if cfg.global.redir_port.unwrap_or(0) > 0 {
+            tracing::warn!("redir-port is Linux/Android-only; ignored on this platform");
+        }
+    }
+
+    if !cfg.global.api.trim().is_empty() {
+        match app::api::parse_listen(&cfg.global.api) {
+            Ok(addr) => {
+                handles.push(tokio::spawn(async move {
+                    if let Err(e) = app::api::run_api(addr).await {
+                        tracing::error!("api exited: {e:#}");
+                    }
+                }));
+            }
+            Err(e) => tracing::error!("invalid api={}: {e:#}", cfg.global.api),
+        }
+    }
+
+    // DNS 模块启用且配置了 port 时才监听；省略 port = 仅劫持应答（无监听）。
+    if cfg.dns.enable && cfg.dns.listen_port() > 0 {
+        let c = cfg.clone();
+        let r = router.clone();
+        handles.push(tokio::spawn(async move {
+            if let Err(e) = dns::run_dns_server(c, r).await {
+                tracing::error!("dns server exited: {e:#}");
+            }
+        }));
+    }
+
+    if handles.is_empty() {
+        anyhow::bail!(
+            "no inbound enabled (set mixed-port / http-port / socks-port / tproxy-port / redir-port / tun.enable / api / dns.port)"
+        );
+    }
+
+    // System-wide transparent proxy (Linux): nft/iptables + policy routing.
+    // On failure: cleanup partial state and abort startup.
+    #[cfg(target_os = "linux")]
+    let _ip_auto_route_guard = if cfg.ip_auto_route.enable {
+        Some(
+            ip_auto_route::apply(&cfg)
+                .await
+                .context("ip-auto-route apply failed")?,
+        )
+    } else {
+        None
+    };
+
+    tracing::info!("ant ready");
+    // Graceful shutdown: abort tasks so TUN RouteGuard/RedirectGuard Drop runs
+    // and cleans ip rule / nftables (same responsibility as sing-tun Close).
+    // `_ip_auto_route_guard` Drop also runs on scope exit.
+    let aborts: Vec<_> = handles.iter().map(|h| h.abort_handle()).collect();
+    tokio::select! {
+        _ = futures::future::join_all(handles) => {}
+        _ = tokio::signal::ctrl_c() => {
+            tracing::info!("signal: shutting down, cleaning TUN routes/redirect...");
+            for a in aborts {
+                a.abort();
+            }
+            // Allow Drop to run inside aborted tasks
+            tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        }
+    }
+    tracing::info!("ant stopped");
+    Ok(())
+}
+
+/// Resolve the config file inside a `-d/--dir` directory:
+/// 1. `<dir>/config.yaml` if it exists (other-named yaml files may coexist);
+/// 2. otherwise the single other `*.yaml`/`*.yml` file in `<dir>` — if there
+///    are none, or more than one, fail fast.
+fn resolve_config_in_dir(dir: &std::path::Path) -> Result<std::path::PathBuf> {
+    if !dir.is_dir() {
+        anyhow::bail!("-d/--dir `{}` is not an existing directory", dir.display());
+    }
+    let config_yaml = dir.join("config.yaml");
+    if config_yaml.is_file() {
+        return Ok(config_yaml);
+    }
+    let mut candidates: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
+        .with_context(|| format!("read dir {}", dir.display()))?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| {
+            p.is_file()
+                && p.extension()
+                    .and_then(|e| e.to_str())
+                    .is_some_and(|e| e.eq_ignore_ascii_case("yaml") || e.eq_ignore_ascii_case("yml"))
+        })
+        .collect();
+    candidates.sort();
+    match candidates.len() {
+        0 => anyhow::bail!(
+            "no `config.yaml` and no *.yaml file found in `{}`",
+            dir.display()
+        ),
+        1 => Ok(candidates.remove(0)),
+        n => anyhow::bail!(
+            "no `config.yaml` in `{}` and {n} yaml files found; keep exactly one of: {}",
+            dir.display(),
+            candidates
+                .iter()
+                .map(|p| p.file_name().unwrap_or_default().to_string_lossy())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
+}
+
+/// `ant check <config.yaml>` — walk the full startup path except dialing:
+/// YAML parse + validate, bootstrap DNS resolution, .ars ruleset loading,
+/// and outbound (dialer) construction.
+///
+/// Output is a single line on stdout — no config digest, so node addresses,
+/// subscription URLs and rule contents never leave the process:
+///   success → `config ok: <path> (N proxy node(s), M route rule(s))`
+///   failure → `config error: <path>: <where>: <reason>` (exit 1)
+///
+/// `base_dir` (from `-d/--dir`) resolves relative rule-provider paths.
+async fn cmd_check(path: &str, base_dir: Option<&std::path::Path>) -> Result<()> {
+    match check_config(path, base_dir).await {
+        Ok((nodes, rules)) => {
+            println!("config ok: {path} ({nodes} proxy node(s), {rules} route rule(s))");
+            Ok(())
+        }
+        Err(e) => {
+            // Collapse the anyhow chain (`where: reason`) onto one line.
+            let msg = format!("{e:#}").replace(['\n', '\r'], " ");
+            println!("config error: {path}: {msg}");
+            std::process::exit(1);
+        }
+    }
+}
+
+/// The full check pipeline. Each stage adds a context label so the single-line
+/// failure report points at the offending section (`dns.rules[2]`, `proxy node
+/// \`foo\``, …).
+async fn check_config(path: &str, base_dir: Option<&std::path::Path>) -> Result<(usize, usize)> {
+    let mut cfg = Config::load(path).context("YAML parse + validate")?;
+    if let Some(base) = base_dir {
+        cfg.resolve_ruleset_paths(base);
+    }
+
+    anyhow::ensure!(
+        cfg.global.mixed_port.unwrap_or(0) > 0
+            || cfg.global.http_port.unwrap_or(0) > 0
+            || cfg.global.socks_port.unwrap_or(0) > 0
+            || cfg.global.tproxy_port.unwrap_or(0) > 0
+            || cfg.global.redir_port.unwrap_or(0) > 0
+            || cfg.tun.enable
+            || !cfg.global.api.trim().is_empty()
+            || (cfg.dns.enable && cfg.dns.listen_port() > 0),
+        "no inbound enabled (set mixed-port / http-port / socks-port / tproxy-port / redir-port / tun.enable / api / dns.port)"
+    );
+
+    if cfg.dns.enable {
+        let ns = cfg
+            .dns
+            .default_nameserver
+            .as_deref()
+            .context("dns.enable=true requires dns.default-nameserver")?;
+        crate::dns::set_bootstrap(
+            crate::dns::parse_nameserver(ns).context("invalid dns.default-nameserver")?,
+        );
+    }
+
+    // .ars rulesets are loaded here; the reader reports the failing file.
+    Router::from_config(&cfg, None, None)
+        .await
+        .context("router build failed")?;
+
+    // proxy-providers: offline mode — a http provider that has no cache file
+    // yet is reported instead of being downloaded during a config check.
+    let providers = if cfg.proxy_providers.is_empty() {
+        None
+    } else {
+        Some(
+            crate::app::proxy_provider::ProxyProviderStore::load_all(
+                &cfg.proxy_providers,
+                base_dir,
+                true,
+            )
+            .await
+            .context("proxy-provider load failed")?,
+        )
+    };
+    // Offline check: an http provider that has no cache file yet reports an
+    // error instead of downloading, so groups referencing it have no members.
+    let provider_error = providers.as_ref().is_some_and(|p| {
+        p.snapshot().iter().any(|v| {
+            v.get("error")
+                .and_then(|x| x.as_str())
+                .is_some_and(|s| !s.is_empty())
+        })
+    });
+    let dns_ref = if cfg.dns.enable { Some(&cfg.dns) } else { None };
+    // An offline check cannot load http providers, so groups that reference
+    // them have no members yet — report instead of failing the whole check.
+    match OutboundManager::new(
+        &cfg.proxies,
+        &cfg.proxy_groups,
+        providers.clone(),
+        dns_ref,
+        None,
+    )
+    .await
+    {
+        Ok(_) => {}
+        Err(e) if provider_error => tracing::debug!(
+            error = format!("{e:#}"),
+            "outbounds not built: proxy-providers are unavailable offline"
+        ),
+        Err(e) => return Err(e).context("outbound build failed (no dial attempted)"),
+    }
+
+    Ok((cfg.proxies.len(), cfg.route.len()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_tmp_dir(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!(
+            "ant-test-{}-{}-{}",
+            tag,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn dir_resolution_prefers_config_yaml() {
+        let dir = make_tmp_dir("prefers");
+        std::fs::write(dir.join("config.yaml"), "placeholder").unwrap();
+        std::fs::write(dir.join("my-proxy.yaml"), "placeholder").unwrap();
+        let p = resolve_config_in_dir(&dir).unwrap();
+        assert_eq!(p, dir.join("config.yaml"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn dir_resolution_single_other_yaml() {
+        let dir = make_tmp_dir("single");
+        std::fs::write(dir.join("my-proxy.yaml"), "placeholder").unwrap();
+        let p = resolve_config_in_dir(&dir).unwrap();
+        assert_eq!(p, dir.join("my-proxy.yaml"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn dir_resolution_rejects_multiple_yaml() {
+        let dir = make_tmp_dir("multi");
+        std::fs::write(dir.join("a.yaml"), "placeholder").unwrap();
+        std::fs::write(dir.join("b.yml"), "placeholder").unwrap();
+        let err = resolve_config_in_dir(&dir).unwrap_err().to_string();
+        assert!(err.contains("keep exactly one"), "got: {err}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn dir_resolution_rejects_empty_dir() {
+        let dir = make_tmp_dir("empty");
+        let err = resolve_config_in_dir(&dir).unwrap_err().to_string();
+        assert!(err.contains("no `config.yaml`"), "got: {err}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn dir_resolution_rejects_missing_dir() {
+        assert!(resolve_config_in_dir(std::path::Path::new("/no/such/dir-xyz")).is_err());
+    }
+}
