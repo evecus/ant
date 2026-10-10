@@ -12,14 +12,11 @@ path = "src/main.rs"
 
 [dependencies]
 tokio = { version = "1.35", features = ["full"] }
-tokio-util = { version = "0.7", features = ["codec", "net", "io"] }
 futures = "0.3"
 async-trait = "0.1"
 bytes = "1"
 anyhow = "1"
-thiserror = "1"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
 serde_yaml = "0.9"
 clap = { version = "4.4", features = ["derive"] }
 tracing = "0.1"
@@ -27,8 +24,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 socket2 = { version = "0.5", features = ["all"] }
 
 http = "1.0"
-hyper = { version = "1.1", features = ["server", "http1", "http2", "client"] }
-hyper-util = { version = "0.1", features = ["tokio", "server-auto", "client", "client-legacy", "http1", "http2"] }
+# client only (xhttp/h2); `server` was for the removed API panel + a few unit tests
+hyper = { version = "1.1", features = ["client", "http1", "http2"] }
+hyper-util = { version = "0.1", features = ["tokio", "client", "client-legacy", "http1", "http2"] }
 tower = { version = "0.5", default-features = false }
 tokio-stream = "0.1"
 http-body-util = "0.1"
