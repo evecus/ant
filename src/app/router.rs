@@ -1,4 +1,4 @@
-//! Routing: sniff first, then sequential RULE-SET match, MATCH last.
+//! Routing: sniff first, then sequential route rules (DOMAIN / IP-CIDR / RULE-SET / …), MATCH last.
 
 use crate::config::Config;
 use crate::dns::cache::DnsCache;
@@ -76,8 +76,9 @@ pub struct Router {
 }
 
 struct RouteEntry {
-    ruleset: String,
+    kind: crate::config::RuleKind,
     outbound: Outbound,
+    label: String,
 }
 
 impl Router {
@@ -99,17 +100,19 @@ impl Router {
         let mut routes = Vec::new();
         let mut final_outbound = Outbound::Node("__unset__".into());
         for (i, r) in parsed.iter().enumerate() {
-            if r.is_match {
+            if r.is_match() {
                 final_outbound = Outbound::from_str(&r.outbound);
                 continue;
             }
-            let name = r.ruleset.as_ref().unwrap();
-            if !rulesets.contains_key(name) {
-                anyhow::bail!("rules[{}] references unknown rule-provider {}", i, name);
+            if let Some(name) = r.ruleset_name() {
+                if !rulesets.contains_key(name) {
+                    anyhow::bail!("route[{}] references unknown rule-provider {}", i, name);
+                }
             }
             routes.push(RouteEntry {
-                ruleset: name.clone(),
+                kind: r.kind.clone(),
                 outbound: Outbound::from_str(&r.outbound),
+                label: rule_label(&r.kind),
             });
         }
 
@@ -156,6 +159,7 @@ impl Router {
             fakeip_filter: cfg.dns.fakeip_filter.clone(),
             fakeip_whitelist: cfg.dns.fakeip_filter_mode == "whitelist",
             sniff: cfg.global.sniff,
+            route_resolve: cfg.global.route_resolve,
             hijack_dns: cfg.dns.route_hijack,
             direct_dns: cfg.dns.resolved_direct.clone().unwrap_or(parse_nameserver(&cfg.dns.direct_nameserver)?),
             proxy_dns: cfg.dns.resolved_proxy.clone().unwrap_or(parse_nameserver(&cfg.dns.proxy_nameserver)?),
@@ -246,29 +250,49 @@ impl Router {
 
     /// Match by domain (preferred after sniff) and/or destination IP.
     pub fn match_outbound(&self, domain: Option<&str>, ip: Option<IpAddr>) -> Outbound {
-        self.match_route(domain, ip).outbound
+        self.match_route(domain, ip, &[]).outbound
     }
 
-    pub fn match_route(&self, domain: Option<&str>, ip: Option<IpAddr>) -> RouteMatch {
+    pub fn route_resolve(&self) -> bool {
+        self.route_resolve
+    }
+
+    pub fn match_route(
+        &self,
+        domain: Option<&str>,
+        ip: Option<IpAddr>,
+        resolved_ips: &[IpAddr],
+    ) -> RouteMatch {
+        self.match_route_ex(domain, ip, None, resolved_ips)
+    }
+
+    pub fn match_route_ex(
+        &self,
+        domain: Option<&str>,
+        dst_ip: Option<IpAddr>,
+        src_ip: Option<IpAddr>,
+        resolved_ips: &[IpAddr],
+    ) -> RouteMatch {
         // Fake-ip addresses must not hit ip rulesets; route by the mapped domain.
-        let ip = ip.filter(|addr| self.domain_for_fakeip(*addr).is_none());
+        let dst_ip = dst_ip.filter(|addr| self.domain_for_fakeip(*addr).is_none());
         for entry in &self.routes {
-            if let Some(rs) = self.rulesets.get(&entry.ruleset) {
-                let hit = match (domain, ip) {
-                    (Some(d), _) if rs.match_domain(d) => true,
-                    (_, Some(addr)) if rs.match_ip(addr) => true,
-                    _ => false,
+            if self.match_kind(
+                &entry.kind,
+                domain,
+                dst_ip,
+                src_ip,
+                resolved_ips,
+                entry.no_resolve,
+            ) {
+                tracing::debug!(
+                    "route hit {} -> {}{}",
+                    entry.label,
+                    entry.outbound.label(),
+                    if entry.no_resolve { " (no-resolve)" } else { "" }
+                );
+                return RouteMatch {
+                    outbound: entry.outbound.clone(),
                 };
-                if hit {
-                    tracing::debug!(
-                        "route hit ruleset={} -> {}",
-                        entry.ruleset,
-                        entry.outbound.label()
-                    );
-                    return RouteMatch {
-                        outbound: entry.outbound.clone(),
-                    };
-                }
             }
         }
         tracing::debug!("route MATCH -> {}", self.final_outbound.label());
@@ -277,16 +301,151 @@ impl Router {
         }
     }
 
+    fn match_kind(
+        &self,
+        kind: &crate::config::RuleKind,
+        domain: Option<&str>,
+        dst_ip: Option<IpAddr>,
+        src_ip: Option<IpAddr>,
+        resolved_ips: &[IpAddr],
+        no_resolve: bool,
+    ) -> bool {
+        use crate::config::RuleKind;
+        match kind {
+            RuleKind::Match => true,
+            RuleKind::RuleSet(name) => {
+                let Some(rs) = self.rulesets.get(name) else {
+                    return false;
+                };
+                if let Some(d) = domain {
+                    if rs.match_domain(d) {
+                        return true;
+                    }
+                }
+                if let Some(addr) = dst_ip {
+                    if rs.match_ip(addr) {
+                        return true;
+                    }
+                }
+                if self.route_resolve && !no_resolve {
+                    for addr in resolved_ips {
+                        if rs.match_ip(*addr) {
+                            return true;
+                        }
+                    }
+                }
+                false
+            }
+            RuleKind::Domain(d) => domain
+                .map(|x| {
+                    let x = x.trim_end_matches('.').to_ascii_lowercase();
+                    x == *d
+                })
+                .unwrap_or(false),
+            RuleKind::DomainSuffix(suf) => domain
+                .map(|x| {
+                    let x = x.trim_end_matches('.').to_ascii_lowercase();
+                    x == *suf || x.ends_with(&format!(".{suf}"))
+                })
+                .unwrap_or(false),
+            RuleKind::DomainKeyword(kw) => domain
+                .map(|x| {
+                    let x = x.trim_end_matches('.').to_ascii_lowercase();
+                    x.contains(kw.as_str())
+                })
+                .unwrap_or(false),
+            RuleKind::DomainRegex(re) => domain
+                .map(|x| {
+                    let x = x.trim_end_matches('.').to_ascii_lowercase();
+                    regex::Regex::new(re)
+                        .map(|r| r.is_match(&x))
+                        .unwrap_or(false)
+                })
+                .unwrap_or(false),
+            RuleKind::IpCidr(cidr) => {
+                if let Some(addr) = dst_ip {
+                    if ip_in_cidr(addr, cidr) {
+                        return true;
+                    }
+                }
+                if self.route_resolve && !no_resolve {
+                    for addr in resolved_ips {
+                        if ip_in_cidr(*addr, cidr) {
+                            return true;
+                        }
+                    }
+                }
+                false
+            }
+            RuleKind::SrcIpCidr(cidr) => src_ip
+                .map(|addr| ip_in_cidr(addr, cidr))
+                .unwrap_or(false),
+        }
+    }
+
     /// For DNS: decide which upstream (or block) for a domain query.
     pub fn dns_outbound_for_domain(&self, domain: &str) -> Outbound {
         for entry in &self.routes {
-            if let Some(rs) = self.rulesets.get(&entry.ruleset) {
-                if rs.match_domain(domain) {
-                    return entry.outbound.clone();
-                }
+            // DNS path has no dest IP / resolved IPs; skip IP-only rules.
+            if self.match_kind(&entry.kind, Some(domain), None, None, &[], true) {
+                return entry.outbound.clone();
             }
         }
         self.final_outbound.clone()
+    }
+}
+
+fn rule_label(kind: &crate::config::RuleKind) -> String {
+    use crate::config::RuleKind;
+    match kind {
+        RuleKind::Match => "MATCH".into(),
+        RuleKind::RuleSet(n) => n.clone(),
+        RuleKind::Domain(d) => format!("DOMAIN,{d}"),
+        RuleKind::DomainSuffix(s) => format!("DOMAIN-SUFFIX,{s}"),
+        RuleKind::DomainKeyword(k) => format!("DOMAIN-KEYWORD,{k}"),
+        RuleKind::DomainRegex(r) => format!("DOMAIN-REGEX,{r}"),
+        RuleKind::IpCidr(c) => format!("IP-CIDR,{c}"),
+        RuleKind::SrcIpCidr(c) => format!("SRC-IP-CIDR,{c}"),
+    }
+}
+
+fn ip_in_cidr(addr: IpAddr, cidr: &str) -> bool {
+    let cidr = cidr.trim();
+    if let Ok(ip) = cidr.parse::<IpAddr>() {
+        return ip == addr;
+    }
+    let (ip_s, prefix_s) = match cidr.split_once('/') {
+        Some(p) => p,
+        None => return false,
+    };
+    let prefix: u8 = match prefix_s.parse() {
+        Ok(p) => p,
+        Err(_) => return false,
+    };
+    match (addr, ip_s.parse::<IpAddr>()) {
+        (IpAddr::V4(a), Ok(IpAddr::V4(base))) => {
+            if prefix > 32 {
+                return false;
+            }
+            let mask = if prefix == 0 {
+                0u32
+            } else {
+                !0u32 << (32 - prefix)
+            };
+            (u32::from(a) & mask) == (u32::from(base) & mask)
+        }
+        (IpAddr::V6(a), Ok(IpAddr::V6(base))) => {
+            if prefix > 128 {
+                return false;
+            }
+            let mask = if prefix == 0 {
+                0u128
+            } else {
+                !0u128 << (128 - prefix)
+            };
+            (u128::from(a) & mask) == (u128::from(base) & mask)
+        }
+        _ => false,
     }
 }
 
@@ -325,6 +484,7 @@ mod tests {
             fakeip_filter: vec!["cn".to_string()],
             fakeip_whitelist: whitelist,
             sniff: false,
+            route_resolve: false,
             hijack_dns: false,
             direct_dns: parse_nameserver("223.5.5.5:53").unwrap(),
             proxy_dns: parse_nameserver("223.5.5.5:53").unwrap(),
