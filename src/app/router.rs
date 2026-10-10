@@ -55,6 +55,8 @@ pub struct Router {
     fakeip_whitelist: bool,
     /// Protocol sniffing (TLS/HTTP/QUIC) enabled via top-level `sniff: true`.
     sniff: bool,
+    /// Resolve domain before IP rule matching (`route-resolve: true`).
+    route_resolve: bool,
     // Read by the DNS-hijack path in tproxy/redir inbounds (linux/android only).
     #[cfg_attr(
         not(any(target_os = "linux", target_os = "android")),
@@ -79,6 +81,7 @@ struct RouteEntry {
     kind: crate::config::RuleKind,
     outbound: Outbound,
     label: String,
+    no_resolve: bool,
 }
 
 impl Router {
@@ -113,6 +116,7 @@ impl Router {
                 kind: r.kind.clone(),
                 outbound: Outbound::from_str(&r.outbound),
                 label: rule_label(&r.kind),
+                no_resolve: r.no_resolve,
             });
         }
 
