@@ -2170,6 +2170,8 @@ impl Config {
     /// Validate `ip-auto-route:` against mutual exclusion and required base configs.
     ///
     /// `&mut self` because it may auto-assign `global.mark` (loop prevention).
+    // 非 Linux 上首个块直接 bail!，末尾的 `Ok(())` 不可达（clippy -D warnings）。
+    #[allow(unreachable_code)]
     fn validate_ip_auto_route(&mut self) -> Result<()> {
         let iar = &self.ip_auto_route;
         if !iar.enable {

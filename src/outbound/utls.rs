@@ -806,29 +806,30 @@ fn check_server_alpn(body: &[u8], offered: &[String]) {
         return;
     };
 
+    let Some(selected) = selected_alpn(exts) else {
+        return;
+    };
+    if offered.iter().any(|a| a == &selected) {
+        debug!("utls: server selected ALPN {selected}");
+    } else {
+        warn!("utls: server selected ALPN {selected:?}, offered {offered:?}");
+    }
+}
+
+/// 从 EncryptedExtensions 的扩展列表里取出服务端选定的 ALPN（第一个 ProtocolName）。
+fn selected_alpn(exts: &[u8]) -> Option<String> {
     let mut ep = 0;
     while let Ok((typ, data)) = next_extension(exts, &mut ep) {
         if typ != 0x0010 {
             continue;
         }
         let mut p = 0;
-        if take_u16(data, &mut p).is_err() {
-            return;
-        }
-        while let Ok(len) = take_u8(data, &mut p) {
-            let Ok(proto) = take(data, &mut p, len as usize) else {
-                return;
-            };
-            let selected = String::from_utf8_lossy(proto).to_string();
-            if offered.iter().any(|a| a == &selected) {
-                debug!("utls: server selected ALPN {selected}");
-            } else {
-                warn!("utls: server selected ALPN {selected:?}, offered {offered:?}");
-            }
-            return;
-        }
-        return;
+        take_u16(data, &mut p).ok()?; // ProtocolNameList length
+        let len = take_u8(data, &mut p).ok()?;
+        let proto = take(data, &mut p, len as usize).ok()?;
+        return Some(String::from_utf8_lossy(proto).to_string());
     }
+    None
 }
 
 fn next_extension<'a>(input: &'a [u8], pos: &mut usize) -> Result<(u16, &'a [u8])> {
