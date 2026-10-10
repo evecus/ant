@@ -110,6 +110,30 @@ async fn main() -> Result<()> {
         }));
     }
 
+    if cfg.global.http_port > 0 {
+        let r = router.clone();
+        let o = outbounds.clone();
+        let port = cfg.global.http_port;
+        let bind = bind.clone();
+        handles.push(tokio::spawn(async move {
+            if let Err(e) = inbound::run_http(port, bind, r, o).await {
+                tracing::error!("http inbound exited: {e:#}");
+            }
+        }));
+    }
+
+    if cfg.global.socks_port > 0 {
+        let r = router.clone();
+        let o = outbounds.clone();
+        let port = cfg.global.socks_port;
+        let bind = bind.clone();
+        handles.push(tokio::spawn(async move {
+            if let Err(e) = inbound::run_socks(port, bind, r, o).await {
+                tracing::error!("socks inbound exited: {e:#}");
+            }
+        }));
+    }
+
     // TPROXY / REDIRECT inbounds are Linux/Android-only (netfilter sockopts);
     // excluded from Windows builds at compile time.
     #[cfg(any(target_os = "linux", target_os = "android"))]
@@ -149,7 +173,7 @@ async fn main() -> Result<()> {
     }
 
     if handles.is_empty() {
-        anyhow::bail!("no inbound enabled (set mixed-port / tproxy-port / redir-port / port)");
+        anyhow::bail!("no inbound enabled (set mixed-port / http-port / socks-port / tproxy-port / redir-port / dns.port)");
     }
 
     tracing::info!("ant ready");
@@ -165,17 +189,19 @@ async fn cmd_check(path: &str) -> Result<()> {
 
     let mut cfg = Config::load(path).context("config invalid")?;
     println!(
-        "  ok    YAML parse + validate ({} proxy node(s), {} rule(s))",
+        "  ok    YAML parse + validate ({} proxy node(s), {} route rule(s))",
         cfg.proxies.len(),
-        cfg.rules.len()
+        cfg.route.len()
     );
 
     anyhow::ensure!(
         cfg.global.mixed_port > 0
+            || cfg.global.http_port > 0
+            || cfg.global.socks_port > 0
             || cfg.global.tproxy_port > 0
             || cfg.global.redir_port > 0
             || cfg.dns.port > 0,
-        "no inbound enabled (set mixed-port / tproxy-port / redir-port / port)"
+        "no inbound enabled (set mixed-port / http-port / socks-port / tproxy-port / redir-port / dns.port)"
     );
 
     crate::dns::apply_bootstrap(&mut cfg)
@@ -228,7 +254,7 @@ fn print_summary(cfg: &Config) {
             println!("  rules  {} ({}) <- {}", rs.name, rs.ty, rs.path.display());
         }
     }
-    for line in &cfg.rules {
+    for line in &cfg.route {
         println!("  route  {line}");
     }
     let dns_mode = if cfg.dns.mode == "fakeip" {
@@ -248,8 +274,10 @@ fn print_summary(cfg: &Config) {
         cfg.dns.default_nameserver
     );
     println!(
-        "  listen mixed-port={} tproxy-port={} redir-port={} sniff={}",
+        "  listen mixed-port={} http-port={} socks-port={} tproxy-port={} redir-port={} sniff={}",
         cfg.global.mixed_port,
+        cfg.global.http_port,
+        cfg.global.socks_port,
         cfg.global.tproxy_port,
         cfg.global.redir_port,
         if cfg.global.sniff { "on" } else { "off" }
