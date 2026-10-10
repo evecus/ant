@@ -8,8 +8,6 @@ pub struct DialTarget {
     pub outbound: Outbound,
     pub addr: SocketAddr,
     pub host: Option<String>,
-    /// Ruleset name or `"final"`.
-    pub rule: String,
 }
 
 /// Sniffed domain wins; otherwise recover the domain from a fake-ip.
@@ -31,7 +29,6 @@ pub async fn decide(router: &Router, dest: SocketAddr, sniffed: Option<String>) 
         outbound: m.outbound,
         addr,
         host,
-        rule: m.rule,
     }
 }
 
