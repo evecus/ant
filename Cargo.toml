@@ -24,8 +24,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 socket2 = { version = "0.5", features = ["all"] }
 
 http = "1.0"
-# client only (xhttp/h2); `server` was for the removed API panel + a few unit tests
-hyper = { version = "1.1", features = ["client", "http1", "http2"] }
+# client for xhttp/h2; `server` kept for unit tests in vless.rs
+hyper = { version = "1.1", features = ["client", "server", "http1", "http2"] }
 hyper-util = { version = "0.1", features = ["tokio", "client", "client-legacy", "http1", "http2"] }
 tower = { version = "0.5", default-features = false }
 tokio-stream = "0.1"
