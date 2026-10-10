@@ -43,8 +43,6 @@ impl Outbound {
 #[derive(Debug, Clone)]
 pub struct RouteMatch {
     pub outbound: Outbound,
-    /// Ruleset name, or `"MATCH"`.
-    pub rule: String,
 }
 
 pub struct Router {
@@ -269,7 +267,6 @@ impl Router {
                     );
                     return RouteMatch {
                         outbound: entry.outbound.clone(),
-                        rule: entry.ruleset.clone(),
                     };
                 }
             }
@@ -277,7 +274,6 @@ impl Router {
         tracing::debug!("route MATCH -> {}", self.final_outbound.label());
         RouteMatch {
             outbound: self.final_outbound.clone(),
-            rule: "MATCH".into(),
         }
     }
 
