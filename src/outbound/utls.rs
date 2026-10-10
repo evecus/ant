@@ -38,7 +38,7 @@ use rand::Rng;
 use rustls::{
     client::{danger::ServerCertVerifier, WebPkiServerVerifier},
     pki_types::{CertificateDer, ServerName, UnixTime},
-    DigitallySignedStruct, RootCertStore, SignatureScheme,
+    RootCertStore, SignatureScheme,
 };
 use sha2::{Digest, Sha256, Sha384, Sha512};
 use tokio::{
@@ -48,7 +48,7 @@ use tokio::{
 use tracing::{debug, warn};
 
 use super::reality::{
-    fill_decrypted_handshake, parse_server_hello, pop_handshake_message, put_u16, put_u24,
+    der_read, fill_decrypted_handshake, parse_server_hello, pop_handshake_message, put_u16, put_u24,
     read_plain_handshake, take, take_u16, take_u8, verify_finished, wrap_plain_record,
     ApplicationKeys, CipherSuite, HandshakeKeys, Tls13Stream, HS_CERTIFICATE, HS_CERTIFICATE_VERIFY,
     HS_CLIENT_HELLO, HS_ENCRYPTED_EXTENSIONS, HS_FINISHED, HS_NEW_SESSION_TICKET, HS_SERVER_HELLO,
@@ -176,11 +176,12 @@ pub async fn connect_utls(
     let client_secret = x25519_dalek::StaticSecret::random_from_rng(rand::thread_rng());
     let client_public = x25519_dalek::PublicKey::from(&client_secret);
 
-    let mut rng = rand::thread_rng();
+    // 注意：rand::thread_rng() 的 ThreadRng 非 Send，不能跨 await 持有
+    // （否则整个 connect_utls future 会失去 Send）。用两条语句当场取完随机数。
     let mut random = [0u8; 32];
     let mut session_id = [0u8; 32];
-    rng.fill(&mut random);
-    rng.fill(&mut session_id);
+    rand::thread_rng().fill(&mut random);
+    rand::thread_rng().fill(&mut session_id);
     let randoms = HelloRandoms {
         random: &random,
         session_id: &session_id,
@@ -664,12 +665,100 @@ fn verify_certificate_verify(body: &[u8], leaf: &[u8], transcript: &[u8]) -> Res
     content.push(0x00);
     content.extend_from_slice(&transcript_hash);
 
-    let dss = DigitallySignedStruct::new(scheme, signature.to_vec());
-    let leaf_der = CertificateDer::from(leaf.to_vec());
-    ROOT_VERIFIER
-        .verify_tls13_signature(&content, &leaf_der, &dss)
-        .map_err(|e| anyhow!("utls: CertificateVerify failed: {e}"))?;
-    Ok(())
+    verify_signature(scheme, leaf, &content, signature)
+}
+
+/// SPKI 算法 OID（DER 内容字节）
+const OID_RSA: &[u8] = &[
+    0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01, // rsaEncryption
+];
+const OID_EC_PUBLIC_KEY: &[u8] = &[
+    0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01, // id-ecPublicKey
+];
+const OID_ED25519: &[u8] = &[0x2b, 0x65, 0x70]; // Ed25519
+
+/// 用叶子证书里的公钥验证 CertificateVerify 签名。
+///
+/// rustls 的 `DigitallySignedStruct::new` 是私有的，无法把服务端发来的
+/// `(scheme, signature)` 再喂回 rustls，这里直接用 ring 校验 ——
+/// 算法由 `scheme` 决定，公钥从叶子证书的 SPKI 里取。
+fn verify_signature(
+    scheme: SignatureScheme,
+    leaf_der: &[u8],
+    message: &[u8],
+    signature: &[u8],
+) -> Result<()> {
+    let (alg_oid, key) = extract_spki(leaf_der)?;
+    let alg: &dyn ring::signature::VerificationAlgorithm = match (scheme, alg_oid) {
+        // EC 公钥是未压缩点：P-256 = 65B，P-384 = 97B。
+        (SignatureScheme::ECDSA_NISTP256_SHA256, o) if o == OID_EC_PUBLIC_KEY && key.len() == 65 => {
+            &ring::signature::ECDSA_P256_SHA256_ASN1
+        }
+        (SignatureScheme::ECDSA_NISTP384_SHA384, o) if o == OID_EC_PUBLIC_KEY && key.len() == 97 => {
+            &ring::signature::ECDSA_P384_SHA384_ASN1
+        }
+        (SignatureScheme::RSA_PSS_SHA256, o) if o == OID_RSA => {
+            &ring::signature::RSA_PSS_2048_8192_SHA256
+        }
+        (SignatureScheme::RSA_PSS_SHA384, o) if o == OID_RSA => {
+            &ring::signature::RSA_PSS_2048_8192_SHA384
+        }
+        (SignatureScheme::RSA_PSS_SHA512, o) if o == OID_RSA => {
+            &ring::signature::RSA_PSS_2048_8192_SHA512
+        }
+        (SignatureScheme::ED25519, o) if o == OID_ED25519 => &ring::signature::ED25519,
+        _ => bail!("utls: certificate key/algorithm mismatch for scheme {scheme:?}"),
+    };
+    ring::signature::UnparsedPublicKey::new(alg, key)
+        .verify(message, signature)
+        .map_err(|_| anyhow!("utls: CertificateVerify signature does not match the certificate"))
+}
+
+/// 从证书 DER 里取出 SubjectPublicKeyInfo 的 (算法 OID, 公钥字节)。
+fn extract_spki(cert: &[u8]) -> Result<(&[u8], &[u8])> {
+    // Certificate ::= SEQUENCE { tbsCertificate, signatureAlgorithm, signatureValue }
+    let mut pos = 0;
+    let cert_seq = der_read(cert, &mut pos).ok_or_else(|| anyhow!("utls: malformed certificate"))?;
+    let mut cpos = 0;
+    let tbs = der_read(cert_seq.value, &mut cpos)
+        .ok_or_else(|| anyhow!("utls: malformed tbsCertificate"))?;
+
+    // TBSCertificate 是 [version?] serial, signature, issuer, validity, subject,
+    // SPKI, ... 顺序的 SEQUENCE 序列；直接找形如 SPKI 的子节点。
+    let mut p = 0;
+    while p < tbs.value.len() {
+        let node = match der_read(tbs.value, &mut p) {
+            Some(n) => n,
+            None => break,
+        };
+        if node.tag != 0x30 {
+            continue;
+        }
+        if let Some(spki) = parse_spki(node.value) {
+            return Ok(spki);
+        }
+    }
+    bail!("utls: no SubjectPublicKeyInfo in certificate")
+}
+
+/// SPKI ::= SEQUENCE { AlgorithmIdentifier, subjectPublicKey BIT STRING }
+fn parse_spki(spki: &[u8]) -> Option<(&[u8], &[u8])> {
+    let mut pos = 0;
+    let alg = der_read(spki, &mut pos)?;
+    let key_bits = der_read(spki, &mut pos)?;
+    if alg.tag != 0x30 || key_bits.tag != 0x03 {
+        return None;
+    }
+    let mut apos = 0;
+    let oid = der_read(alg.value, &mut apos)?;
+    if oid.tag != 0x06 {
+        return None;
+    }
+    // BIT STRING 首字节是 unused-bits，证书里必须是 0。
+    if key_bits.value.first().copied()? != 0 {
+        return None;
+    }
+    Some((oid.value, &key_bits.value[1..]))
 }
 
 /// CertificateVerify 所用的摘要（RFC 8446 §4.4.3）。

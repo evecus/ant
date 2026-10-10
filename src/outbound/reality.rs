@@ -999,12 +999,12 @@ fn extract_ed25519_spki(spki_value: &[u8]) -> Option<[u8; 32]> {
 }
 
 #[derive(Clone, Copy)]
-struct DerNode<'a> {
-    tag: u8,
-    value: &'a [u8],
+pub(crate) struct DerNode<'a> {
+    pub(crate) tag: u8,
+    pub(crate) value: &'a [u8],
 }
 
-fn der_read<'a>(input: &'a [u8], pos: &mut usize) -> Option<DerNode<'a>> {
+pub(crate) fn der_read<'a>(input: &'a [u8], pos: &mut usize) -> Option<DerNode<'a>> {
     let tag = *input.get(*pos)?;
     *pos += 1;
     let first_len = *input.get(*pos)?;
