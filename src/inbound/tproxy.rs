@@ -164,14 +164,6 @@ async fn handle_tproxy_tcp(
         tracing::debug!("tproxy tcp block {} ({:?})", dest, target.host);
         return Ok(());
     }
-    let _conn = crate::app::stats::global().register(crate::app::stats::ConnectionInfo {
-        peer,
-        dest: target.addr,
-        dest_host: target.host.clone(),
-        inbound: "tproxy",
-        rule: target.rule.clone(),
-        outbound: target.outbound.label(),
-    });
     let dialer = outbounds.select(target.outbound).context("no dialer")?;
     let remote = dialer
         .dial_tcp(target.addr, target.host.as_deref())
@@ -305,14 +297,6 @@ async fn udp_session_worker(
         while let Ok(Some(_)) = tokio::time::timeout(UDP_IDLE, rx.recv()).await {}
         return Ok(());
     }
-    let _conn = crate::app::stats::global().register(crate::app::stats::ConnectionInfo {
-        peer,
-        dest: target.addr,
-        dest_host: target.host.clone(),
-        inbound: "tproxy-udp",
-        rule: target.rule.clone(),
-        outbound: target.outbound.label(),
-    });
     let dialer = outbounds.select(target.outbound).context("no dialer")?;
     let sess = dialer
         .dial_udp(Some(peer))

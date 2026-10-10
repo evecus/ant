@@ -136,14 +136,6 @@ async fn handle_socks5(
                 return Ok(());
             }
 
-            let _conn = crate::app::stats::global().register(crate::app::stats::ConnectionInfo {
-                peer,
-                dest: decided.addr,
-                dest_host: decided.host.clone(),
-                inbound: "socks5",
-                rule: decided.rule.clone(),
-                outbound: decided.outbound.label(),
-            });
             let dialer = outbounds.select(decided.outbound).context("no dialer")?;
             let remote = dialer
                 .dial_tcp(decided.addr, decided.host.as_deref())
@@ -422,14 +414,6 @@ async fn handle_http(
         }
 
         tracing::debug!("http CONNECT {} → {:?} via {:?}", target, decided.host, decided.outbound);
-        let _conn = crate::app::stats::global().register(crate::app::stats::ConnectionInfo {
-            peer,
-            dest: decided.addr,
-            dest_host: decided.host.clone(),
-            inbound: "http",
-            rule: decided.rule.clone(),
-            outbound: decided.outbound.label(),
-        });
         let dialer = outbounds.select(decided.outbound).context("no dialer")?;
         let remote = dialer
             .dial_tcp(decided.addr, decided.host.as_deref())
@@ -467,14 +451,6 @@ async fn handle_http(
                 .await?;
             return Ok(());
         }
-        let _conn = crate::app::stats::global().register(crate::app::stats::ConnectionInfo {
-            peer,
-            dest: decided.addr,
-            dest_host: decided.host.clone(),
-            inbound: "http",
-            rule: decided.rule.clone(),
-            outbound: decided.outbound.label(),
-        });
         let dialer = outbounds.select(decided.outbound).context("no dialer")?;
         let mut remote = dialer.dial_tcp(decided.addr, decided.host.as_deref()).await?;
 

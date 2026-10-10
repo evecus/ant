@@ -96,14 +96,6 @@ async fn handle_redir(
         tracing::debug!("redir block {dest} ({:?})", target.host);
         return Ok(());
     }
-    let _conn = crate::app::stats::global().register(crate::app::stats::ConnectionInfo {
-        peer,
-        dest: target.addr,
-        dest_host: target.host.clone(),
-        inbound: "redir",
-        rule: target.rule.clone(),
-        outbound: target.outbound.label(),
-    });
     let dialer = outbounds.select(target.outbound).context("no dialer")?;
     let remote = dialer
         .dial_tcp(target.addr, target.host.as_deref())
