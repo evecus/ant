@@ -174,7 +174,6 @@ async fn cmd_check(path: &str) -> Result<()> {
         cfg.global.mixed_port > 0
             || cfg.global.tproxy_port > 0
             || cfg.global.redir_port > 0
-            || !cfg.global.api.trim().is_empty()
             || cfg.dns.port > 0,
         "no inbound enabled (set mixed-port / tproxy-port / redir-port / port)"
     );
@@ -249,15 +248,10 @@ fn print_summary(cfg: &Config) {
         cfg.dns.default_nameserver
     );
     println!(
-        "  listen mixed-port={} tproxy-port={} redir-port={} api={} sniff={}",
+        "  listen mixed-port={} tproxy-port={} redir-port={} sniff={}",
         cfg.global.mixed_port,
         cfg.global.tproxy_port,
         cfg.global.redir_port,
-        if cfg.global.api.is_empty() {
-            "-"
-        } else {
-            cfg.global.api.as_str()
-        },
         if cfg.global.sniff { "on" } else { "off" }
     );
 }
