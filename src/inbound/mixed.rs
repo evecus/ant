@@ -317,7 +317,7 @@ async fn socks5_udp_relay(
         } else {
             None
         };
-        let decided = target::decide(&router, dest, domain_owned, Some(peer)).await;
+        let decided = target::decide(&router, dest, domain_owned, Some(client)).await;
         if decided.outbound == Outbound::Block {
             continue;
         }
