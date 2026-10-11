@@ -1,6 +1,8 @@
 # ant example config — mihomo-style YAML; rulesets must be binary `.ars`
 # Convert: ant ruleset-convert -i in.json -o out.ars
 
+# error | warn | info | debug | trace | off  (`off` disables logging entirely)
+# RUST_LOG, when set, overrides this value.
 log-level: info
 # mark: 255
 # bind-address: "::"  # :: | 0.0.0.0 | 127.0.0.1
@@ -28,10 +30,19 @@ dns:
   #   tls://1.1.1.1:853
   #   https://1.1.1.1/dns-query
   #   https://cloudflare-dns.com/dns-query
-  default-nameserver: "223.5.5.5:53"
+  default-nameserver: "223.5.5.5:53"   # bootstrap，必须纯 IP
+  # true（默认）：复用顶层 route: 规则。
+  #   direct → direct-nameserver；节点 → proxy-nameserver；block → rcode://success
+  # rule-follow-route: true
   direct-nameserver: "223.5.5.5:53"
   proxy-nameserver: "https://1.1.1.1/dns-query"
-  # block domains use rcode://success automatically
+  # false 时用 dns.rules + nameserver 自定义 DNS 路由（第三列只能是上游 URL 或 rcode://success）：
+  # rule-follow-route: false
+  # rules:
+  #   - RULE-SET,cn-domain,udp://223.5.5.5:53
+  #   - DOMAIN-SUFFIX,google.com,https://1.1.1.1/dns-query
+  #   - MATCH,tls://8.8.8.8:853
+  # nameserver: "udp://223.5.5.5:53"   # 无 rules 时的默认上游（必填）
 
 # Multiple nodes under proxies:; each has a unique `name` referenced by rules
 # (RULE-SET,name,<outbound> or MATCH,<outbound>). Reserved: direct/DIRECT, block/REJECT.
