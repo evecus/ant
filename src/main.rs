@@ -21,9 +21,38 @@ struct Cli {
     #[command(subcommand)]
     cmd: Option<Commands>,
 
-    /// Path to YAML config (when running proxy)
-    #[arg(short = 'c', long = "config", default_value = "config.yaml", global = true)]
-    config: String,
+    /// Path to YAML config (default: `config.yaml` inside -d, or the current dir)
+    #[arg(short = 'c', long = "config", global = true)]
+    config: Option<String>,
+
+    /// Working directory: relative paths in the config (rulesets, ...) and the
+    /// default `config.yaml` are resolved against it
+    #[arg(short = 'd', long = "directory", value_name = "DIR", global = true)]
+    directory: Option<PathBuf>,
+}
+
+/// Resolve the effective config path and enter the working directory (`-d`).
+///
+/// An explicit relative `-c` is made absolute against the *launch* directory
+/// first (so `ant -d /data/ant -c ./a.yaml` reads `./a.yaml` from where it was
+/// started); the default `config.yaml` is looked up inside `-d` after the chdir.
+fn enter_dir(dir: &Option<PathBuf>, config: Option<String>) -> Result<String> {
+    let cfg = match config {
+        Some(c) => {
+            let p = PathBuf::from(&c);
+            if p.is_absolute() {
+                p
+            } else {
+                std::env::current_dir().context("get current dir")?.join(p)
+            }
+        }
+        None => PathBuf::from("config.yaml"),
+    };
+    if let Some(d) = dir {
+        std::env::set_current_dir(d)
+            .with_context(|| format!("enter directory {}", d.display()))?;
+    }
+    Ok(cfg.to_string_lossy().into_owned())
 }
 
 #[derive(Subcommand, Debug)]
@@ -73,13 +102,14 @@ async fn main() -> Result<()> {
                 .with_writer(std::io::stderr)
                 .with_env_filter(EnvFilter::new("info"))
                 .init();
-            let path = path.unwrap_or(cli.config);
+            let path = enter_dir(&cli.directory, path.or(cli.config))?;
             return cmd_check(&path).await;
         }
         None => {}
     }
 
-    let mut cfg = Config::load(&cli.config)?;
+    let config_path = enter_dir(&cli.directory, cli.config)?;
+    let mut cfg = Config::load(&config_path)?;
     crate::dns::apply_bootstrap(&mut cfg).await?;
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new(&cfg.global.log_level));
@@ -88,7 +118,7 @@ async fn main() -> Result<()> {
         .with_env_filter(filter)
         .init();
 
-    tracing::info!("ant starting, config={}", cli.config);
+    tracing::info!("ant starting, config={config_path}");
 
     app::sockopt::set_fwmark(cfg.global.mark);
     let bind = cfg.global.bind_address.clone();
