@@ -29,6 +29,7 @@ enum Mode {
 pub async fn run_mixed(
     port: u16,
     bind_address: String,
+    ipv6: bool,
     router: Arc<Router>,
     outbounds: Arc<OutboundManager>,
 ) -> Result<()> {
@@ -37,6 +38,7 @@ pub async fn run_mixed(
         "mixed (HTTP+SOCKS5, TCP/UDP)",
         port,
         bind_address,
+        ipv6,
         router,
         outbounds,
         Mode::Mixed,
@@ -48,6 +50,7 @@ pub async fn run_mixed(
 pub async fn run_http(
     port: u16,
     bind_address: String,
+    ipv6: bool,
     router: Arc<Router>,
     outbounds: Arc<OutboundManager>,
 ) -> Result<()> {
@@ -56,6 +59,7 @@ pub async fn run_http(
         "http (CONNECT + absolute-URI)",
         port,
         bind_address,
+        ipv6,
         router,
         outbounds,
         Mode::Http,
@@ -67,6 +71,7 @@ pub async fn run_http(
 pub async fn run_socks(
     port: u16,
     bind_address: String,
+    ipv6: bool,
     router: Arc<Router>,
     outbounds: Arc<OutboundManager>,
 ) -> Result<()> {
@@ -75,6 +80,7 @@ pub async fn run_socks(
         "socks (SOCKS5, TCP/UDP)",
         port,
         bind_address,
+        ipv6,
         router,
         outbounds,
         Mode::Socks,
@@ -87,12 +93,13 @@ async fn run_listener(
     log_label: &'static str,
     port: u16,
     bind_address: String,
+    ipv6: bool,
     router: Arc<Router>,
     outbounds: Arc<OutboundManager>,
     mode: Mode,
 ) -> Result<()> {
     let mut handles = Vec::new();
-    for bind in crate::app::sockopt::listen_addrs(&bind_address, port) {
+    for bind in crate::app::sockopt::listen_addrs(&bind_address, port, ipv6) {
         match crate::app::sockopt::bind_tcp_listener(bind) {
             Ok((listener, bind)) => {
                 tracing::info!("{log_label} listening on {bind}");

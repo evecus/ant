@@ -23,11 +23,12 @@ const UDP_IDLE: Duration = Duration::from_secs(60);
 pub async fn run_tproxy(
     port: u16,
     bind_address: String,
+    ipv6: bool,
     router: Arc<Router>,
     outbounds: Arc<OutboundManager>,
 ) -> Result<()> {
     let mut handles = Vec::new();
-    let addrs = crate::app::sockopt::listen_addrs(&bind_address, port);
+    let addrs = crate::app::sockopt::listen_addrs(&bind_address, port, ipv6);
 
     for bind in addrs.clone() {
         let r = router.clone();

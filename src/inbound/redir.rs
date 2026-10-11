@@ -18,11 +18,12 @@ use tokio::net::TcpStream;
 pub async fn run_redir(
     port: u16,
     bind_address: String,
+    ipv6: bool,
     router: Arc<Router>,
     outbounds: Arc<OutboundManager>,
 ) -> Result<()> {
     let mut handles = Vec::new();
-    for bind in crate::app::sockopt::listen_addrs(&bind_address, port) {
+    for bind in crate::app::sockopt::listen_addrs(&bind_address, port, ipv6) {
         match crate::app::sockopt::bind_tcp_listener(bind) {
             Ok((listener, bind)) => {
                 tracing::info!("redir TCP listening on {bind}");
