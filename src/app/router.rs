@@ -95,10 +95,15 @@ struct RouteEntry {
 
 impl Router {
     pub fn from_config(cfg: &Config) -> Result<Arc<Self>> {
+        let global_ipv6 = cfg.global.ipv6;
         let ruleset_list = cfg.ruleset_list()?;
         let mut rulesets = HashMap::new();
         for rs in &ruleset_list {
-            let loaded = ruleset::load_ars(&rs.name, &rs.path)?;
+            let mut loaded = ruleset::load_ars(&rs.name, &rs.path)?;
+            if !global_ipv6 {
+                loaded.drop_ipv6();
+                tracing::debug!("ruleset `{}`: IPv6 CIDRs dropped (ipv6=false)", rs.name);
+            }
             tracing::info!(
                 "loaded ruleset {} ({}) from {:?}",
                 rs.name,
@@ -129,7 +134,8 @@ impl Router {
             });
         }
 
-        let ipv6 = cfg.dns.ipv6;
+        // Effective DNS IPv6 requires both top-level ipv6 and dns.ipv6.
+        let ipv6 = global_ipv6 && cfg.dns.ipv6;
         let fakeip = cfg.dns.mode == "fakeip";
         let fakeip_pool = if fakeip {
             let v6_range = if ipv6 {
