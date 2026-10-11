@@ -48,6 +48,16 @@ pub struct GlobalConfig {
     pub redir_port: u16,
     #[serde(default, rename = "mark")]
     pub mark: u32,
+    /// Inbound / DNS listen address family control.
+    /// - `true` (default): dual-stack — IPv4 + IPv6; rulesets keep IPv6 CIDRs;
+    ///   DNS AAAA still gated by `dns.ipv6`.
+    /// - `false`: IPv4 only — listen IPv4 only; DNS ignores `dns.ipv6` (A only);
+    ///   FakeIP only IPv4; IP rulesets drop IPv6 CIDRs.
+    #[serde(default = "default_true")]
+    pub ipv6: bool,
+    /// Listen address for all inbounds and the DNS module.
+    /// Only `0.0.0.0` (LAN) or `127.0.0.1` (loopback). IPv6 sockets are
+    /// controlled solely by top-level `ipv6`.
     #[serde(default = "default_bind", rename = "bind-address")]
     pub bind_address: String,
     /// Protocol sniffing (TLS SNI / HTTP Host / QUIC SNI) for domain-based routing.
@@ -61,7 +71,7 @@ pub struct GlobalConfig {
 }
 
 fn default_bind() -> String {
-    "::".into()
+    "0.0.0.0".into()
 }
 
 fn default_log_level() -> String {
@@ -335,7 +345,9 @@ impl ParsedRule {
 /// Outbound names that cannot be used as proxy node names.
 pub const RESERVED_OUTBOUND_NAMES: &[&str] = &["direct", "block", "final", "proxy", "reject"];
 
-/// Normalize reserved outbound aliases (`DIRECT`→`direct`, `REJECT`→`block`).
+/// Normalize reserved outbound aliases.
+/// - `direct` / `DIRECT` → `direct`
+/// - `block` / `BLOCK` / `reject` / `REJECT` → `block` (same effect: drop connection / DNS rcode://success)
 pub fn normalize_outbound_name(s: &str) -> String {
     match s.to_ascii_lowercase().as_str() {
         "direct" => "direct".into(),
@@ -729,11 +741,13 @@ impl Config {
             if let Some(r) = &self.dns.fakeip6_range {
                 r.parse::<ipnet::IpNet>().map_err(|e| anyhow::anyhow!("fakeip6-range: {e}"))?;
             }
-            if !self.dns.ipv6
+            let effective_dns_ipv6 = self.global.ipv6 && self.dns.ipv6;
+            if !effective_dns_ipv6
                 && self.dns.fakeip_range.as_ref().map(|s| s.is_empty()).unwrap_or(true)
             {
                 bail!("ipv6=false requires fakeip-range");
             }
+
             let fmode = self.dns.fakeip_filter_mode.to_ascii_lowercase();
             if fmode != "blacklist" && fmode != "whitelist" {
                 bail!("dns.fakeip-filter-mode must be blacklist or whitelist");
@@ -744,6 +758,21 @@ impl Config {
             }
         }
         crate::dns::parse_nameserver(&self.dns.default_nameserver).context("invalid default-nameserver")?;
+
+        // bind-address: only 0.0.0.0 (LAN) or 127.0.0.1 (loopback).
+        // Dual-stack vs IPv4-only is controlled solely by top-level `ipv6`.
+        {
+            let b = self.global.bind_address.trim();
+            if b == "localhost" {
+                self.global.bind_address = "127.0.0.1".into();
+            } else if b != "0.0.0.0" && b != "127.0.0.1" {
+                bail!(
+                    "bind-address must be \"0.0.0.0\" or \"127.0.0.1\" (got `{b}`);                      use top-level `ipv6: true/false` to control IPv6 listening"
+                );
+            } else {
+                self.global.bind_address = b.to_string();
+            }
+        }
 
         // DNS routing strategy
         let node_names: Vec<String> = self.proxies.iter().map(|p| p.name.clone()).collect();
@@ -965,23 +994,31 @@ route:
 
     #[test]
     fn match_accepts_reject_as_block() {
-        let yaml = format!(
-            "{BASE}{}{}",
-            two_nodes(),
-            r#"
+        for alias in ["REJECT", "reject", "BLOCK", "block"] {
+            let yaml = format!(
+                "{BASE}{}{}",
+                two_nodes(),
+                format!(
+                    r#"
 rule-providers:
   cn:
     type: file
     behavior: domain
     path: /tmp/cn.ars
-rules:
-  - RULE-SET,cn,REJECT
+route:
+  - RULE-SET,cn,{alias}
   - MATCH,hy2-main
 "#
-        );
-        let cfg = parse(&yaml).unwrap();
-        let parsed = cfg.parsed_rules().unwrap();
-        assert_eq!(parsed[0].outbound, "block");
+                )
+            );
+            let cfg = parse(&yaml).unwrap();
+            let parsed = cfg.parsed_rules().unwrap();
+            assert_eq!(parsed[0].outbound, "block", "alias={alias}");
+        }
+        assert_eq!(normalize_outbound_name("REJECT"), "block");
+        assert_eq!(normalize_outbound_name("reject"), "block");
+        assert_eq!(normalize_outbound_name("BLOCK"), "block");
+        assert_eq!(normalize_outbound_name("block"), "block");
     }
 
     #[test]
