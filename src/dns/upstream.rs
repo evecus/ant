@@ -434,12 +434,20 @@ pub async fn resolve_nameserver(spec: &str, bootstrap: &DnsUpstream) -> Result<D
 pub async fn apply_bootstrap(cfg: &mut crate::config::Config) -> Result<()> {
     let boot = parse_nameserver(&cfg.dns.default_nameserver).context("default-nameserver")?;
     tracing::info!("default-nameserver {boot}");
-    let direct = resolve_nameserver(&cfg.dns.direct_nameserver, &boot).await?;
-    let proxy = resolve_nameserver(&cfg.dns.proxy_nameserver, &boot).await?;
-    tracing::info!("direct-nameserver {direct}");
-    tracing::info!("proxy-nameserver {proxy}");
-    cfg.dns.resolved_direct = Some(direct);
-    cfg.dns.resolved_proxy = Some(proxy);
+    if let Some(ref s) = cfg.dns.direct_nameserver {
+        if !s.is_empty() {
+            let direct = resolve_nameserver(s, &boot).await?;
+            tracing::info!("direct-nameserver {direct}");
+            cfg.dns.resolved_direct = Some(direct);
+        }
+    }
+    if let Some(ref s) = cfg.dns.proxy_nameserver {
+        if !s.is_empty() {
+            let proxy = resolve_nameserver(s, &boot).await?;
+            tracing::info!("proxy-nameserver {proxy}");
+            cfg.dns.resolved_proxy = Some(proxy);
+        }
+    }
     for node in cfg.proxies.iter_mut() {
         let server = node.server.clone();
         if server.parse::<std::net::IpAddr>().is_err() {

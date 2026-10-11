@@ -9,7 +9,7 @@ pub mod cache;
 pub use upstream::{apply_bootstrap, exchange, parse_nameserver, DnsUpstream};
 
 use crate::config::Config;
-use crate::app::router::{Outbound, Router};
+use crate::app::router::{DnsAction, Router};
 use anyhow::{Context, Result};
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -19,13 +19,24 @@ use tokio::net::{TcpListener, TcpStream, UdpSocket};
 
 pub async fn run_dns_server(cfg: Arc<Config>, router: Arc<Router>) -> Result<()> {
     let port = cfg.dns.port;
-    let direct_up = Arc::new(
-        cfg.dns.resolved_direct.clone().unwrap_or(parse_nameserver(&cfg.dns.direct_nameserver).context("parse direct-nameserver")?),
-    );
-    let proxy_up = Arc::new(
-        cfg.dns.resolved_proxy.clone().unwrap_or(parse_nameserver(&cfg.dns.proxy_nameserver).context("parse proxy-nameserver")?),
-    );
-    tracing::info!("DNS upstream direct={direct_up} proxy={proxy_up} ipv6={}", cfg.dns.ipv6);
+    if cfg.dns.rule_follow_route {
+        tracing::info!(
+            "DNS mode=rule-follow-route ipv6={}",
+            cfg.dns.ipv6
+        );
+    } else if cfg.dns.rules.is_empty() {
+        tracing::info!(
+            "DNS mode=nameserver ({}) ipv6={}",
+            cfg.dns.nameserver.as_deref().unwrap_or("-"),
+            cfg.dns.ipv6
+        );
+    } else {
+        tracing::info!(
+            "DNS mode=dns.rules ({} rule(s)) ipv6={}",
+            cfg.dns.rules.len(),
+            cfg.dns.ipv6
+        );
+    }
 
     let mut handles = Vec::new();
 
@@ -35,10 +46,8 @@ pub async fn run_dns_server(cfg: Arc<Config>, router: Arc<Router>) -> Result<()>
                 tracing::info!("DNS listening on UDP {bind}");
                 let sock = Arc::new(sock);
                 let router = router.clone();
-                let d = direct_up.clone();
-                let p = proxy_up.clone();
                 handles.push(tokio::spawn(async move {
-                    if let Err(e) = run_dns_udp(sock, router, d, p).await {
+                    if let Err(e) = run_dns_udp(sock, router).await {
                         tracing::error!("dns udp: {e:#}");
                     }
                 }));
@@ -52,10 +61,8 @@ pub async fn run_dns_server(cfg: Arc<Config>, router: Arc<Router>) -> Result<()>
             Ok((listener, bind)) => {
                 tracing::info!("DNS listening on TCP {bind}");
                 let router = router.clone();
-                let d = direct_up.clone();
-                let p = proxy_up.clone();
                 handles.push(tokio::spawn(async move {
-                    if let Err(e) = run_dns_tcp(listener, router, d, p).await {
+                    if let Err(e) = run_dns_tcp(listener, router).await {
                         tracing::error!("dns tcp: {e:#}");
                     }
                 }));
@@ -74,8 +81,6 @@ pub async fn run_dns_server(cfg: Arc<Config>, router: Arc<Router>) -> Result<()>
 async fn run_dns_udp(
     sock: Arc<UdpSocket>,
     router: Arc<Router>,
-    direct_up: Arc<DnsUpstream>,
-    proxy_up: Arc<DnsUpstream>,
 ) -> Result<()> {
     let mut buf = vec![0u8; 4096];
     loop {
@@ -83,10 +88,8 @@ async fn run_dns_udp(
         let query = buf[..n].to_vec();
         let sock2 = sock.clone();
         let router2 = router.clone();
-        let d = direct_up.clone();
-        let p = proxy_up.clone();
         tokio::spawn(async move {
-            match answer_query(&query, &router2, &d, &p).await {
+            match answer_query(&query, &router2).await {
                 Ok(resp) => {
                     let _ = sock2.send_to(&resp, peer).await;
                 }
@@ -99,16 +102,12 @@ async fn run_dns_udp(
 async fn run_dns_tcp(
     listener: TcpListener,
     router: Arc<Router>,
-    direct_up: Arc<DnsUpstream>,
-    proxy_up: Arc<DnsUpstream>,
 ) -> Result<()> {
     loop {
         let (stream, peer) = listener.accept().await?;
         let router = router.clone();
-        let d = direct_up.clone();
-        let p = proxy_up.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle_dns_tcp(stream, peer, router, d, p).await {
+            if let Err(e) = handle_dns_tcp(stream, peer, router).await {
                 tracing::debug!("dns tcp {peer}: {e}");
             }
         });
@@ -119,8 +118,6 @@ async fn handle_dns_tcp(
     mut stream: TcpStream,
     _peer: SocketAddr,
     router: Arc<Router>,
-    direct_up: Arc<DnsUpstream>,
-    proxy_up: Arc<DnsUpstream>,
 ) -> Result<()> {
     loop {
         let mut len_buf = [0u8; 2];
@@ -135,7 +132,7 @@ async fn handle_dns_tcp(
         }
         let mut query = vec![0u8; len];
         stream.read_exact(&mut query).await?;
-        let resp = answer_query(&query, &router, &direct_up, &proxy_up).await?;
+        let resp = answer_query(&query, &router).await?;
         let rlen = (resp.len() as u16).to_be_bytes();
         stream.write_all(&rlen).await?;
         stream.write_all(&resp).await?;
@@ -145,8 +142,6 @@ async fn handle_dns_tcp(
 pub async fn answer_query(
     query: &[u8],
     router: &Router,
-    direct_up: &DnsUpstream,
-    proxy_up: &DnsUpstream,
 ) -> Result<Vec<u8>> {
     let domain = extract_qname(query).unwrap_or_default();
     let qtype = query_type(query).unwrap_or(1);
@@ -192,23 +187,15 @@ pub async fn answer_query(
             return Ok(make_noerror_empty(query));
         }
     }
-    // Empty qname (unparseable query) matches no ruleset and falls to `final`.
-    let ob = router.dns_outbound_for_domain(&domain);
-
-    if ob == Outbound::Block {
-        tracing::debug!("dns {domain} -> Block (rcode://success)");
-        return Ok(make_noerror_empty(query));
-    }
-
-    // direct → direct-nameserver; any proxy node name → proxy-nameserver
-    // (fakeip-excluded domains routed to a node resolve via proxy-nameserver).
-    let ob_label = ob.label();
-    let upstream = match ob {
-        Outbound::Direct => direct_up,
-        Outbound::Node(_) => proxy_up,
-        Outbound::Block => unreachable!(),
+    // Empty qname (unparseable query) matches no ruleset and falls to final/MATCH.
+    let upstream = match router.dns_action_for_domain(&domain) {
+        None | Some(DnsAction::Block) => {
+            tracing::debug!("dns {domain} -> Block (rcode://success)");
+            return Ok(make_noerror_empty(query));
+        }
+        Some(DnsAction::Upstream(u)) => u,
     };
-    tracing::debug!("dns {domain} -> {ob_label} ({upstream})");
+    tracing::debug!("dns {domain} -> {upstream}");
     let resp = upstream::exchange(upstream, query).await?;
     if !domain.is_empty() && resp.len() >= 12 {
         // Cache NOERROR / NXDOMAIN
