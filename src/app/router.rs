@@ -5,7 +5,7 @@ use crate::dns::cache::DnsCache;
 use crate::dns::fakeip::FakeIpPool;
 use crate::dns::{parse_nameserver, DnsUpstream};
 use crate::ruleset::{self, RuleSet};
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::Arc;
@@ -40,6 +40,24 @@ impl Outbound {
     }
 }
 
+/// DNS upstream decision: forward or block (NOERROR empty = rcode://success).
+#[derive(Debug, Clone)]
+pub enum DnsAction {
+    Upstream(DnsUpstream),
+    Block,
+}
+
+/// DNS upstream selection strategy (`dns.rule-follow-route`).
+enum DnsRoute {
+    /// true (default): reuse top-level `route:` — direct / node / block.
+    FollowRoute {
+        direct: DnsAction,
+        proxy: DnsAction,
+    },
+    /// false: `dns.rules` table (MATCH is the fallback).
+    Rules(Vec<(crate::config::RuleKind, DnsAction)>),
+}
+
 #[derive(Debug, Clone)]
 pub struct RouteMatch {
     pub outbound: Outbound,
@@ -63,16 +81,7 @@ pub struct Router {
         allow(dead_code)
     )]
     hijack_dns: bool,
-    #[cfg_attr(
-        not(any(target_os = "linux", target_os = "android")),
-        allow(dead_code)
-    )]
-    direct_dns: DnsUpstream,
-    #[cfg_attr(
-        not(any(target_os = "linux", target_os = "android")),
-        allow(dead_code)
-    )]
-    proxy_dns: DnsUpstream,
+    dns_route: DnsRoute,
     ipv6: bool,
     dns_cache: Option<Arc<DnsCache>>,
 }
@@ -154,6 +163,60 @@ impl Router {
             None
         };
 
+        let dns_route = if cfg.dns.rule_follow_route {
+            let direct = cfg
+                .dns
+                .resolved_direct
+                .clone()
+                .or_else(|| {
+                    cfg.dns
+                        .direct_nameserver
+                        .as_deref()
+                        .and_then(|s| parse_nameserver(s).ok())
+                })
+                .context("rule-follow-route requires direct-nameserver")?;
+            let proxy = cfg
+                .dns
+                .resolved_proxy
+                .clone()
+                .or_else(|| {
+                    cfg.dns
+                        .proxy_nameserver
+                        .as_deref()
+                        .and_then(|s| parse_nameserver(s).ok())
+                })
+                .context("rule-follow-route requires proxy-nameserver")?;
+            tracing::debug!("dns rule-follow-route=true direct={direct} proxy={proxy}");
+            DnsRoute::FollowRoute {
+                direct: DnsAction::Upstream(direct),
+                proxy: DnsAction::Upstream(proxy),
+            }
+        } else {
+            let mut entries: Vec<(crate::config::RuleKind, DnsAction)> = Vec::new();
+            if cfg.dns.rules.is_empty() {
+                let ns = cfg
+                    .dns
+                    .nameserver
+                    .as_deref()
+                    .context("rule-follow-route=false without dns.rules requires nameserver")?;
+                let up = parse_nameserver(ns)?;
+                tracing::debug!("dns rule-follow-route=false nameserver={up}");
+                entries.push((crate::config::RuleKind::Match, DnsAction::Upstream(up)));
+            } else {
+                for (i, line) in cfg.dns.rules.iter().enumerate() {
+                    let r = crate::config::parse_dns_rule_line(line)
+                        .with_context(|| format!("dns.rules[{i}]"))?;
+                    let action = if r.upstream.eq_ignore_ascii_case("rcode://success") {
+                        DnsAction::Block
+                    } else {
+                        DnsAction::Upstream(parse_nameserver(&r.upstream)?)
+                    };
+                    entries.push((r.kind, action));
+                }
+            }
+            DnsRoute::Rules(entries)
+        };
+
         Ok(Arc::new(Router {
             rulesets,
             routes,
@@ -165,8 +228,7 @@ impl Router {
             sniff: cfg.global.sniff,
             route_resolve: cfg.global.route_resolve,
             hijack_dns: cfg.dns.route_hijack,
-            direct_dns: cfg.dns.resolved_direct.clone().unwrap_or(parse_nameserver(&cfg.dns.direct_nameserver)?),
-            proxy_dns: cfg.dns.resolved_proxy.clone().unwrap_or(parse_nameserver(&cfg.dns.proxy_nameserver)?),
+            dns_route,
             ipv6,
             dns_cache,
         }))
@@ -177,9 +239,6 @@ impl Router {
         not(any(target_os = "linux", target_os = "android")),
         allow(dead_code)
     )]
-    pub fn dns_upstreams(&self) -> (&DnsUpstream, &DnsUpstream) {
-        (&self.direct_dns, &self.proxy_dns)
-    }
 
     #[cfg_attr(
         not(any(target_os = "linux", target_os = "android")),
@@ -387,7 +446,25 @@ impl Router {
         }
     }
 
-    /// For DNS: decide which upstream (or block) for a domain query.
+    /// DNS upstream decision for a domain query.
+    /// `None` means block (NOERROR empty / rcode://success).
+    pub fn dns_action_for_domain(&self, domain: &str) -> Option<&DnsAction> {
+        match &self.dns_route {
+            DnsRoute::FollowRoute { direct, proxy } => {
+                match self.dns_outbound_for_domain(domain) {
+                    Outbound::Direct => Some(direct),
+                    Outbound::Node(_) => Some(proxy),
+                    Outbound::Block => None,
+                }
+            }
+            DnsRoute::Rules(entries) => entries
+                .iter()
+                .find(|(kind, _)| self.match_kind(kind, Some(domain), None, None, &[], true))
+                .map(|(_, action)| action),
+        }
+    }
+
+    /// For DNS follow-route: map domain → outbound via top-level route.
     pub fn dns_outbound_for_domain(&self, domain: &str) -> Outbound {
         for entry in &self.routes {
             // DNS path has no dest IP / resolved IPs; skip IP-only rules.
@@ -490,8 +567,10 @@ mod tests {
             sniff: false,
             route_resolve: false,
             hijack_dns: false,
-            direct_dns: parse_nameserver("223.5.5.5:53").unwrap(),
-            proxy_dns: parse_nameserver("223.5.5.5:53").unwrap(),
+            dns_route: DnsRoute::FollowRoute {
+                direct: DnsAction::Upstream(parse_nameserver("223.5.5.5:53").unwrap()),
+                proxy: DnsAction::Upstream(parse_nameserver("223.5.5.5:53").unwrap()),
+            },
             ipv6: true,
             dns_cache: None,
         }
