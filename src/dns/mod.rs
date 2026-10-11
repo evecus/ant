@@ -40,7 +40,7 @@ pub async fn run_dns_server(cfg: Arc<Config>, router: Arc<Router>) -> Result<()>
 
     let mut handles = Vec::new();
 
-    for bind in crate::app::sockopt::listen_addrs(&cfg.global.bind_address, port) {
+    for bind in crate::app::sockopt::listen_addrs(&cfg.global.bind_address, port, cfg.global.ipv6) {
         match crate::app::sockopt::bind_udp_listener(bind) {
             Ok((sock, bind)) => {
                 tracing::info!("DNS listening on UDP {bind}");
@@ -56,7 +56,7 @@ pub async fn run_dns_server(cfg: Arc<Config>, router: Arc<Router>) -> Result<()>
         }
     }
 
-    for bind in crate::app::sockopt::listen_addrs(&cfg.global.bind_address, port) {
+    for bind in crate::app::sockopt::listen_addrs(&cfg.global.bind_address, port, cfg.global.ipv6) {
         match crate::app::sockopt::bind_tcp_listener(bind) {
             Ok((listener, bind)) => {
                 tracing::info!("DNS listening on TCP {bind}");
