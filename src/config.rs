@@ -291,11 +291,38 @@ pub struct RuleProviderConfig {
     pub ty: String,
     /// `domain` or `ip` / `ipcidr`.
     pub behavior: String,
+    /// Local `.ars` file. Absolute, relative to the config file directory, or
+    /// `file:/abs/path` / `file://abs/path`.
     pub path: PathBuf,
 }
 
 fn default_provider_type() -> String {
     "file".into()
+}
+
+/// Strip optional `file:` / `file://` prefix from a path string.
+fn strip_file_scheme(s: &str) -> &str {
+    let s = s.trim();
+    if let Some(rest) = s.strip_prefix("file://") {
+        return rest;
+    }
+    if let Some(rest) = s.strip_prefix("file:") {
+        return rest;
+    }
+    s
+}
+
+/// Resolve a rule-provider `path` against `base_dir` (config file directory).
+/// Absolute paths and `file:/abs/...` stay absolute; relative paths join `base_dir`.
+pub fn resolve_provider_path(path: &std::path::Path, base_dir: &std::path::Path) -> PathBuf {
+    let raw = path.to_string_lossy();
+    let stripped = strip_file_scheme(&raw);
+    let p = PathBuf::from(stripped);
+    if p.is_absolute() {
+        p
+    } else {
+        base_dir.join(p)
+    }
 }
 
 /// Normalized ruleset descriptor used by the router (derived from rule-providers).
@@ -652,9 +679,20 @@ impl Config {
     }
 
     pub fn load(path: &str) -> Result<Self> {
+        let path_buf = PathBuf::from(path);
+        let base_dir = path_buf
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| PathBuf::from("."));
         let raw = std::fs::read_to_string(path)
             .with_context(|| format!("read config {path}"))?;
         let mut cfg: Config = serde_yaml::from_str(&raw).context("parse YAML config")?;
+        // Relative rule-provider paths resolve against the config file directory
+        // (same as ant-main `base_dir` / `-d` semantics).
+        for rp in cfg.rule_providers.values_mut() {
+            rp.path = resolve_provider_path(&rp.path, &base_dir);
+        }
         cfg.validate()?;
         Ok(cfg)
     }
