@@ -690,7 +690,6 @@ fn original_dst_tcp_v6(fd: i32) -> Option<SocketAddr> {
 }
 
 async fn hijack_dns_tcp(mut stream: TcpStream, router: Arc<Router>) -> Result<()> {
-    let (direct, proxy) = router.dns_upstreams();
     loop {
         let mut len_buf = [0u8; 2];
         match stream.read_exact(&mut len_buf).await {
@@ -704,7 +703,7 @@ async fn hijack_dns_tcp(mut stream: TcpStream, router: Arc<Router>) -> Result<()
         }
         let mut query = vec![0u8; len];
         stream.read_exact(&mut query).await?;
-        let resp = crate::dns::answer_query(&query, &router, direct, proxy).await?;
+        let resp = crate::dns::answer_query(&query, &router).await?;
         stream.write_all(&(resp.len() as u16).to_be_bytes()).await?;
         stream.write_all(&resp).await?;
     }
@@ -718,13 +717,12 @@ async fn hijack_dns_udp(
     mut rx: mpsc::Receiver<Vec<u8>>,
     router: Arc<Router>,
 ) -> Result<()> {
-    let (direct, proxy) = router.dns_upstreams();
     let mut queries = vec![first];
     while let Ok(Some(q)) = tokio::time::timeout(Duration::from_millis(50), rx.recv()).await {
         queries.push(q);
     }
     for query in queries {
-        match crate::dns::answer_query(&query, &router, direct, proxy).await {
+        match crate::dns::answer_query(&query, &router).await {
             Ok(resp) => {
                 if let Err(e) = sendto_with_src(&raw, &resp, peer, dest) {
                     tracing::debug!("hijack dns reply: {e}");

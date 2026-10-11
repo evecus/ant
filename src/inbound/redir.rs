@@ -145,7 +145,6 @@ fn get_original_destination(s: &TcpStream) -> io::Result<SocketAddr> {
 }
 
 async fn hijack_dns_tcp(mut stream: TcpStream, router: Arc<Router>) -> Result<()> {
-    let (direct, proxy) = router.dns_upstreams();
     loop {
         let mut len_buf = [0u8; 2];
         match stream.read_exact(&mut len_buf).await {
@@ -159,7 +158,7 @@ async fn hijack_dns_tcp(mut stream: TcpStream, router: Arc<Router>) -> Result<()
         }
         let mut query = vec![0u8; len];
         stream.read_exact(&mut query).await?;
-        let resp = crate::dns::answer_query(&query, &router, direct, proxy).await?;
+        let resp = crate::dns::answer_query(&query, &router).await?;
         stream.write_all(&(resp.len() as u16).to_be_bytes()).await?;
         stream.write_all(&resp).await?;
     }
