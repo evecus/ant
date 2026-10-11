@@ -1,34 +1,93 @@
 //! uTLS — 浏览器 TLS 指纹伪造（ClientHello forgery）。ported from reflex
 //! `src/outbound/tls/utls.rs`（其对齐 sing-box badtls/registry_utls.go 思路）。
 //!
-//! 原理：rustls 的 ClientHello 指纹（扩展顺序、cipher suites、GREASE 等）
-//! 是明显的非浏览器特征。本模块构造真实浏览器（Chrome/Firefox/Safari/Edge）
-//! 形状的 ClientHello TLS Record，在 rustls 发起握手时拦截其第一次写入并
-//! 替换为伪造的 ClientHello；后续 I/O 全部透传。
+//! ## 为什么不再「拦截 rustls 的 ClientHello 换成伪造 hello」
 //!
-//! 关键点：伪造 ClientHello 中的 x25519 key_share 公钥必须与 rustls 内部
-//! 私钥配对——`UtlsStream::poll_write` 拦截到 rustls 的真实 ClientHello 时，
-//! 解析其中 key_share 扩展的公钥并 patch 进伪造 ClientHello，否则服务端与
-//! rustls 的 ECDH 共享密钥不一致，Finished MAC 必然失败。
+//! TLS 1.3 的握手密钥是从**握手 transcript**（ClientHello..ServerHello 的哈希）
+//! 派生的：服务端对自己**收到的** ClientHello 算 transcript，rustls 对自己
+//! **生成的** ClientHello 算 transcript。旧实现在 socket 层把 ClientHello 换成
+//! 浏览器形状的字节，两侧 transcript 必然不一致 —— 服务端发出 ServerHello 之后
+//! 的所有加密报文 rustls 都解不开，日志上就是：
+//!
+//! ```text
+//! utls handshake failed: cannot decrypt peer's message
+//! ```
+//!
+//! 于是「不配 client-fingerprint 能连、配了就废」。这是协议层死结：
+//! `s hs traffic` / `c hs traffic` 密钥取决于 transcript 哈希，靠 patch
+//! key_share（只修 ECDH 共享密钥）无论如何补不上。
+//!
+//! mihomo / Xray 的做法（Go uTLS）是把 ClientHello 的控制权留在 TLS 库内部，
+//! 让「线上字节」与「transcript 输入」是同一份数据；upstream rustls 明确拒绝
+//! 提供 parroting API（rustls#1932），因此这里沿用本项目 REALITY 的思路：
+//! **自己跑 TLS 1.3 client 握手**（record 层、key schedule、应用数据流复用
+//! [`super::reality`]），ClientHello 完全由本模块构造 —— transcript 与线上字节
+//! 天然一致，握手能正常完成。
 
 use std::{
+    collections::VecDeque,
     io,
     pin::Pin,
+    sync::Arc,
     task::{Context, Poll},
 };
 
+use anyhow::{anyhow, bail, Context as _, Result};
+use once_cell::sync::Lazy;
 use rand::Rng;
+use rustls::{
+    client::{danger::ServerCertVerifier, WebPkiServerVerifier},
+    pki_types::{CertificateDer, ServerName, UnixTime},
+    RootCertStore, SignatureScheme,
+};
+use sha2::{Digest, Sha256, Sha384, Sha512};
 use tokio::{
-    io::{AsyncRead, AsyncWrite, ReadBuf},
+    io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf},
     net::TcpStream,
 };
-use tracing::debug;
+use tracing::{debug, warn};
 
-// ── TLS 记录层常量 ────────────────────────────────────────────────────────────
+use super::reality::{
+    der_read, fill_decrypted_handshake, parse_server_hello, pop_handshake_message, put_u16, put_u24,
+    read_plain_handshake, take, take_u16, take_u8, verify_finished, wrap_plain_record,
+    ApplicationKeys, CipherSuite, HandshakeKeys, Tls13Stream, HS_CERTIFICATE, HS_CERTIFICATE_VERIFY,
+    HS_CLIENT_HELLO, HS_ENCRYPTED_EXTENSIONS, HS_FINISHED, HS_NEW_SESSION_TICKET, HS_SERVER_HELLO,
+    TLS_RECORD_HANDSHAKE,
+};
 
-const TLS_CONTENT_HANDSHAKE: u8 = 0x16;
-const TLS_VERSION_LEGACY: u16 = 0x0301; // TLS 1.0（ClientHello legacy version）
-const HS_CLIENT_HELLO: u8 = 0x01;
+/// handshake type 25：CompressedCertificate（RFC 8879）。
+const HS_COMPRESSED_CERTIFICATE: u8 = 25;
+
+/// 解压 CompressedCertificate 消息体：algorithm(2) + uncompressed_len(3)
+/// + compressed_len(3) + data。我们只在 ClientHello 里声明了 brotli(2)。
+fn decompress_certificate(body: &[u8]) -> Result<Vec<u8>> {
+    use std::io::Read;
+    let mut pos = 0;
+    let alg = take_u16(body, &mut pos)?;
+    let ulen = take_u24_bytes(body, &mut pos)?;
+    let clen = take_u24_bytes(body, &mut pos)?;
+    let data = take(body, &mut pos, clen)?;
+    if alg != 0x0002 {
+        bail!("utls: server used unsupported cert compression alg {alg}");
+    }
+    if ulen > (1 << 17) {
+        bail!("utls: compressed certificate too large ({ulen})");
+    }
+    let mut out = Vec::with_capacity(ulen);
+    brotli_decompressor::Decompressor::new(data, 4096)
+        .take(ulen as u64 + 1)
+        .read_to_end(&mut out)
+        .context("utls: brotli decompress certificate")?;
+    if out.len() != ulen {
+        bail!("utls: decompressed certificate length mismatch");
+    }
+    Ok(out)
+}
+
+// ── ClientHello 布局常量 ─────────────────────────────────────────────────────
+
+/// 浏览器 ClientHello 的 padding 目标长度（RFC 7685 padding 扩展，Chrome 行为）。
+const HELLO_PAD_TARGET: usize = 512;
 
 // ── 指纹配置 ──────────────────────────────────────────────────────────────────
 
@@ -66,155 +125,351 @@ impl UtlsFingerprint {
     }
 }
 
-#[derive(Clone, Copy)]
+/// 实际下发的 Hello 模板。`Edge` / `360` / `QQ` / `Android` 都是 Chromium 系，
+/// `Ios` 与 Safari 同源，去重后只有三套（与 mihomo 的 utls HelloID 同理）。
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum FpKind {
     Chrome,
     Firefox,
     Safari,
-    Edge,
-    Random,
 }
 
-impl From<&UtlsFingerprint> for FpKind {
-    fn from(fp: &UtlsFingerprint) -> Self {
-        match fp {
-            UtlsFingerprint::Chrome | UtlsFingerprint::Android => FpKind::Chrome,
-            UtlsFingerprint::Firefox => FpKind::Firefox,
-            UtlsFingerprint::Safari | UtlsFingerprint::Ios => FpKind::Safari,
-            UtlsFingerprint::Edge => FpKind::Edge,
-            UtlsFingerprint::Browser360 | UtlsFingerprint::Qq => FpKind::Chrome,
-            UtlsFingerprint::Random => FpKind::Random,
-        }
+impl FpKind {
+    fn pads(self) -> bool {
+        // 只有 Chromium 系会把首个 ClientHello 补到 512 字节。
+        matches!(self, Self::Chrome)
     }
 }
 
 fn resolve_fingerprint(fp: &UtlsFingerprint) -> FpKind {
-    fp.into()
+    match fp {
+        UtlsFingerprint::Chrome
+        | UtlsFingerprint::Edge
+        | UtlsFingerprint::Android
+        | UtlsFingerprint::Browser360
+        | UtlsFingerprint::Qq => FpKind::Chrome,
+        UtlsFingerprint::Firefox => FpKind::Firefox,
+        UtlsFingerprint::Safari | UtlsFingerprint::Ios => FpKind::Safari,
+        // random：每次连接随机挑一套（与 mihomo `random` 一致）。
+        UtlsFingerprint::Random => {
+            let choices = [FpKind::Chrome, FpKind::Firefox, FpKind::Safari];
+            let idx = rand::thread_rng().gen_range(0..choices.len());
+            choices[idx]
+        }
+    }
 }
+
+// ── 证书校验参数 ──────────────────────────────────────────────────────────────
+
+/// uTLS 握手的证书校验选项（取代原先传入的 `Arc<rustls::ClientConfig>`）。
+///
+/// 自实现握手不再走 rustls，而 rustls 的 `ClientConfig` 无法反查其 verifier
+/// （字段私有），因此把 `skip-cert-verify` 与 sha256 证书 pin 显式传进来。
+#[derive(Clone, Debug, Default)]
+pub struct UtlsVerify {
+    /// `skip-cert-verify`：跳过证书链与主机名校验。
+    pub skip_cert_verify: bool,
+    /// `fingerprint`：叶子证书 sha256（hex，大小写不敏感）。
+    pub fingerprint: Option<String>,
+}
+
+/// webpki 根证书验证器（进程内只构建一次；utls 握手复用它做链 + 主机名校验，
+/// 以及 CertificateVerify 签名校验）。
+static ROOT_VERIFIER: Lazy<Arc<WebPkiServerVerifier>> = Lazy::new(|| {
+    let mut roots = RootCertStore::empty();
+    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    WebPkiServerVerifier::builder(Arc::new(roots))
+        .build()
+        .expect("utls: build webpki server verifier")
+});
 
 // ── 公开 API ──────────────────────────────────────────────────────────────────
 
-/// 在 TCP 流上执行 uTLS 握手，返回经过 rustls 加密的 TLS 流。
+/// 在 TCP 流上完成带浏览器指纹的 TLS 1.3 握手，返回应用数据流。
 ///
-/// 内部创建 [`UtlsStream`] 拦截 rustls 的第一次 ClientHello 写入，
-/// 替换为对应 `fingerprint` 浏览器的 ClientHello 字节。
-///
-/// `alpn`：写入伪造 ClientHello 的 ALPN。必须与 `tls_config` 的
-/// `alpn_protocols` 一致——服务端按伪造 ClientHello 选择协议，rustls
-/// 会拒绝自身未 offer 的选择。
+/// 与 mihomo 的差异只在实现路径：那里是 Go uTLS 改 `crypto/tls` 的 hello
+/// 构造，这里是本包自实现的 TLS 1.3 client（见模块文档），语义一致 ——
+/// ClientHello 的每一字节都由 `alpn` / `fingerprint` 决定。
 pub async fn connect_utls(
     tcp: TcpStream,
     server_name: &str,
     fingerprint: &UtlsFingerprint,
-    tls_config: std::sync::Arc<rustls::ClientConfig>,
+    verify: &UtlsVerify,
     alpn: &[String],
-) -> anyhow::Result<tokio_rustls::client::TlsStream<UtlsStream>> {
+) -> Result<Tls13Stream> {
+    let mut inner = tcp;
     let fp = resolve_fingerprint(fingerprint);
-    let hello_bytes = build_client_hello(server_name, fp, alpn);
-    let wrapped = UtlsStream::new(tcp, hello_bytes);
 
-    let connector = tokio_rustls::TlsConnector::from(tls_config);
-    let sni = rustls::pki_types::ServerName::try_from(server_name.to_string())
-        .map_err(|_| anyhow::anyhow!("utls: invalid server name: {server_name}"))?;
+    // 1. 每连接的随机材料：client_random、middlebox-compat session_id、
+    //    x25519 密钥对（transcript 里的 key_share 公钥与本地私钥同源）。
+    let client_secret = x25519_dalek::StaticSecret::random_from_rng(rand::thread_rng());
+    let client_public = x25519_dalek::PublicKey::from(&client_secret);
 
-    let tls = connector
-        .connect(sni, wrapped)
-        .await
-        .map_err(|e| anyhow::anyhow!("utls handshake failed: {e}"))?;
-    Ok(tls)
+    // 注意：rand::thread_rng() 的 ThreadRng 非 Send，不能跨 await 持有
+    // （否则整个 connect_utls future 会失去 Send）。用两条语句当场取完随机数。
+    let mut random = [0u8; 32];
+    let mut session_id = [0u8; 32];
+    rand::thread_rng().fill(&mut random);
+    rand::thread_rng().fill(&mut session_id);
+    let randoms = HelloRandoms {
+        random: &random,
+        session_id: &session_id,
+        key_share: client_public.as_bytes(),
+    };
+
+    // 2. 构造并发送 ClientHello（这份字节同时用于 handshake transcript）。
+    let client_hello = build_client_hello(server_name, fp, alpn, &randoms)?;
+    let record = wrap_plain_record(TLS_RECORD_HANDSHAKE, &client_hello)?;
+    debug!(
+        fp = ?fingerprint,
+        hello_len = client_hello.len(),
+        "utls: sending ClientHello"
+    );
+    inner.write_all(&record).await?;
+    inner.flush().await?;
+
+    let mut transcript = Vec::with_capacity(4096);
+    transcript.extend_from_slice(&client_hello);
+
+    // 3. ServerHello：确定 cipher suite 与服务端 key_share。
+    let server_hello = read_plain_handshake(&mut inner, HS_SERVER_HELLO).await?;
+    let parsed = parse_server_hello(&server_hello).context("utls: parse ServerHello")?;
+    transcript.extend_from_slice(&server_hello);
+
+    let server_public = x25519_dalek::PublicKey::from(parsed.key_share);
+    let shared_secret = client_secret.diffie_hellman(&server_public).to_bytes();
+
+    let cipher = CipherSuite::try_from(parsed.cipher_suite)?;
+    let hs = HandshakeKeys::derive(cipher, &shared_secret, &transcript);
+    let mut server_hs = hs.server;
+    let mut client_hs = hs.client;
+
+    // 4. 读取并解密服务端握手消息：EE → Certificate → CertificateVerify → Finished。
+    let mut handshake_buf = VecDeque::new();
+    let mut chain: Option<CertChain> = None;
+    let mut saw_encrypted_extensions = false;
+    let mut saw_certificate_verify = false;
+    let server_finished;
+
+    loop {
+        // 服务端可能把 EE + Certificate + CertificateVerify + Finished 塞进同一个
+        // record，必须先消费缓冲区，否则会在服务端等 Finished 时阻塞读新 record。
+        let msg = match pop_handshake_message(&mut handshake_buf) {
+            Some(m) => m,
+            None => {
+                fill_decrypted_handshake(&mut inner, &mut server_hs, &mut handshake_buf).await?;
+                pop_handshake_message(&mut handshake_buf)
+                    .ok_or_else(|| anyhow!("utls: decrypted empty handshake record"))?
+            }
+        };
+        match msg.typ {
+            HS_ENCRYPTED_EXTENSIONS => {
+                check_server_alpn(&msg.body, alpn);
+                transcript.extend_from_slice(&msg.raw);
+                saw_encrypted_extensions = true;
+            }
+            HS_CERTIFICATE => {
+                let parsed_chain = parse_certificate_chain(&msg.body)?;
+                transcript.extend_from_slice(&msg.raw);
+                chain = Some(parsed_chain);
+            }
+            // RFC 8879 CompressedCertificate：ClientHello 声明了 compress_certificate
+            // (brotli) 后，Cloudflare 等服务端会回这个消息而不是 Certificate。
+            // transcript 里放的是「收到的原始压缩消息」，不是解压后的内容。
+            HS_COMPRESSED_CERTIFICATE => {
+                let plain = decompress_certificate(&msg.body)?;
+                let parsed_chain = parse_certificate_chain(&plain)?;
+                transcript.extend_from_slice(&msg.raw);
+                chain = Some(parsed_chain);
+            }
+            HS_CERTIFICATE_VERIFY => {
+                let chain = chain
+                    .as_ref()
+                    .ok_or_else(|| anyhow!("utls: CertificateVerify without Certificate"))?;
+                // transcript 此时已含 ClientHello..Certificate。
+                verify_certificate_verify(&msg.body, &chain.leaf, &transcript)?;
+                transcript.extend_from_slice(&msg.raw);
+                saw_certificate_verify = true;
+            }
+            HS_FINISHED => {
+                verify_finished(cipher.hash_kind(), &hs.server_secret, &transcript, &msg.body)?;
+                server_finished = msg.raw;
+                break;
+            }
+            HS_NEW_SESSION_TICKET => {
+                // 握手尾部的 session ticket：不支持也不使用，忽略。
+            }
+            other => bail!("utls: unexpected handshake message {other}"),
+        }
+    }
+
+    if !saw_encrypted_extensions || !saw_certificate_verify {
+        bail!("utls: incomplete server handshake");
+    }
+    let chain = chain.ok_or_else(|| anyhow!("utls: missing server certificate"))?;
+    verify_server_certificate(&chain, server_name, verify)?;
+
+    // 5. 应用密钥（transcript 含到服务端 Finished）+ 客户端 Finished。
+    transcript.extend_from_slice(&server_finished);
+    let app = ApplicationKeys::derive(cipher, &hs.master_secret, &transcript);
+
+    let finished_body = cipher
+        .hash_kind()
+        .finished_verify_data(&hs.client_secret, &transcript);
+    let mut client_finished = Vec::with_capacity(4 + finished_body.len());
+    client_finished.push(HS_FINISHED);
+    put_u24(finished_body.len(), &mut client_finished);
+    client_finished.extend_from_slice(&finished_body);
+    let finished_record = client_hs.seal(TLS_RECORD_HANDSHAKE, &client_finished)?;
+    inner.write_all(&finished_record).await?;
+    inner.flush().await?;
+
+    debug!(
+        fp = ?fingerprint,
+        cipher_suite = format_args!("0x{:04x}", parsed.cipher_suite),
+        "utls: TLS 1.3 handshake complete"
+    );
+    Ok(Tls13Stream::new(inner, app.server, app.client))
 }
 
 // ── ClientHello 构造 ──────────────────────────────────────────────────────────
 
-/// 构造完整的 TLS 1.3 ClientHello TLS Record（含 TLS 记录头）。
-///
-/// 使用真实随机 random (32B) 和 session_id (32B)，
-/// key_share 中的 x25519 公钥也随机生成（服务端只用于验证，rustls 会再次协商；
-/// 发送前由 `patch_key_share` 替换为 rustls 的真实公钥）。
-fn build_client_hello(sni: &str, fp: FpKind, alpn_override: &[String]) -> Vec<u8> {
-    let fp = match fp {
-        FpKind::Random => {
-            let choices = [
-                FpKind::Chrome,
-                FpKind::Firefox,
-                FpKind::Safari,
-                FpKind::Edge,
-            ];
-            choices[rand::thread_rng().gen_range(0..choices.len())]
-        }
-        other => other,
-    };
-
-    let body = build_hello_body(sni, fp, alpn_override);
-
-    // Handshake header: type(1) + length(3)
-    let mut hs = Vec::with_capacity(4 + body.len());
-    hs.push(HS_CLIENT_HELLO);
-    let blen = body.len() as u32;
-    hs.push(((blen >> 16) & 0xff) as u8);
-    hs.push(((blen >> 8) & 0xff) as u8);
-    hs.push((blen & 0xff) as u8);
-    hs.extend_from_slice(&body);
-
-    // TLS Record header: content_type(1) + legacy_version(2) + length(2)
-    let mut rec = Vec::with_capacity(5 + hs.len());
-    rec.push(TLS_CONTENT_HANDSHAKE);
-    rec.push(((TLS_VERSION_LEGACY >> 8) & 0xff) as u8);
-    rec.push((TLS_VERSION_LEGACY & 0xff) as u8);
-    let hlen = hs.len() as u16;
-    rec.push(((hlen >> 8) & 0xff) as u8);
-    rec.push((hlen & 0xff) as u8);
-    rec.extend_from_slice(&hs);
-    rec
+/// 构造 ClientHello 所需的每连接随机材料。
+struct HelloRandoms<'a> {
+    random: &'a [u8; 32],
+    session_id: &'a [u8; 32],
+    key_share: &'a [u8; 32],
 }
 
-fn build_hello_body(sni: &str, fp: FpKind, alpn_override: &[String]) -> Vec<u8> {
-    let mut rng = rand::thread_rng();
-
-    // random (32B)
-    let mut random = [0u8; 32];
-    rng.fill(&mut random);
-
-    // session_id (32B)
-    let mut session_id = [0u8; 32];
-    rng.fill(&mut session_id);
-
-    // x25519 key_share public key (32B, random placeholder)
-    let mut ks_pub = [0u8; 32];
-    rng.fill(&mut ks_pub);
-
+/// 构造完整的 ClientHello handshake message（含 4 字节 handshake 头）。
+fn build_client_hello(
+    sni: &str,
+    fp: FpKind,
+    alpn: &[String],
+    randoms: &HelloRandoms<'_>,
+) -> Result<Vec<u8>> {
     let cipher_suites = cipher_suites_for(fp);
-    let extensions = build_extensions(sni, fp, &ks_pub, alpn_override);
 
-    let mut b = Vec::new();
-    // legacy_version TLS 1.2
-    b.extend_from_slice(&[0x03, 0x03]);
-    // random
-    b.extend_from_slice(&random);
-    // session_id length + data
-    b.push(32u8);
-    b.extend_from_slice(&session_id);
-    // cipher_suites
-    let cs_len = (cipher_suites.len() * 2) as u16;
-    b.push(((cs_len >> 8) & 0xff) as u8);
-    b.push((cs_len & 0xff) as u8);
+    let mut body = Vec::with_capacity(HELLO_PAD_TARGET);
+    body.extend_from_slice(&[0x03, 0x03]); // legacy_version TLS 1.2
+    body.extend_from_slice(randoms.random);
+    body.push(32u8); // session_id length（Chrome 的 middlebox-compat 32B）
+    body.extend_from_slice(randoms.session_id);
+    put_u16((cipher_suites.len() * 2) as u16, &mut body);
     for cs in &cipher_suites {
-        b.push(((cs >> 8) & 0xff) as u8);
-        b.push((cs & 0xff) as u8);
+        put_u16(*cs, &mut body);
     }
-    // compression methods: [1, 0x00]
-    b.extend_from_slice(&[0x01, 0x00]);
-    // extensions
-    let ext_len = extensions.len() as u16;
-    b.push(((ext_len >> 8) & 0xff) as u8);
-    b.push((ext_len & 0xff) as u8);
-    b.extend_from_slice(&extensions);
-    b
+    body.push(0x01); // compression_methods: [null]
+    body.push(0x00);
+
+    let mut plan = extension_plan(fp, sni, alpn, randoms.key_share);
+    if fp.pads() {
+        // 4B handshake 头 + body + 2B extensions length + 扩展条目（4B 头 + data）
+        let mut current = 4 + body.len() + 2;
+        for (_, data) in &plan {
+            current += 4 + data.len();
+        }
+        if current < HELLO_PAD_TARGET {
+            let deficit = HELLO_PAD_TARGET - current;
+            match plan.last_mut() {
+                // Chrome 模板末尾已放好 padding 条目，直接把 data 补到目标长度。
+                Some((typ, data)) if *typ == 0x0015 => data.resize(deficit, 0),
+                _ => plan.push((0x0015, vec![0u8; deficit.saturating_sub(4)])),
+            }
+        }
+    }
+
+    let mut extensions = Vec::with_capacity(HELLO_PAD_TARGET);
+    for (typ, data) in &plan {
+        put_u16(*typ, &mut extensions);
+        put_u16(data.len() as u16, &mut extensions);
+        extensions.extend_from_slice(data);
+    }
+    put_u16(extensions.len() as u16, &mut body);
+    body.extend_from_slice(&extensions);
+
+    let mut hello = Vec::with_capacity(4 + body.len());
+    hello.push(HS_CLIENT_HELLO);
+    put_u24(body.len(), &mut hello);
+    hello.extend_from_slice(&body);
+    Ok(hello)
+}
+
+/// 按浏览器顺序排好扩展列表 `(type, data)`。
+///
+/// 扩展顺序是 JA3 / JA4 指纹的主要来源，所以每套模板按对应浏览器的真实顺序
+/// 下发：Chromium 系（Chrome/Edge/360/QQ/Android）带 GREASE、ALPS 与 padding，
+/// Firefox 与 Safari 不带 padding，Safari 不 announce SCT。
+fn extension_plan(
+    fp: FpKind,
+    sni: &str,
+    alpn: &[String],
+    key_share: &[u8; 32],
+) -> Vec<(u16, Vec<u8>)> {
+    let grease = grease_value();
+    let mut plan: Vec<(u16, Vec<u8>)> = Vec::with_capacity(18);
+
+    match fp {
+        FpKind::Chrome => {
+            plan.push((grease, Vec::new())); // GREASE
+            plan.push((0x0000, ext_server_name(sni)));
+            plan.push((0x0017, Vec::new())); // extended_master_secret
+            plan.push((0xff01, vec![0x00])); // renegotiation_info
+            plan.push((0x000a, ext_u16_list(&[0x001d, 0x0017, 0x0018])));
+            plan.push((0x000b, vec![0x01, 0x00])); // ec_point_formats: uncompressed
+            plan.push((0x0023, Vec::new())); // session_ticket
+            if let Some(d) = ext_alpn(alpn) {
+                plan.push((0x0010, d));
+            }
+            plan.push((0x0005, ext_status_request()));
+            plan.push((0x000d, ext_u16_list(CHROME_SIGNATURE_ALGORITHMS)));
+            plan.push((0x0012, Vec::new())); // signed_certificate_timestamp
+            plan.push((0x0033, ext_key_share(key_share)));
+            plan.push((0x002d, vec![0x01, 0x01])); // psk_dhe_ke
+            plan.push((0x002b, ext_supported_versions(grease)));
+            plan.push((0x001b, vec![0x02, 0x00, 0x02])); // compress_certificate: brotli
+            plan.push((0x4469, vec![0x00, 0x03, 0x02, b'h', b'2'])); // ALPS
+            plan.push((0x0015, Vec::new())); // padding（长度在 build 时回填）
+        }
+        FpKind::Firefox => {
+            plan.push((0x0000, ext_server_name(sni)));
+            plan.push((0x0017, Vec::new()));
+            plan.push((0xff01, vec![0x00]));
+            plan.push((0x000a, ext_u16_list(&[0x001d, 0x0017, 0x0018, 0x0019])));
+            plan.push((0x000b, vec![0x01, 0x00]));
+            if let Some(d) = ext_alpn(alpn) {
+                plan.push((0x0010, d));
+            }
+            plan.push((0x0005, ext_status_request()));
+            plan.push((0x000d, ext_u16_list(FIREFOX_SIGNATURE_ALGORITHMS)));
+            plan.push((0x0033, ext_key_share(key_share)));
+            plan.push((0x002d, vec![0x01, 0x01]));
+            // Firefox 的 supported_versions 里只有一个 GREASE 占位：这里直接只列 TLS 1.3。
+            plan.push((0x002b, ext_supported_versions_only_13()));
+        }
+        FpKind::Safari => {
+            plan.push((0x0000, ext_server_name(sni)));
+            plan.push((0x0017, Vec::new()));
+            plan.push((0xff01, vec![0x00]));
+            plan.push((0x000a, ext_u16_list(&[0x001d, 0x0017, 0x0018])));
+            plan.push((0x000b, vec![0x01, 0x00]));
+            if let Some(d) = ext_alpn(alpn) {
+                plan.push((0x0010, d));
+            }
+            plan.push((0x0005, ext_status_request()));
+            plan.push((0x000d, ext_u16_list(SAFARI_SIGNATURE_ALGORITHMS)));
+            plan.push((0x0033, ext_key_share(key_share)));
+            plan.push((0x002b, ext_supported_versions_only_13()));
+            plan.push((0x002d, vec![0x01, 0x01]));
+        }
+    }
+
+    plan
 }
 
 // ── Cipher Suites ─────────────────────────────────────────────────────────────
 
-/// Chrome 120 cipher suites (JA3 顺序)
+/// Chrome cipher suites（JA3 顺序，首个是随机 GREASE 值）
 const CHROME_CIPHERS: &[u16] = &[
     0xdada, // GREASE
     0x1301, // TLS_AES_128_GCM_SHA256
@@ -242,20 +497,36 @@ const SAFARI_CIPHERS: &[u16] = &[
     0xc027, 0xc00a, 0xc009, 0xc014, 0xc013, 0x009d, 0x009c, 0x003d, 0x003c, 0x0035, 0x002f,
 ];
 
+const CHROME_SIGNATURE_ALGORITHMS: &[u16] = &[
+    0x0403, // ecdsa_secp256r1_sha256
+    0x0804, // rsa_pss_rsae_sha256
+    0x0401, // rsa_pkcs1_sha256
+    0x0503, // ecdsa_secp384r1_sha384
+    0x0805, // rsa_pss_rsae_sha384
+    0x0501, // rsa_pkcs1_sha384
+    0x0806, // rsa_pss_rsae_sha512
+    0x0601, // rsa_pkcs1_sha512
+];
+
+const FIREFOX_SIGNATURE_ALGORITHMS: &[u16] = &[
+    0x0403, 0x0804, 0x0401, 0x0503, 0x0805, 0x0501, 0x0806, 0x0601, 0x0201,
+];
+
+const SAFARI_SIGNATURE_ALGORITHMS: &[u16] = &[
+    0x0403, 0x0804, 0x0401, 0x0503, 0x0805, 0x0501, 0x0806, 0x0601, 0x0201,
+];
+
 fn cipher_suites_for(fp: FpKind) -> Vec<u16> {
     let base: &[u16] = match fp {
-        FpKind::Chrome | FpKind::Edge | FpKind::Random => CHROME_CIPHERS,
+        FpKind::Chrome => CHROME_CIPHERS,
         FpKind::Firefox => FIREFOX_CIPHERS,
         FpKind::Safari => SAFARI_CIPHERS,
     };
-    // 将 GREASE 0xdada 替换为随机 GREASE 值（格式：0xXAXA，X 随机）
+    // GREASE 值格式 0xXAXA（X = 0..15）；步长 0x1010 保证 x=15 时不溢出 u16。
     base.iter()
         .map(|&cs| {
             if cs == 0xdada {
-                // GREASE 值格式 0xXAXA（X = 0..15），与 grease_value() 一致用 0x1010 步长。
-                // 旧实现用 0x1111 步长，当 x=15 时 15*0x1111+0x0a0a = 0x10A09 溢出 u16。
-                let idx = rand::thread_rng().gen_range(0u16..16);
-                0x0a0a + idx * 0x1010
+                grease_value()
             } else {
                 cs
             }
@@ -263,485 +534,358 @@ fn cipher_suites_for(fp: FpKind) -> Vec<u16> {
         .collect()
 }
 
-// ── Extensions ───────────────────────────────────────────────────────────────
+// ── 扩展内容 ──────────────────────────────────────────────────────────────────
 
-fn build_extensions(sni: &str, fp: FpKind, ks_pub: &[u8; 32], alpn_override: &[String]) -> Vec<u8> {
-    let mut exts = Vec::new();
-
-    // GREASE extension (Chrome/Edge)
-    if matches!(fp, FpKind::Chrome | FpKind::Edge) {
-        let grease = grease_value();
-        append_ext(&mut exts, grease, &[0u8; 0]); // empty GREASE
-    }
-
-    // SNI (0x0000)
-    {
-        let name = sni.as_bytes();
-        let mut d = Vec::new();
-        // ServerNameList length
-        let list_len = (name.len() + 3) as u16;
-        d.push(((list_len >> 8) & 0xff) as u8);
-        d.push((list_len & 0xff) as u8);
-        // NameType host_name = 0
-        d.push(0x00);
-        let name_len = name.len() as u16;
-        d.push(((name_len >> 8) & 0xff) as u8);
-        d.push((name_len & 0xff) as u8);
-        d.extend_from_slice(name);
-        append_ext(&mut exts, 0x0000, &d);
-    }
-
-    // extended_master_secret (0x0017)
-    append_ext(&mut exts, 0x0017, &[]);
-
-    // renegotiation_info (0xff01)
-    append_ext(&mut exts, 0xff01, &[0x00]);
-
-    // supported_groups (0x000a)
-    {
-        let groups: &[u16] = match fp {
-            FpKind::Chrome | FpKind::Edge => &[0x001d, 0x0017, 0x0018], // x25519, secp256r1, secp384r1
-            FpKind::Firefox => &[0x001d, 0x0017, 0x0018, 0x0019],
-            FpKind::Safari | FpKind::Random => &[0x001d, 0x0017, 0x001e, 0x0018, 0x0019],
-        };
-        let mut d = Vec::new();
-        let list_len = (groups.len() * 2) as u16;
-        d.push(((list_len >> 8) & 0xff) as u8);
-        d.push((list_len & 0xff) as u8);
-        for g in groups {
-            d.push(((g >> 8) & 0xff) as u8);
-            d.push((g & 0xff) as u8);
-        }
-        append_ext(&mut exts, 0x000a, &d);
-    }
-
-    // ec_point_formats (0x000b)
-    append_ext(&mut exts, 0x000b, &[0x01, 0x00]);
-
-    // session_ticket (0x0023) - empty
-    append_ext(&mut exts, 0x0023, &[]);
-
-    // ALPN (0x0010)
-    {
-        let proto_list: Vec<&str> = if !alpn_override.is_empty() {
-            alpn_override.iter().map(|s| s.as_str()).collect()
-        } else {
-            match fp {
-                FpKind::Chrome | FpKind::Edge => vec!["h2", "http/1.1"],
-                FpKind::Firefox => vec!["h2", "http/1.1"],
-                FpKind::Safari | FpKind::Random => vec!["h2", "http/1.1"],
-            }
-        };
-        let mut proto_bytes = Vec::new();
-        for p in &proto_list {
-            proto_bytes.push(p.len() as u8);
-            proto_bytes.extend_from_slice(p.as_bytes());
-        }
-        let inner_len = proto_bytes.len() as u16;
-        let mut d = Vec::new();
-        d.push(((inner_len >> 8) & 0xff) as u8);
-        d.push((inner_len & 0xff) as u8);
-        d.extend_from_slice(&proto_bytes);
-        append_ext(&mut exts, 0x0010, &d);
-    }
-
-    // status_request OCSP (0x0005)
-    append_ext(&mut exts, 0x0005, &[0x01, 0x00, 0x00, 0x00, 0x00]);
-
-    // signature_algorithms (0x000d)
-    {
-        let algs: &[u16] = match fp {
-            FpKind::Firefox => &[
-                0x0403, 0x0804, 0x0401, 0x0503, 0x0805, 0x0501, 0x0806, 0x0601, 0x0201,
-            ],
-            _ => &[
-                0x0403, 0x0804, 0x0401, 0x0503, 0x0805, 0x0501, 0x0806, 0x0601,
-            ],
-        };
-        let mut d = Vec::new();
-        let list_len = (algs.len() * 2) as u16;
-        d.push(((list_len >> 8) & 0xff) as u8);
-        d.push((list_len & 0xff) as u8);
-        for a in algs {
-            d.push(((a >> 8) & 0xff) as u8);
-            d.push((a & 0xff) as u8);
-        }
-        append_ext(&mut exts, 0x000d, &d);
-    }
-
-    // signed_cert_timestamps (0x0012) - empty
-    append_ext(&mut exts, 0x0012, &[]);
-
-    // key_share (0x0033) - x25519 only
-    {
-        // ClientShares: one entry for x25519 (0x001d)
-        let mut share = vec![0x00];
-        share.push(0x1d); // group x25519
-        share.push(0x00);
-        share.push(0x20); // key_exchange length 32
-        share.extend_from_slice(ks_pub);
-
-        let shares_len = share.len() as u16;
-        let mut d = Vec::new();
-        d.push(((shares_len >> 8) & 0xff) as u8);
-        d.push((shares_len & 0xff) as u8);
-        d.extend_from_slice(&share);
-        append_ext(&mut exts, 0x0033, &d);
-    }
-
-    // psk_key_exchange_modes (0x002d)
-    append_ext(&mut exts, 0x002d, &[0x01, 0x01]); // psk_dhe_ke
-
-    // supported_versions (0x002b) TLS 1.3 + 1.2
-    {
-        let versions: &[u16] = &[0x0304, 0x0303]; // TLS 1.3, TLS 1.2
-        let mut d = Vec::new();
-        d.push((versions.len() * 2) as u8);
-        for v in versions {
-            d.push(((v >> 8) & 0xff) as u8);
-            d.push((v & 0xff) as u8);
-        }
-        append_ext(&mut exts, 0x002b, &d);
-    }
-
-    // compress_certificate (0x001b) - Chrome/Edge
-    if matches!(fp, FpKind::Chrome | FpKind::Edge) {
-        append_ext(&mut exts, 0x001b, &[0x02, 0x00, 0x02]); // brotli
-    }
-
-    // application_settings (0x4469) - Chrome ALPS
-    if matches!(fp, FpKind::Chrome | FpKind::Edge) {
-        // Advertise h2 support
-        append_ext(&mut exts, 0x4469, &[0x00, 0x03, 0x02, b'h', b'2']);
-    }
-
-    // padding (0x0015) - Chrome pads to avoid fingerprinting on length
-    if matches!(fp, FpKind::Chrome | FpKind::Edge) {
-        // Add padding to reach ~512 byte total extensions; calculate needed
-        let current = exts.len() + 4; // +4 for this extension's header
-        let target = 512usize;
-        if current < target {
-            let pad_len = target - current;
-            let padding = vec![0u8; pad_len];
-            append_ext(&mut exts, 0x0015, &padding);
-        }
-    }
-
-    exts
+fn ext_server_name(host: &str) -> Vec<u8> {
+    let name = host.as_bytes();
+    let mut d = Vec::with_capacity(name.len() + 5);
+    put_u16((name.len() + 3) as u16, &mut d); // ServerNameList length
+    d.push(0x00); // NameType host_name
+    put_u16(name.len() as u16, &mut d);
+    d.extend_from_slice(name);
+    d
 }
 
-fn append_ext(buf: &mut Vec<u8>, ext_type: u16, data: &[u8]) {
-    buf.push(((ext_type >> 8) & 0xff) as u8);
-    buf.push((ext_type & 0xff) as u8);
-    let dlen = data.len() as u16;
-    buf.push(((dlen >> 8) & 0xff) as u8);
-    buf.push((dlen & 0xff) as u8);
-    buf.extend_from_slice(data);
+fn ext_u16_list(values: &[u16]) -> Vec<u8> {
+    let mut d = Vec::with_capacity(2 + values.len() * 2);
+    put_u16((values.len() * 2) as u16, &mut d);
+    for v in values {
+        put_u16(*v, &mut d);
+    }
+    d
+}
+
+/// ALPN 扩展内容；`alpn` 为空时返回 None（不发送该扩展）。
+fn ext_alpn(alpn: &[String]) -> Option<Vec<u8>> {
+    let mut list = Vec::new();
+    for p in alpn {
+        if p.is_empty() || p.len() > 255 {
+            continue;
+        }
+        list.push(p.len() as u8);
+        list.extend_from_slice(p.as_bytes());
+    }
+    if list.is_empty() {
+        return None;
+    }
+    let mut d = Vec::with_capacity(2 + list.len());
+    put_u16(list.len() as u16, &mut d);
+    d.extend_from_slice(&list);
+    Some(d)
+}
+
+/// key_share：只带 x25519 一份（服务端必须支持 X25519，否则会回 HelloRetryRequest）。
+fn ext_key_share(pubkey: &[u8; 32]) -> Vec<u8> {
+    let mut d = Vec::with_capacity(2 + 2 + 2 + 32);
+    put_u16(36u16, &mut d); // client_shares length: group(2) + len(2) + key(32)
+    put_u16(0x001d, &mut d); // x25519
+    put_u16(32u16, &mut d);
+    d.extend_from_slice(pubkey);
+    d
+}
+
+fn ext_status_request() -> Vec<u8> {
+    // OCSP: status_type(1) + no responder_ids + no request_extensions
+    vec![0x01, 0x00, 0x00, 0x00, 0x00]
+}
+
+/// supported_versions：GREASE + TLS 1.3。
+///
+/// 真实浏览器会带上 1.2，但本实现只支持 TLS 1.3 —— 列 1.2 只会让服务端选到
+/// 我们走不完的版本，所以只 offer 1.3（几乎所有节点都支持）。
+fn ext_supported_versions(grease: u16) -> Vec<u8> {
+    let mut d = Vec::with_capacity(1 + 4);
+    d.push(4u8); // versions length: 2 * 2B
+    put_u16(grease, &mut d);
+    put_u16(0x0304, &mut d); // TLS 1.3
+    d
+}
+
+fn ext_supported_versions_only_13() -> Vec<u8> {
+    let mut d = Vec::with_capacity(3);
+    d.push(2u8);
+    put_u16(0x0304, &mut d);
+    d
 }
 
 fn grease_value() -> u16 {
-    // GREASE values: 0x0A0A, 0x1A1A, ..., 0xFAFA
+    // GREASE 值：0x0A0A, 0x1A1A, ..., 0xFAFA（RFC 8701）
     let idx = rand::thread_rng().gen_range(0u16..16);
     0x0a0a + idx * 0x1010
 }
 
-// ── key_share patch ──────────────────────────────────────────────────────────
+// ── 服务端证书 ────────────────────────────────────────────────────────────────
 
-/// 从 rustls 生成的 ClientHello 中提取 key_share 扩展里的 x25519 公钥，
-/// 然后把伪造 ClientHello 中对应位置的随机公钥替换为真实公钥。
-///
-/// **背景**：旧实现用随机生成的 x25519 公钥填充伪造 ClientHello 的 key_share，
-/// 但 rustls 内部使用自己的私钥计算 ECDH 共享密钥。服务端用伪造的公钥 →
-/// 共享密钥 A，rustls 用自己的私钥 → 共享密钥 B，两者不匹配 → Finished MAC
-/// 失败，握手必然失败。这就是 uTLS 被静默回退到 rustls 的根本原因。
-///
-/// **修正**：在 UtlsStream::poll_write 拦截到 rustls 的 ClientHello 时，
-/// 解析其中的 key_share 扩展（extension type 0x0033），提取 x25519 (group 0x001d)
-/// 的 32 字节公钥，然后 patch 到伪造 ClientHello 的对应位置。这样服务端和
-/// rustls 使用相同的公钥/私钥对，ECDH 共享密钥一致，Finished MAC 通过。
-fn patch_key_share(fake: &mut [u8], rustls_hello: &[u8]) {
-    let real_key = match extract_x25519_key_share(rustls_hello) {
-        Some(k) => k,
-        None => {
-            debug!(
-                "utls: failed to extract x25519 key_share from rustls ClientHello ({} bytes), \
-                 keeping random key_share — handshake will likely fail",
-                rustls_hello.len()
-            );
-            return;
+struct CertChain {
+    leaf: Vec<u8>,
+    intermediates: Vec<Vec<u8>>,
+}
+
+/// 解析 Certificate handshake message（RFC 8446 §4.4.2）。
+fn parse_certificate_chain(body: &[u8]) -> Result<CertChain> {
+    let mut pos = 0;
+    let ctx_len = take_u8(body, &mut pos)? as usize;
+    take(body, &mut pos, ctx_len)?;
+    let list_len = take_u24_bytes(body, &mut pos)?;
+    let list = take(body, &mut pos, list_len)?;
+
+    let mut certs = Vec::new();
+    let mut p = 0;
+    while p < list.len() {
+        let cert_len = take_u24_bytes(list, &mut p)?;
+        certs.push(take(list, &mut p, cert_len)?.to_vec());
+        let ext_len = take_u16(list, &mut p)? as usize;
+        take(list, &mut p, ext_len)?; // certificate extensions（OCSP/SCT 等）
+    }
+
+    let mut iter = certs.into_iter();
+    let leaf = iter
+        .next()
+        .ok_or_else(|| anyhow!("utls: empty certificate chain"))?;
+    Ok(CertChain {
+        leaf,
+        intermediates: iter.collect(),
+    })
+}
+
+fn take_u24_bytes(input: &[u8], pos: &mut usize) -> Result<usize> {
+    let bytes = take(input, pos, 3)?;
+    Ok(((bytes[0] as usize) << 16) | ((bytes[1] as usize) << 8) | bytes[2] as usize)
+}
+
+/// 证书链 / 主机名 / pin 校验。语义与 rustls 路径一致：
+/// `fingerprint` 命中即通过（不校验链），否则看 `skip-cert-verify`。
+fn verify_server_certificate(
+    chain: &CertChain,
+    server_name: &str,
+    verify: &UtlsVerify,
+) -> Result<()> {
+    if let Some(pin) = &verify.fingerprint {
+        let got = hex::encode(Sha256::digest(&chain.leaf));
+        if !got.eq_ignore_ascii_case(pin) {
+            bail!("utls: certificate fingerprint mismatch: got {got}, expected {pin}");
         }
+        return Ok(());
+    }
+    if verify.skip_cert_verify {
+        return Ok(());
+    }
+
+    let leaf = CertificateDer::from(chain.leaf.clone());
+    let intermediates: Vec<CertificateDer<'_>> = chain
+        .intermediates
+        .iter()
+        .map(|c| CertificateDer::from(c.as_slice()))
+        .collect();
+    let name = ServerName::try_from(server_name.to_string())
+        .map_err(|_| anyhow!("utls: invalid server name {server_name}"))?;
+    ROOT_VERIFIER
+        .verify_server_cert(&leaf, &intermediates, &name, &[], UnixTime::now())
+        .map_err(|e| anyhow!("utls: certificate verification failed: {e}"))?;
+    Ok(())
+}
+
+/// CertificateVerify（RFC 8446 §4.4.3）：验证服务端持有证书私钥。
+///
+/// 即使 `skip-cert-verify` 也要验这一步 —— 否则伪装园区证书的中间人可以
+/// 用任意签名顶掉握手，这是我们能在自实现握手里保住的最后一道真实性检查。
+fn verify_certificate_verify(body: &[u8], leaf: &[u8], transcript: &[u8]) -> Result<()> {
+    let mut pos = 0;
+    let raw_scheme = take_u16(body, &mut pos)?;
+    let sig_len = take_u16(body, &mut pos)? as usize;
+    let signature = take(body, &mut pos, sig_len)?;
+    let (scheme, hash) = signature_scheme(raw_scheme)?;
+
+    let transcript_hash = hash.digest(transcript);
+    let mut content = Vec::with_capacity(64 + 33 + transcript_hash.len());
+    content.extend_from_slice(&[0x20u8; 64]);
+    content.extend_from_slice(b"TLS 1.3, server CertificateVerify");
+    content.push(0x00);
+    content.extend_from_slice(&transcript_hash);
+
+    verify_signature(scheme, leaf, &content, signature)
+}
+
+/// SPKI 算法 OID（DER 内容字节）
+const OID_RSA: &[u8] = &[
+    0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01, // rsaEncryption
+];
+const OID_EC_PUBLIC_KEY: &[u8] = &[
+    0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01, // id-ecPublicKey
+];
+const OID_ED25519: &[u8] = &[0x2b, 0x65, 0x70]; // Ed25519
+
+/// 用叶子证书里的公钥验证 CertificateVerify 签名。
+///
+/// rustls 的 `DigitallySignedStruct::new` 是私有的，无法把服务端发来的
+/// `(scheme, signature)` 再喂回 rustls，这里直接用 ring 校验 ——
+/// 算法由 `scheme` 决定，公钥从叶子证书的 SPKI 里取。
+fn verify_signature(
+    scheme: SignatureScheme,
+    leaf_der: &[u8],
+    message: &[u8],
+    signature: &[u8],
+) -> Result<()> {
+    let (alg_oid, key) = extract_spki(leaf_der)?;
+    let alg: &dyn ring::signature::VerificationAlgorithm = match (scheme, alg_oid) {
+        // EC 公钥是未压缩点：P-256 = 65B，P-384 = 97B。
+        (SignatureScheme::ECDSA_NISTP256_SHA256, o) if o == OID_EC_PUBLIC_KEY && key.len() == 65 => {
+            &ring::signature::ECDSA_P256_SHA256_ASN1
+        }
+        (SignatureScheme::ECDSA_NISTP384_SHA384, o) if o == OID_EC_PUBLIC_KEY && key.len() == 97 => {
+            &ring::signature::ECDSA_P384_SHA384_ASN1
+        }
+        (SignatureScheme::RSA_PSS_SHA256, o) if o == OID_RSA => {
+            &ring::signature::RSA_PSS_2048_8192_SHA256
+        }
+        (SignatureScheme::RSA_PSS_SHA384, o) if o == OID_RSA => {
+            &ring::signature::RSA_PSS_2048_8192_SHA384
+        }
+        (SignatureScheme::RSA_PSS_SHA512, o) if o == OID_RSA => {
+            &ring::signature::RSA_PSS_2048_8192_SHA512
+        }
+        (SignatureScheme::ED25519, o) if o == OID_ED25519 => &ring::signature::ED25519,
+        _ => bail!("utls: certificate key/algorithm mismatch for scheme {scheme:?}"),
+    };
+    ring::signature::UnparsedPublicKey::new(alg, key)
+        .verify(message, signature)
+        .map_err(|_| anyhow!("utls: CertificateVerify signature does not match the certificate"))
+}
+
+/// 从证书 DER 里取出 SubjectPublicKeyInfo 的 (算法 OID, 公钥字节)。
+fn extract_spki(cert: &[u8]) -> Result<(&[u8], &[u8])> {
+    // Certificate ::= SEQUENCE { tbsCertificate, signatureAlgorithm, signatureValue }
+    let mut pos = 0;
+    let cert_seq = der_read(cert, &mut pos).ok_or_else(|| anyhow!("utls: malformed certificate"))?;
+    let mut cpos = 0;
+    let tbs = der_read(cert_seq.value, &mut cpos)
+        .ok_or_else(|| anyhow!("utls: malformed tbsCertificate"))?;
+
+    // TBSCertificate 是 [version?] serial, signature, issuer, validity, subject,
+    // SPKI, ... 顺序的 SEQUENCE 序列；直接找形如 SPKI 的子节点。
+    let mut p = 0;
+    while p < tbs.value.len() {
+        let node = match der_read(tbs.value, &mut p) {
+            Some(n) => n,
+            None => break,
+        };
+        if node.tag != 0x30 {
+            continue;
+        }
+        if let Some(spki) = parse_spki(node.value) {
+            return Ok(spki);
+        }
+    }
+    bail!("utls: no SubjectPublicKeyInfo in certificate")
+}
+
+/// SPKI ::= SEQUENCE { AlgorithmIdentifier, subjectPublicKey BIT STRING }
+fn parse_spki(spki: &[u8]) -> Option<(&[u8], &[u8])> {
+    let mut pos = 0;
+    let alg = der_read(spki, &mut pos)?;
+    let key_bits = der_read(spki, &mut pos)?;
+    if alg.tag != 0x30 || key_bits.tag != 0x03 {
+        return None;
+    }
+    let mut apos = 0;
+    let oid = der_read(alg.value, &mut apos)?;
+    if oid.tag != 0x06 {
+        return None;
+    }
+    // BIT STRING 首字节是 unused-bits，证书里必须是 0。
+    if key_bits.value.first().copied()? != 0 {
+        return None;
+    }
+    Some((oid.value, &key_bits.value[1..]))
+}
+
+/// CertificateVerify 所用的摘要（RFC 8446 §4.4.3）。
+/// Ed25519 自身不 pre-hash，TLS 1.3 为其配套的摘要是 SHA-512。
+#[derive(Clone, Copy)]
+enum CvHash {
+    Sha256,
+    Sha384,
+    Sha512,
+}
+
+impl CvHash {
+    fn digest(self, data: &[u8]) -> Vec<u8> {
+        match self {
+            Self::Sha256 => Sha256::digest(data).to_vec(),
+            Self::Sha384 => Sha384::digest(data).to_vec(),
+            Self::Sha512 => Sha512::digest(data).to_vec(),
+        }
+    }
+}
+
+fn signature_scheme(raw: u16) -> Result<(SignatureScheme, CvHash)> {
+    Ok(match raw {
+        0x0403 => (SignatureScheme::ECDSA_NISTP256_SHA256, CvHash::Sha256),
+        0x0503 => (SignatureScheme::ECDSA_NISTP384_SHA384, CvHash::Sha384),
+        0x0804 | 0x0809 => (SignatureScheme::RSA_PSS_SHA256, CvHash::Sha256),
+        0x0805 | 0x080a => (SignatureScheme::RSA_PSS_SHA384, CvHash::Sha384),
+        0x0806 | 0x080b => (SignatureScheme::RSA_PSS_SHA512, CvHash::Sha512),
+        0x0807 => (SignatureScheme::ED25519, CvHash::Sha512),
+        other => bail!("utls: unsupported CertificateVerify signature scheme 0x{other:04x}"),
+    })
+}
+
+/// 校验服务端在 EncryptedExtensions 里选的 ALPN 确实是我们 offer 过的。
+/// 只 warn 不中断：某些服务端实现会把 ER 填得很随意，但后续应用层仍走约定协议。
+fn check_server_alpn(body: &[u8], offered: &[String]) {
+    if offered.is_empty() {
+        return;
+    }
+    let mut pos = 0;
+    let Ok(total) = take_u16(body, &mut pos) else {
+        return;
+    };
+    let Ok(exts) = take(body, &mut pos, total as usize) else {
+        return;
     };
 
-    if let Some(pos) = find_x25519_key_share_pos(fake) {
-        fake[pos..pos + 32].copy_from_slice(&real_key);
-        debug!(
-            "utls: patched fake ClientHello key_share at offset {} with real rustls x25519 pubkey",
-            pos
-        );
+    let Some(selected) = selected_alpn(exts) else {
+        return;
+    };
+    if offered.iter().any(|a| a == &selected) {
+        debug!("utls: server selected ALPN {selected}");
     } else {
-        debug!("utls: fake ClientHello has no x25519 key_share to patch");
+        warn!("utls: server selected ALPN {selected:?}, offered {offered:?}");
     }
 }
 
-/// 从 TLS ClientHello record 中解析 key_share 扩展，提取 x25519 (group 0x001d) 的公钥。
-///
-/// ClientHello record 布局：
-/// ```text
-/// [record: type=0x16 ver=0x0301 len=2B]
-///   [handshake: type=0x01 len=3B]
-///     [body: legacy_ver=2B random=32B session_id_len=1B session_id=N
-///            cipher_suites_len=2B cipher_suites comp_len=1B comp=N
-///            extensions_len=2B extensions...]
-///       extension: type=2B len=2B data
-///         key_share (0x0033): client_shares_len=2B
-///           share: group=2B key_len=2B key=N
-/// ```
-fn extract_x25519_key_share(record: &[u8]) -> Option<[u8; 32]> {
-    // 跳过 record header (5B) + handshake type (1B)
-    if record.len() < 9 {
-        return None;
-    }
-    if record[0] != 0x16 {
-        return None;
-    }
-    // handshake length (3B)：record[6..9]（record header 5B 之后是 handshake
-    // type 1B + length 3B）。注意：reflex 原实现从 record[3..6] 读取——那里
-    // 实际是 record length (2B) + handshake type (1B)，导致 hs_len 恒为超大值、
-    // 解析必然失败、key_share 永远不会被 patch。
-    let hs_len =
-        ((record[6] as usize) << 16) | ((record[7] as usize) << 8) | (record[8] as usize);
-    if record.len() < 5 + 1 + 3 + hs_len {
-        return None;
-    }
-    // 跳到 handshake body
-    let body = &record[5 + 1 + 3..];
-    // 跳过 legacy_version (2B) + random (32B)
-    if body.len() < 34 {
-        return None;
-    }
-    let mut pos = 34;
-    // 跳过 session_id
-    let sid_len = *body.get(pos)?;
-    pos += 1 + sid_len as usize;
-    // 跳过 cipher_suites
-    let cs_len = ((*body.get(pos)?) as usize) << 8 | (*body.get(pos + 1)?) as usize;
-    pos += 2 + cs_len;
-    // 跳过 compression_methods
-    let cm_len = *body.get(pos)?;
-    pos += 1 + cm_len as usize;
-    // extensions
-    let ext_total_len = ((*body.get(pos)?) as usize) << 8 | (*body.get(pos + 1)?) as usize;
-    pos += 2;
-    let ext_end = pos + ext_total_len;
-
-    while pos + 4 <= ext_end.min(body.len()) {
-        let ext_type = ((body[pos] as u16) << 8) | (body[pos + 1] as u16);
-        let ext_len = ((body[pos + 2] as usize) << 8) | (body[pos + 3] as usize);
-        pos += 4;
-        if pos + ext_len > body.len() {
-            break;
+/// 从 EncryptedExtensions 的扩展列表里取出服务端选定的 ALPN（第一个 ProtocolName）。
+fn selected_alpn(exts: &[u8]) -> Option<String> {
+    let mut ep = 0;
+    while let Ok((typ, data)) = next_extension(exts, &mut ep) {
+        if typ != 0x0010 {
+            continue;
         }
-        if ext_type == 0x0033 {
-            // key_share extension
-            return parse_key_share_extension(&body[pos..pos + ext_len]);
-        }
-        pos += ext_len;
+        let mut p = 0;
+        take_u16(data, &mut p).ok()?; // ProtocolNameList length
+        let len = take_u8(data, &mut p).ok()?;
+        let proto = take(data, &mut p, len as usize).ok()?;
+        return Some(String::from_utf8_lossy(proto).to_string());
     }
     None
 }
 
-/// 解析 key_share 扩展数据，找到 x25519 (group 0x001d) 的公钥。
-fn parse_key_share_extension(data: &[u8]) -> Option<[u8; 32]> {
-    if data.len() < 2 {
-        return None;
-    }
-    let total_len = ((data[0] as usize) << 8) | (data[1] as usize);
-    let mut pos = 2;
-    let end = 2 + total_len.min(data.len() - 2);
-    while pos + 4 <= end {
-        let group = ((data[pos] as u16) << 8) | (data[pos + 1] as u16);
-        let key_len = ((data[pos + 2] as usize) << 8) | (data[pos + 3] as usize);
-        pos += 4;
-        if pos + key_len > data.len() {
-            break;
-        }
-        if group == 0x001d && key_len == 32 {
-            // x25519
-            let mut key = [0u8; 32];
-            key.copy_from_slice(&data[pos..pos + 32]);
-            return Some(key);
-        }
-        pos += key_len;
-    }
-    None
-}
-
-/// 在伪造的 ClientHello 中找到 x25519 key_share 公钥的位置（offset）。
-/// 返回公钥 32 字节的起始偏移。
-fn find_x25519_key_share_pos(record: &[u8]) -> Option<usize> {
-    // 与 extract_x25519_key_share 类似的解析逻辑，但返回位置而非值。
-    if record.len() < 6 || record[0] != 0x16 {
-        return None;
-    }
-    let body = &record[5 + 1 + 3..];
-    if body.len() < 34 {
-        return None;
-    }
-    let mut pos = 34;
-    let sid_len = *body.get(pos)?;
-    pos += 1 + sid_len as usize;
-    let cs_len = ((*body.get(pos)?) as usize) << 8 | (*body.get(pos + 1)?) as usize;
-    pos += 2 + cs_len;
-    let cm_len = *body.get(pos)?;
-    pos += 1 + cm_len as usize;
-    let ext_total_len = ((*body.get(pos)?) as usize) << 8 | (*body.get(pos + 1)?) as usize;
-    pos += 2;
-    let ext_end = pos + ext_total_len;
-
-    let body_start = 5 + 1 + 3; // body 在 record 中的绝对偏移
-    while pos + 4 <= ext_end.min(body.len()) {
-        let ext_type = ((body[pos] as u16) << 8) | (body[pos + 1] as u16);
-        let ext_len = ((body[pos + 2] as usize) << 8) | (body[pos + 3] as usize);
-        let ext_data_pos = pos + 4;
-        if ext_data_pos + ext_len > body.len() {
-            break;
-        }
-        if ext_type == 0x0033 {
-            // key_share extension: client_shares_len(2B) + shares
-            let shares_data = &body[ext_data_pos..ext_data_pos + ext_len];
-            if shares_data.len() < 2 {
-                break;
-            }
-            let total = ((shares_data[0] as usize) << 8) | (shares_data[1] as usize);
-            let mut sp = 2;
-            let s_end = 2 + total.min(shares_data.len() - 2);
-            while sp + 4 <= s_end {
-                let group = ((shares_data[sp] as u16) << 8) | (shares_data[sp + 1] as u16);
-                let key_len =
-                    ((shares_data[sp + 2] as usize) << 8) | (shares_data[sp + 3] as usize);
-                let key_pos = sp + 4;
-                if key_pos + key_len > shares_data.len() {
-                    break;
-                }
-                if group == 0x001d && key_len == 32 {
-                    // 返回在 record 中的绝对偏移
-                    return Some(body_start + ext_data_pos + key_pos);
-                }
-                sp = key_pos + key_len;
-            }
-            break;
-        }
-        pos = ext_data_pos + ext_len;
-    }
-    None
-}
-
-// ── UtlsStream ────────────────────────────────────────────────────────────────
-
-/// TCP 流包装器，拦截 rustls 的第一次 write（ClientHello），
-/// 替换为浏览器伪造的 ClientHello TLS Record。
-// 后续所有 I/O 正常透传。
-// 仅含 TcpStream（Unpin）与 Option<Vec<u8>>，自动 Unpin，无需 pin-project。
-pub struct UtlsStream {
-    inner: TcpStream,
-    /// 替换用的伪造 ClientHello；None 表示已发送过
-    fake_hello: Option<Vec<u8>>,
-}
-
-impl UtlsStream {
-    pub fn new(inner: TcpStream, fake_hello: Vec<u8>) -> Self {
-        Self {
-            inner,
-            fake_hello: Some(fake_hello),
-        }
-    }
-
-    /// direct 模式（Vision）需要底层裸 TCP 绕过 AEAD 时使用。
-    pub fn get_mut_tcp(&mut self) -> &mut TcpStream {
-        &mut self.inner
-    }
-}
-
-impl AsyncRead for UtlsStream {
-    fn poll_read(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &mut ReadBuf<'_>,
-    ) -> Poll<io::Result<()>> {
-        Pin::new(&mut self.get_mut().inner).poll_read(cx, buf)
-    }
-}
-
-impl AsyncWrite for UtlsStream {
-    fn poll_write(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        data: &[u8],
-    ) -> Poll<io::Result<usize>> {
-        let this = self.get_mut();
-        if let Some(hello) = this.fake_hello.as_mut() {
-            // 拦截到 rustls 的第一次 write（ClientHello）。
-            // 此时 `data` 是 rustls 生成的真实 ClientHello，从中提取 x25519 公钥
-            // 并 patch 到伪造的 ClientHello（hello）中，修复 key_share 不匹配问题。
-            //
-            // 注意：仅当 data 看起来是 TLS Handshake record (type=0x16) 时才 patch，
-            // 避免误处理非 ClientHello 的写入。
-            if data.len() > 5 && data[0] == 0x16 {
-                patch_key_share(hello, data);
-            }
-
-            // 循环发送伪造 ClientHello，正确处理 TCP 部分写入。
-            loop {
-                match Pin::new(&mut this.inner).poll_write(cx, hello) {
-                    Poll::Ready(Ok(0)) => {
-                        return Poll::Ready(Err(io::Error::new(
-                            io::ErrorKind::WriteZero,
-                            "utls: write zero sending fake ClientHello",
-                        )));
-                    }
-                    Poll::Ready(Ok(written)) => {
-                        if written >= hello.len() {
-                            debug!(
-                                "utls: intercepted rustls ClientHello ({} bytes), \
-                                 sent fake ClientHello ({} bytes)",
-                                data.len(),
-                                written
-                            );
-                            this.fake_hello = None;
-                            return Poll::Ready(Ok(data.len()));
-                        }
-                        // 部分写入，drain 已写入部分，继续发送剩余
-                        hello.drain(..written);
-                    }
-                    Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
-                    Poll::Pending => {
-                        return Poll::Pending;
-                    }
-                }
-            }
-        } else {
-            Pin::new(&mut this.inner).poll_write(cx, data)
-        }
-    }
-
-    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Pin::new(&mut self.get_mut().inner).poll_flush(cx)
-    }
-
-    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Pin::new(&mut self.get_mut().inner).poll_shutdown(cx)
-    }
+fn next_extension<'a>(input: &'a [u8], pos: &mut usize) -> Result<(u16, &'a [u8])> {
+    let typ = take_u16(input, pos)?;
+    let len = take_u16(input, pos)? as usize;
+    let data = take(input, pos, len)?;
+    Ok((typ, data))
 }
 
 // ── TlsStreamBox：统一普通 rustls 与 uTLS 的 I/O 类型 ────────────────────────
 
-/// 包装 rustls TLS 流或 uTLS 流，向上层提供统一的 `AsyncRead + AsyncWrite`。
+/// 包装 rustls TLS 流或自实现 uTLS 流，向上层提供统一的 `AsyncRead + AsyncWrite`。
 #[allow(clippy::large_enum_variant)]
 pub enum TlsStreamBox {
     /// 普通 rustls TLS 流
     Plain(tokio_rustls::client::TlsStream<TcpStream>),
-    /// uTLS 流（浏览器指纹）
-    Utls(Box<tokio_rustls::client::TlsStream<UtlsStream>>),
+    /// uTLS 流（浏览器指纹，自实现 TLS 1.3）
+    Utls(Box<Tls13Stream>),
 }
 
 impl AsyncRead for TlsStreamBox {
@@ -788,6 +932,22 @@ impl AsyncWrite for TlsStreamBox {
 mod tests {
     use super::*;
 
+    fn randoms<'a>(
+        random: &'a [u8; 32],
+        session_id: &'a [u8; 32],
+        key_share: &'a [u8; 32],
+    ) -> HelloRandoms<'a> {
+        HelloRandoms {
+            random,
+            session_id,
+            key_share,
+        }
+    }
+
+    fn plan_for(fp: FpKind, alpn: &[String]) -> Vec<(u16, Vec<u8>)> {
+        extension_plan(fp, "example.com", alpn, &[0u8; 32])
+    }
+
     #[test]
     fn fingerprint_parse() {
         assert_eq!(UtlsFingerprint::parse("chrome"), Some(UtlsFingerprint::Chrome));
@@ -795,45 +955,13 @@ mod tests {
             UtlsFingerprint::parse(" FireFox "),
             Some(UtlsFingerprint::Firefox)
         );
-        assert_eq!(UtlsFingerprint::parse("360"), Some(UtlsFingerprint::Browser360));
+        assert_eq!(
+            UtlsFingerprint::parse("360"),
+            Some(UtlsFingerprint::Browser360)
+        );
         assert_eq!(UtlsFingerprint::parse("qq"), Some(UtlsFingerprint::Qq));
         assert_eq!(UtlsFingerprint::parse("nosuch"), None);
         assert_eq!(UtlsFingerprint::parse(""), None);
-    }
-
-    #[test]
-    fn chrome_hello_is_valid_tls_record() {
-        let hello = build_client_hello("example.com", FpKind::Chrome, &[]);
-        // TLS record header
-        assert_eq!(hello[0], TLS_CONTENT_HANDSHAKE);
-        assert_eq!(hello[1], 0x03);
-        assert_eq!(hello[2], 0x01);
-        // Handshake type = ClientHello
-        let record_len = u16::from_be_bytes([hello[3], hello[4]]) as usize;
-        assert_eq!(hello.len(), 5 + record_len);
-        assert_eq!(hello[5], HS_CLIENT_HELLO);
-    }
-
-    #[test]
-    fn firefox_hello_contains_sni() {
-        let hello = build_client_hello("test.example.com", FpKind::Firefox, &[]);
-        let bytes = hello.as_slice();
-        let found = bytes.windows(16).any(|w| w == b"test.example.com");
-        assert!(found, "SNI not found in Firefox ClientHello");
-    }
-
-    #[test]
-    fn safari_hello_is_valid() {
-        let hello = build_client_hello("safari.example.com", FpKind::Safari, &[]);
-        assert!(hello.len() > 100);
-        assert_eq!(hello[0], TLS_CONTENT_HANDSHAKE);
-    }
-
-    #[test]
-    fn alpn_override_applied() {
-        let hello = build_client_hello("sni.example.com", FpKind::Chrome, &["h2".to_string()]);
-        let found = hello.windows(2).any(|w| w == b"h2");
-        assert!(found, "ALPN h2 not found in ClientHello");
     }
 
     #[test]
@@ -844,100 +972,124 @@ mod tests {
                 0x0a0a, 0x1a1a, 0x2a2a, 0x3a3a, 0x4a4a, 0x5a5a, 0x6a6a, 0x7a7a, 0x8a8a, 0x9a9a,
                 0xaaaa, 0xbaba, 0xcaca, 0xdada, 0xeaea, 0xfafa,
             ];
-            assert!(valid.contains(&g), "0x{g:04x} is not a valid GREASE value");
+            assert!(valid.contains(&g), "0x{g:04x} 不是合法 GREASE 值");
         }
     }
 
-    /// key_share patch：伪造 hello 的随机公钥必须被 rustls hello 的真实公钥替换。
+    /// Chrome 的扩展顺序必须与真实 Chrome 一致（JA3 依据的顺序就是这里定的）。
     #[test]
-    fn patch_key_share_replaces_pubkey() {
-        let fake = build_client_hello("example.com", FpKind::Chrome, &[]);
-        // 构造一个最小 rustls 风格 hello：手工拼 record，使 key_share 可解析。
-        let real_key = [0xABu8; 32];
-        let rustls_hello = record_with_x25519_key_share(&real_key);
-
-        let mut patched = fake.clone();
-        patch_key_share(&mut patched, &rustls_hello);
-
-        let pos = find_x25519_key_share_pos(&patched).expect("x25519 key_share pos");
-        assert_eq!(&patched[pos..pos + 32], &real_key);
+    fn chrome_extension_order() {
+        let plan = plan_for(FpKind::Chrome, &["h2".into(), "http/1.1".into()]);
+        let order: Vec<u16> = plan.iter().map(|(t, _)| *t).collect();
+        assert_eq!(
+            order,
+            vec![
+                // GREASE（随机值，位置固定为第一个）
+                order[0],
+                0x0000, // server_name
+                0x0017, // extended_master_secret
+                0xff01, // renegotiation_info
+                0x000a, // supported_groups
+                0x000b, // ec_point_formats
+                0x0023, // session_ticket
+                0x0010, // ALPN
+                0x0005, // status_request
+                0x000d, // signature_algorithms
+                0x0012, // signed_certificate_timestamp
+                0x0033, // key_share
+                0x002d, // psk_key_exchange_modes
+                0x002b, // supported_versions
+                0x001b, // compress_certificate
+                0x4469, // application_settings (ALPS)
+                0x0015, // padding
+            ]
+        );
+        let valid_grease: Vec<u16> = (0..16u16).map(|i| 0x0a0a + i * 0x1010).collect();
+        assert!(valid_grease.contains(&order[0]), "首项必须是 GREASE");
     }
 
-    /// 手工构造一个带 x25519 key_share 的最小 ClientHello record（仅用于测试解析）。
-    fn record_with_x25519_key_share(key: &[u8; 32]) -> Vec<u8> {
-        // extensions: 仅 key_share
-        let mut share = Vec::new();
-        share.extend_from_slice(&36u16.to_be_bytes()); // client_shares_len（1 个 x25519 条目：2+2+32）
-        share.extend_from_slice(&0x001du16.to_be_bytes()); // group x25519
-        share.extend_from_slice(&32u16.to_be_bytes()); // key len
-        share.extend_from_slice(key);
+    #[test]
+    fn firefox_and_safari_skip_padding() {
+        let ff = plan_for(FpKind::Firefox, &[]);
+        let sf = plan_for(FpKind::Safari, &[]);
+        assert!(ff.iter().all(|(t, _)| *t != 0x0015));
+        assert!(sf.iter().all(|(t, _)| *t != 0x0015));
+        // 未配置 ALPN 时不发送 ALPN 扩展
+        assert!(ff.iter().all(|(t, _)| *t != 0x0010));
+    }
 
-        let mut exts = Vec::new();
-        append_ext(&mut exts, 0x0033, &share);
+    #[test]
+    fn hello_carries_sni_random_and_key_share() {
+        let random = [0x11u8; 32];
+        let session_id = [0x22u8; 32];
+        let key_share = [0x33u8; 32];
+        let h = randoms(&random, &session_id, &key_share);
+        let hello = build_client_hello("nodes.example.com", FpKind::Chrome, &[], &h).unwrap();
 
+        // handshake 头：type 0x01 + 3B length
+        assert_eq!(hello[0], HS_CLIENT_HELLO);
+        let hs_len =
+            ((hello[1] as usize) << 16) | ((hello[2] as usize) << 8) | (hello[3] as usize);
+        assert_eq!(hello.len(), 4 + hs_len);
+        // random / session_id / key_share 都位在 body 里
+        assert!(hello.windows(32).any(|w| w == random.as_slice()));
+        assert!(hello.windows(32).any(|w| w == session_id.as_slice()));
+        assert!(hello.windows(32).any(|w| w == key_share.as_slice()));
+        // SNI
+        assert!(hello
+            .windows(17)
+            .any(|w| w == b"nodes.example.com"));
+    }
+
+    #[test]
+    fn chrome_hello_is_padded_to_512() {
+        let random = [0u8; 32];
+        let session_id = [0u8; 32];
+        let key_share = [0u8; 32];
+        let h = randoms(&random, &session_id, &key_share);
+        let hello = build_client_hello("example.com", FpKind::Chrome, &[], &h).unwrap();
+        assert!(hello.len() >= HELLO_PAD_TARGET, "hello len = {}", hello.len());
+    }
+
+    #[test]
+    fn alpn_roundtrip() {
+        let random = [0u8; 32];
+        let session_id = [0u8; 32];
+        let key_share = [0u8; 32];
+        let h = randoms(&random, &session_id, &key_share);
+        let alpn = vec!["h2".to_string()];
+        let hello = build_client_hello("example.com", FpKind::Chrome, &alpn, &h).unwrap();
+        // ALPN 内容：protocol_name_list = len(2) + [len(1) + "h2"]
+        let want = [0x00u8, 0x03, 0x02, b'h', b'2'];
+        assert!(hello.windows(5).any(|w| w == want.as_slice()));
+    }
+
+    #[test]
+    fn server_alpn_mismatch_only_warns() {
+        // 不 panic 即可：服务端回了一个我们没 offer 的协议时只告警。
         let mut body = Vec::new();
-        body.extend_from_slice(&[0x03, 0x03]); // legacy_version
-        body.extend_from_slice(&[0u8; 32]); // random
-        body.push(0); // session_id len
-        body.extend_from_slice(&0u16.to_be_bytes()); // cipher_suites len
-        body.push(1); // compression len
-        body.push(0);
-        body.extend_from_slice(&(exts.len() as u16).to_be_bytes());
-        body.extend_from_slice(&exts);
+        put_u16(0x0010, &mut body); // ext type ALPN
+        let mut proto = Vec::new();
+        proto.push(2u8);
+        proto.extend_from_slice(b"h3");
+        let mut d = Vec::new();
+        put_u16(proto.len() as u16, &mut d);
+        d.extend_from_slice(&proto);
+        put_u16(d.len() as u16, &mut body);
+        body.extend_from_slice(&d);
 
-        let mut hs = vec![HS_CLIENT_HELLO];
-        hs.extend_from_slice(&(body.len() as u32).to_be_bytes()[1..]);
-        hs.extend_from_slice(&body);
-
-        let mut rec = vec![TLS_CONTENT_HANDSHAKE];
-        rec.extend_from_slice(&TLS_VERSION_LEGACY.to_be_bytes());
-        rec.extend_from_slice(&(hs.len() as u16).to_be_bytes());
-        rec.extend_from_slice(&hs);
-        rec
+        let mut ee = Vec::new();
+        put_u16(body.len() as u16, &mut ee);
+        ee.extend_from_slice(&body);
+        check_server_alpn(&ee, &["h2".to_string()]);
     }
 
-    /// 用真实 rustls ClientHello 验证 key_share 提取与 patch：
-    /// handshake length 必须从 record[6..9] 读取（reflex 原实现偏移错误，
-    /// 导致解析永远失败、key_share 永远不被 patch、uTLS 握手必然失败）。
-    #[tokio::test]
-    async fn extract_and_patch_real_rustls_hello() {
-        use std::sync::Arc;
-
-        let (client, mut server) = tokio::io::duplex(64 * 1024);
-        let config = rustls::ClientConfig::builder()
-            .with_root_certificates(rustls::RootCertStore::empty())
-            .with_no_client_auth();
-        let connector = tokio_rustls::TlsConnector::from(Arc::new(config));
-        let sni = rustls::pki_types::ServerName::try_from("example.com".to_string()).unwrap();
-        tokio::spawn(async move {
-            // 没有服务端响应也无妨：ClientHello 会在第一次 flush 时写出。
-            let _ = connector.connect(sni, client).await;
-        });
-
-        // 读取第一个完整的 TLS record（0x16 开头）。
-        let mut buf: Vec<u8> = Vec::new();
-        let mut chunk = [0u8; 4096];
-        loop {
-            let n = tokio::io::AsyncReadExt::read(&mut server, &mut chunk)
-                .await
-                .unwrap();
-            assert!(n > 0, "eof before ClientHello");
-            buf.extend_from_slice(&chunk[..n]);
-            if buf.len() > 9 && buf[0] == 0x16 {
-                let rec_len = u16::from_be_bytes([buf[3], buf[4]]) as usize;
-                if buf.len() >= 5 + rec_len {
-                    break;
-                }
-            }
-        }
-
-        let key = extract_x25519_key_share(&buf)
-            .expect("must extract x25519 key_share from a real rustls ClientHello");
-
-        // patch 后伪造 hello 的 key_share 必须等于 rustls 真实公钥。
-        let mut fake = build_client_hello("example.com", FpKind::Chrome, &[]);
-        patch_key_share(&mut fake, &buf);
-        let pos = find_x25519_key_share_pos(&fake).expect("fake hello has x25519 key_share");
-        assert_eq!(&fake[pos..pos + 32], &key);
+    #[test]
+    fn certificate_verify_scheme_mapping() {
+        assert!(signature_scheme(0x0403).is_ok());
+        assert!(signature_scheme(0x0804).is_ok());
+        assert!(signature_scheme(0x0807).is_ok());
+        // MD5 / SHA1 时代的方案不该被接受
+        assert!(signature_scheme(0x0101).is_err());
     }
 }

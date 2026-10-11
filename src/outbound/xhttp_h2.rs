@@ -54,7 +54,8 @@ use tower::Service;
 use tracing::{debug, warn};
 use uuid::Uuid;
 
-use super::utls::{connect_utls, UtlsFingerprint};
+use super::reality::Tls13Stream;
+use super::utls::{connect_utls, UtlsFingerprint, UtlsVerify};
 
 // ── 公共接口 ─────────────────────────────────────────────────────────────────
 
@@ -65,6 +66,8 @@ pub struct XhttpH2Tls {
     pub server_name: String,
     /// 可选 uTLS 指纹（对握手连接生效；连接由 hyper 连接池复用，指纹一致）。
     pub utls: Option<UtlsFingerprint>,
+    /// uTLS 握手的证书校验选项（自实现握手不再消费 rustls `config`）。
+    pub verify: UtlsVerify,
 }
 
 /// 建立一条 XHTTP 双工流（packet-up 或 stream-up）。
@@ -124,7 +127,7 @@ pub async fn connect(
 
 #[derive(Clone)]
 struct AntConnector {
-    tls: Option<(Arc<rustls::ClientConfig>, String, Option<UtlsFingerprint>)>,
+    tls: Option<(Arc<rustls::ClientConfig>, String, Option<UtlsFingerprint>, UtlsVerify)>,
 }
 
 /// hyper 连接类型：裸 TCP / rustls TLS / uTLS
@@ -132,7 +135,7 @@ struct AntConnector {
 pub enum MaybeHttps {
     Plain(TcpStream),
     Tls(tokio_rustls::client::TlsStream<TcpStream>),
-    Utls(Box<tokio_rustls::client::TlsStream<super::utls::UtlsStream>>),
+    Utls(Box<Tls13Stream>),
 }
 
 impl AsyncRead for MaybeHttps {
@@ -262,10 +265,10 @@ impl Service<Uri> for AntConnector {
                 .with_context(|| format!("xhttp tcp connect {addr}"))?;
             let _ = tcp.set_nodelay(true);
 
-            if let Some((cfg, server_name, utls)) = tls {
+            if let Some((cfg, server_name, utls, verify)) = tls {
                 let sni_str = server_name.as_str();
                 if let Some(fp) = utls {
-                    let stream = connect_utls(tcp, sni_str, &fp, cfg, &["h2".to_string()])
+                    let stream = connect_utls(tcp, sni_str, &fp, &verify, &["h2".to_string()])
                         .await
                         .map_err(|e| anyhow::anyhow!("xhttp: utls handshake failed: {e}"))?;
                     return Ok(MaybeHttps::Utls(Box::new(stream)));
@@ -791,6 +794,7 @@ fn build_http_client(tls: Option<&XhttpH2Tls>) -> anyhow::Result<XhttpClient> {
             t.config.clone(),
             t.server_name.clone(),
             t.utls,
+            t.verify.clone(),
         )
     });
 

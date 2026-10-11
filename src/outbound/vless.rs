@@ -15,7 +15,7 @@
 use super::ech as ech_cfg;
 use super::hpke::ECH_HPKE_SUITES;
 use super::reality::{reality_connect, RealityDialConfig};
-use super::utls::{connect_utls, TlsStreamBox, UtlsFingerprint};
+use super::utls::{connect_utls, TlsStreamBox, UtlsFingerprint, UtlsVerify};
 use super::vision::{TlsLayer, VisionConn};
 use super::xhttp::connect_over_stream;
 use super::xhttp::XhttpConfig;
@@ -79,6 +79,8 @@ struct VlessOption {
     tls: bool,
     sni: String,
     skip_cert_verify: bool,
+    /// uTLS 自实现握手的证书校验选项（skip-cert-verify / 证书 pin）。
+    verify: UtlsVerify,
     ws_path: String,
     ws_host: String,
     /// true when the user set ws-host explicitly (Host header is then sent verbatim).
@@ -306,6 +308,10 @@ impl VlessOutbound {
             tls: cfg.tls || reality.is_some(),
             sni: sni.clone(),
             skip_cert_verify: cfg.skip_cert_verify,
+            verify: UtlsVerify {
+                skip_cert_verify: cfg.skip_cert_verify,
+                fingerprint: None,
+            },
             ws_path,
             ws_host,
             ws_host_explicit,
@@ -421,7 +427,7 @@ impl VlessOutbound {
                         stream,
                         &self.opts.sni,
                         &fp,
-                        cfg.clone(),
+                        &self.opts.verify,
                         &self.opts.tls_alpn,
                     )
                     .await
@@ -494,6 +500,7 @@ impl VlessOutbound {
                             config,
                             server_name: self.opts.sni.clone(),
                             utls: self.opts.utls,
+                            verify: self.opts.verify.clone(),
                         }
                     });
                     let pipe = xhttp_h2::connect(
@@ -533,13 +540,13 @@ impl VlessOutbound {
         // tcp / reality path.
         let tcp = self.connect_raw().await?;
         let layer: TlsLayer = if let Some(rcfg) = &self.opts.reality {
-            TlsLayer::Reality(
+            TlsLayer::Tls13(
                 reality_connect(tcp, rcfg).await.context("vless reality handshake")?,
             )
         } else if self.opts.tls {
             match self.connect_tls_layer(tcp).await? {
                 TlsStreamBox::Plain(s) => TlsLayer::Rustls(Box::new(s)),
-                TlsStreamBox::Utls(s) => TlsLayer::RustlsUtls(s),
+                TlsStreamBox::Utls(s) => TlsLayer::Tls13(*s),
             }
         } else {
             TlsLayer::Plain(tcp)
@@ -559,8 +566,7 @@ impl VlessOutbound {
 
         let mut transport: BoxedStream = match layer {
             TlsLayer::Rustls(s) => Box::new(s),
-            TlsLayer::RustlsUtls(s) => Box::new(s),
-            TlsLayer::Reality(s) => Box::new(s),
+            TlsLayer::Tls13(s) => Box::new(s),
             TlsLayer::Plain(s) => Box::new(s),
         };
         transport

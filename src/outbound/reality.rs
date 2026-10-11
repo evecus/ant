@@ -5,6 +5,11 @@
 //! No rustls involved: the ClientHello carries the REALITY authentication
 //! marker in the (AES-256-GCM encrypted) session_id, and the server's
 //! temporary Ed25519 certificate is verified with HMAC-SHA512(auth_key).
+//!
+//! **本模块同时是 ant 的自实现 TLS 1.3 客户端底座**：record 层、key schedule、
+//! handshake 解析、[Tls13Stream]（加密后的应用数据流）等与 REALITY 无关的部分
+//! 以 `pub(crate)` 暴露，供 uTLS（`outbound::utls`）复用 —— uTLS 必须自己
+//! 生成 ClientHello 并驱动握手，才能保证「线上字节 == 握手 transcript」。
 
 use std::{
     collections::VecDeque,
@@ -32,24 +37,24 @@ type HmacSha256 = Hmac<Sha256>;
 type HmacSha384 = Hmac<Sha384>;
 type HmacSha512 = Hmac<Sha512>;
 
-const TLS_RECORD_HANDSHAKE: u8 = 22;
-const TLS_RECORD_APPLICATION_DATA: u8 = 23;
-const TLS_RECORD_ALERT: u8 = 21;
-const TLS_RECORD_CHANGE_CIPHER_SPEC: u8 = 20;
+pub(crate) const TLS_RECORD_HANDSHAKE: u8 = 22;
+pub(crate) const TLS_RECORD_APPLICATION_DATA: u8 = 23;
+pub(crate) const TLS_RECORD_ALERT: u8 = 21;
+pub(crate) const TLS_RECORD_CHANGE_CIPHER_SPEC: u8 = 20;
 
-const HS_CLIENT_HELLO: u8 = 1;
-const HS_SERVER_HELLO: u8 = 2;
-const HS_NEW_SESSION_TICKET: u8 = 4;
-const HS_ENCRYPTED_EXTENSIONS: u8 = 8;
-const HS_CERTIFICATE: u8 = 11;
-const HS_CERTIFICATE_VERIFY: u8 = 15;
-const HS_FINISHED: u8 = 20;
+pub(crate) const HS_CLIENT_HELLO: u8 = 1;
+pub(crate) const HS_SERVER_HELLO: u8 = 2;
+pub(crate) const HS_NEW_SESSION_TICKET: u8 = 4;
+pub(crate) const HS_ENCRYPTED_EXTENSIONS: u8 = 8;
+pub(crate) const HS_CERTIFICATE: u8 = 11;
+pub(crate) const HS_CERTIFICATE_VERIFY: u8 = 15;
+pub(crate) const HS_FINISHED: u8 = 20;
 
 const TLS_AES_128_GCM_SHA256: u16 = 0x1301;
 const TLS_AES_256_GCM_SHA384: u16 = 0x1302;
 const TLS_CHACHA20_POLY1305_SHA256: u16 = 0x1303;
 
-const GROUP_X25519: u16 = 0x001d;
+pub(crate) const GROUP_X25519: u16 = 0x001d;
 
 // ── 公开 API ─────────────────────────────────────────────────────────────────
 
@@ -64,7 +69,7 @@ pub struct RealityDialConfig {
 }
 
 /// Perform the REALITY client handshake over an established TCP connection.
-pub async fn reality_connect(tcp: TcpStream, config: &RealityDialConfig) -> Result<RealityTlsStream> {
+pub async fn reality_connect(tcp: TcpStream, config: &RealityDialConfig) -> Result<Tls13Stream> {
     let server_pub_bytes = decode_x25519_pubkey(&config.public_key)?;
     let short_id_bytes = decode_short_id(&config.short_id)?;
 
@@ -82,10 +87,10 @@ pub async fn reality_connect(tcp: TcpStream, config: &RealityDialConfig) -> Resu
     Ok(state.into_stream())
 }
 
-/// REALITY TLS 流：握手完成后用于应用数据读写。
+/// TLS 1.3 应用数据流：握手完成后用于读写（REALITY 与 uTLS 共用）。
 ///
 /// 实现 `AsyncRead + AsyncWrite + Unpin + Send`，可直接作为代理流使用。
-pub struct RealityTlsStream {
+pub struct Tls13Stream {
     inner: TcpStream,
     read_key: RecordKey,
     write_key: RecordKey,
@@ -94,7 +99,23 @@ pub struct RealityTlsStream {
     write_pending: Option<StreamPendingWrite>,
 }
 
-impl RealityTlsStream {
+impl Tls13Stream {
+    /// 用握手派生出的读写密钥包装裸 TCP。
+    /// uTLS（`super::utls`）握手完成后与 REALITY 共用同一套 record 层。
+    pub(crate) fn new(inner: TcpStream, read_key: RecordKey, write_key: RecordKey) -> Self {
+        Self {
+            inner,
+            read_key,
+            write_key,
+            read_plain: VecDeque::new(),
+            read_state: StreamReadState::Header {
+                buf: [0; 5],
+                pos: 0,
+            },
+            write_pending: None,
+        }
+    }
+
     fn drain_read_plain(&mut self, buf: &mut ReadBuf<'_>) -> bool {
         if self.read_plain.is_empty() {
             return false;
@@ -163,7 +184,7 @@ struct StreamPendingWrite {
     pos: usize,
 }
 
-impl AsyncRead for RealityTlsStream {
+impl AsyncRead for Tls13Stream {
     fn poll_read(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -295,7 +316,7 @@ impl AsyncRead for RealityTlsStream {
     }
 }
 
-impl AsyncWrite for RealityTlsStream {
+impl AsyncWrite for Tls13Stream {
     fn poll_write(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -513,20 +534,10 @@ async fn reality_handshake(
     })
 }
 
-/// 将 RealityConnected 转换为 RealityTlsStream（在 reality_connect 中调用）
+/// 将 RealityConnected 转换为 Tls13Stream（在 reality_connect 中调用）
 impl RealityConnected {
-    fn into_stream(self) -> RealityTlsStream {
-        RealityTlsStream {
-            inner: self.inner,
-            read_key: self.read_key,
-            write_key: self.write_key,
-            read_plain: VecDeque::new(),
-            read_state: StreamReadState::Header {
-                buf: [0; 5],
-                pos: 0,
-            },
-            write_pending: None,
-        }
+    fn into_stream(self) -> Tls13Stream {
+        Tls13Stream::new(self.inner, self.read_key, self.write_key)
     }
 }
 
@@ -686,7 +697,7 @@ fn push_ext(out: &mut Vec<u8>, typ: u16, data: &[u8]) {
     out.extend_from_slice(data);
 }
 
-fn wrap_plain_record(typ: u8, payload: &[u8]) -> Result<Vec<u8>> {
+pub(crate) fn wrap_plain_record(typ: u8, payload: &[u8]) -> Result<Vec<u8>> {
     if payload.len() > u16::MAX as usize {
         bail!("TLS record payload too large");
     }
@@ -700,15 +711,15 @@ fn wrap_plain_record(typ: u8, payload: &[u8]) -> Result<Vec<u8>> {
 
 // ── TLS record 读取 ──────────────────────────────────────────────────────────
 
-async fn read_plain_handshake<R: AsyncRead + Unpin>(r: &mut R, expected: u8) -> Result<Vec<u8>> {
+pub(crate) async fn read_plain_handshake<R: AsyncRead + Unpin>(r: &mut R, expected: u8) -> Result<Vec<u8>> {
     loop {
         let record = read_record(r)
             .await?
-            .ok_or_else(|| anyhow!("REALITY: EOF while reading ServerHello"))?;
+            .ok_or_else(|| anyhow!("TLS: EOF while reading ServerHello"))?;
         debug!(
             record_type = record.typ,
             payload_len = record.payload.len(),
-            "REALITY: first record from server"
+            "TLS: first record from server"
         );
         if record.typ == TLS_RECORD_CHANGE_CIPHER_SPEC {
             continue;
@@ -719,23 +730,23 @@ async fn read_plain_handshake<R: AsyncRead + Unpin>(r: &mut R, expected: u8) -> 
                 warn!(
                     alert_level = record.payload[0],
                     alert_desc = record.payload[1],
-                    "REALITY: server sent TLS Alert (REALITY verification likely failed)"
+                    "TLS: server sent plaintext TLS Alert (handshake rejected)"
                 );
             }
-            bail!("REALITY: expected handshake record, got {}", record.typ);
+            bail!("TLS: expected handshake record, got {}", record.typ);
         }
         if record.payload.len() < 4 || record.payload[0] != expected {
-            bail!("REALITY: unexpected plaintext handshake");
+            bail!("TLS: unexpected plaintext handshake");
         }
         let len = read_u24(&record.payload[1..4]);
         if record.payload.len() != 4 + len {
-            bail!("REALITY: fragmented plaintext ServerHello is not supported");
+            bail!("TLS: fragmented plaintext ServerHello is not supported");
         }
         return Ok(record.payload);
     }
 }
 
-async fn fill_decrypted_handshake<R: AsyncRead + Unpin>(
+pub(crate) async fn fill_decrypted_handshake<R: AsyncRead + Unpin>(
     r: &mut R,
     key: &mut RecordKey,
     out: &mut VecDeque<u8>,
@@ -743,13 +754,13 @@ async fn fill_decrypted_handshake<R: AsyncRead + Unpin>(
     loop {
         let record = read_record(r)
             .await?
-            .ok_or_else(|| anyhow!("REALITY: EOF during encrypted handshake"))?;
+            .ok_or_else(|| anyhow!("TLS: EOF during encrypted handshake"))?;
         if record.typ == TLS_RECORD_CHANGE_CIPHER_SPEC {
-            debug!("REALITY: skipping ChangeCipherSpec during handshake");
+            debug!("TLS: skipping ChangeCipherSpec during handshake");
             continue;
         }
         if record.typ != TLS_RECORD_APPLICATION_DATA {
-            bail!("REALITY: expected encrypted record, got {}", record.typ);
+            bail!("TLS: expected encrypted record, got {}", record.typ);
         }
         let (inner_type, plaintext) = key.open(&record.header, &record.payload)?;
         match inner_type {
@@ -765,20 +776,20 @@ async fn fill_decrypted_handshake<R: AsyncRead + Unpin>(
                     warn!(
                         alert_level = plaintext[0],
                         alert_desc = plaintext[1],
-                        "REALITY: server sent encrypted TLS Alert during handshake \
-                         (verification likely failed)"
+                        "TLS: server sent encrypted TLS Alert during handshake \
+                         (peer rejected the ClientHello / certificate)"
                     );
                     bail!(
-                        "REALITY: server alert (level={}, desc={})",
+                        "TLS: server alert (level={}, desc={})",
                         plaintext[0],
                         plaintext[1]
                     );
                 } else {
                     warn!(
                         alert_len = plaintext.len(),
-                        "REALITY: server sent truncated encrypted TLS Alert"
+                        "TLS: server sent truncated encrypted TLS Alert"
                     );
-                    bail!("REALITY: server alert (truncated)");
+                    bail!("TLS: server alert (truncated)");
                 }
             }
             _ => {}
@@ -814,13 +825,13 @@ async fn read_record<R: AsyncRead + Unpin>(r: &mut R) -> Result<Option<TlsRecord
 
 // ── ServerHello 解析 ─────────────────────────────────────────────────────────
 
-struct ParsedServerHello {
-    cipher_suite: u16,
-    session_id: Vec<u8>,
-    key_share: [u8; 32],
+pub(crate) struct ParsedServerHello {
+    pub(crate) cipher_suite: u16,
+    pub(crate) session_id: Vec<u8>,
+    pub(crate) key_share: [u8; 32],
 }
 
-fn parse_server_hello(raw: &[u8]) -> Result<ParsedServerHello> {
+pub(crate) fn parse_server_hello(raw: &[u8]) -> Result<ParsedServerHello> {
     if raw.len() < 42 || raw[0] != HS_SERVER_HELLO {
         bail!("invalid ServerHello");
     }
@@ -830,7 +841,7 @@ fn parse_server_hello(raw: &[u8]) -> Result<ParsedServerHello> {
     }
     let body = &raw[4..];
     if body[0..2] != [0x03, 0x03] {
-        bail!("REALITY: server selected a non-TLS1.3 legacy version");
+        bail!("TLS: server selected a non-TLS1.3 legacy version");
     }
     // HelloRetryRequest 特殊 random 值检测
     if body[2..34]
@@ -840,7 +851,7 @@ fn parse_server_hello(raw: &[u8]) -> Result<ParsedServerHello> {
             0xc8, 0xa8, 0x33, 0x9c,
         ]
     {
-        bail!("REALITY: HelloRetryRequest is not supported");
+        bail!("TLS: HelloRetryRequest is not supported — the server wants a key group we do not offer");
     }
     let mut pos = 34;
     let sid_len = take_u8(body, &mut pos)? as usize;
@@ -848,7 +859,7 @@ fn parse_server_hello(raw: &[u8]) -> Result<ParsedServerHello> {
     let cipher_suite = take_u16(body, &mut pos)?;
     let compression = take_u8(body, &mut pos)?;
     if compression != 0 {
-        bail!("REALITY: invalid ServerHello compression");
+        bail!("TLS: invalid ServerHello compression");
     }
     let ext_len = take_u16(body, &mut pos)? as usize;
     let exts = take(body, &mut pos, ext_len)?;
@@ -876,22 +887,22 @@ fn parse_server_hello(raw: &[u8]) -> Result<ParsedServerHello> {
         }
     }
     if !tls13 {
-        bail!("REALITY: server did not negotiate TLS 1.3");
+        bail!("TLS: server did not negotiate TLS 1.3");
     }
     Ok(ParsedServerHello {
         cipher_suite,
         session_id,
-        key_share: key_share.ok_or_else(|| anyhow!("REALITY: missing X25519 key share"))?,
+        key_share: key_share.ok_or_else(|| anyhow!("TLS: missing X25519 key share"))?,
     })
 }
 
-struct HandshakeMessage {
-    typ: u8,
-    body: Vec<u8>,
-    raw: Vec<u8>,
+pub(crate) struct HandshakeMessage {
+    pub(crate) typ: u8,
+    pub(crate) body: Vec<u8>,
+    pub(crate) raw: Vec<u8>,
 }
 
-fn pop_handshake_message(buf: &mut VecDeque<u8>) -> Option<HandshakeMessage> {
+pub(crate) fn pop_handshake_message(buf: &mut VecDeque<u8>) -> Option<HandshakeMessage> {
     if buf.len() < 4 {
         return None;
     }
@@ -988,12 +999,12 @@ fn extract_ed25519_spki(spki_value: &[u8]) -> Option<[u8; 32]> {
 }
 
 #[derive(Clone, Copy)]
-struct DerNode<'a> {
-    tag: u8,
-    value: &'a [u8],
+pub(crate) struct DerNode<'a> {
+    pub(crate) tag: u8,
+    pub(crate) value: &'a [u8],
 }
 
-fn der_read<'a>(input: &'a [u8], pos: &mut usize) -> Option<DerNode<'a>> {
+pub(crate) fn der_read<'a>(input: &'a [u8], pos: &mut usize) -> Option<DerNode<'a>> {
     let tag = *input.get(*pos)?;
     *pos += 1;
     let first_len = *input.get(*pos)?;
@@ -1022,19 +1033,19 @@ fn der_read<'a>(input: &'a [u8], pos: &mut usize) -> Option<DerNode<'a>> {
 
 /// TLS 1.3 cipher suite：支持全部三种 RFC 8446 4.2.11 定义的套件。
 #[derive(Clone, Copy)]
-enum CipherSuite {
+pub(crate) enum CipherSuite {
     Aes128GcmSha256,
     Aes256GcmSha384,
     ChaCha20Poly1305Sha256,
 }
 
 impl CipherSuite {
-    fn try_from(value: u16) -> Result<Self> {
+    pub(crate) fn try_from(value: u16) -> Result<Self> {
         match value {
             TLS_AES_128_GCM_SHA256 => Ok(Self::Aes128GcmSha256),
             TLS_AES_256_GCM_SHA384 => Ok(Self::Aes256GcmSha384),
             TLS_CHACHA20_POLY1305_SHA256 => Ok(Self::ChaCha20Poly1305Sha256),
-            other => bail!("REALITY: unsupported cipher suite 0x{other:04x}"),
+            other => bail!("TLS: unsupported cipher suite 0x{other:04x}"),
         }
     }
 
@@ -1045,7 +1056,7 @@ impl CipherSuite {
         }
     }
 
-    fn hash_kind(self) -> HashKind {
+    pub(crate) fn hash_kind(self) -> HashKind {
         match self {
             Self::Aes128GcmSha256 | Self::ChaCha20Poly1305Sha256 => HashKind::Sha256,
             Self::Aes256GcmSha384 => HashKind::Sha384,
@@ -1057,7 +1068,7 @@ impl CipherSuite {
 /// - SHA-256 用于 TLS_AES_128_GCM_SHA256 / TLS_CHACHA20_POLY1305_SHA256
 /// - SHA-384 用于 TLS_AES_256_GCM_SHA384
 #[derive(Clone, Copy)]
-enum HashKind {
+pub(crate) enum HashKind {
     Sha256,
     Sha384,
 }
@@ -1145,7 +1156,7 @@ impl HashKind {
         self.hkdf_expand_label(secret, label, transcript_hash, self.output_len())
     }
 
-    fn finished_verify_data(self, secret: &[u8], transcript: &[u8]) -> Vec<u8> {
+    pub(crate) fn finished_verify_data(self, secret: &[u8], transcript: &[u8]) -> Vec<u8> {
         let finished_key = self.hkdf_expand_label(secret, b"finished", &[], self.output_len());
         let transcript_hash = self.digest(transcript);
         match self {
@@ -1165,16 +1176,16 @@ impl HashKind {
     }
 }
 
-struct HandshakeKeys {
-    client: RecordKey,
-    server: RecordKey,
-    client_secret: Vec<u8>,
-    server_secret: Vec<u8>,
-    master_secret: Vec<u8>,
+pub(crate) struct HandshakeKeys {
+    pub(crate) client: RecordKey,
+    pub(crate) server: RecordKey,
+    pub(crate) client_secret: Vec<u8>,
+    pub(crate) server_secret: Vec<u8>,
+    pub(crate) master_secret: Vec<u8>,
 }
 
 impl HandshakeKeys {
-    fn derive(cipher: CipherSuite, shared_secret: &[u8; 32], transcript: &[u8]) -> Self {
+    pub(crate) fn derive(cipher: CipherSuite, shared_secret: &[u8; 32], transcript: &[u8]) -> Self {
         let hash = cipher.hash_kind();
         let hash_len = hash.output_len();
         let zero = vec![0u8; hash_len];
@@ -1197,13 +1208,13 @@ impl HandshakeKeys {
     }
 }
 
-struct ApplicationKeys {
-    client: RecordKey,
-    server: RecordKey,
+pub(crate) struct ApplicationKeys {
+    pub(crate) client: RecordKey,
+    pub(crate) server: RecordKey,
 }
 
 impl ApplicationKeys {
-    fn derive(cipher: CipherSuite, master_secret: &[u8], transcript: &[u8]) -> Self {
+    pub(crate) fn derive(cipher: CipherSuite, master_secret: &[u8], transcript: &[u8]) -> Self {
         let hash = cipher.hash_kind();
         let transcript_hash = hash.digest(transcript);
         let client_secret = hash.derive_secret(master_secret, b"c ap traffic", &transcript_hash);
@@ -1221,7 +1232,7 @@ enum AeadCipher {
     ChaCha20(Box<ChaCha20Poly1305>),
 }
 
-struct RecordKey {
+pub(crate) struct RecordKey {
     cipher: AeadCipher,
     iv: [u8; 12],
     seq: u64,
@@ -1252,7 +1263,7 @@ impl RecordKey {
         }
     }
 
-    fn seal(&mut self, inner_type: u8, plaintext: &[u8]) -> Result<Vec<u8>> {
+    pub(crate) fn seal(&mut self, inner_type: u8, plaintext: &[u8]) -> Result<Vec<u8>> {
         let mut body = Vec::with_capacity(plaintext.len() + 1 + 16);
         body.extend_from_slice(plaintext);
         body.push(inner_type);
@@ -1270,7 +1281,7 @@ impl RecordKey {
         Ok(out)
     }
 
-    fn open(&mut self, header: &[u8; 5], ciphertext: &[u8]) -> Result<(u8, Vec<u8>)> {
+    pub(crate) fn open(&mut self, header: &[u8; 5], ciphertext: &[u8]) -> Result<(u8, Vec<u8>)> {
         if ciphertext.len() < 16 {
             bail!("TLS ciphertext too short");
         }
@@ -1338,7 +1349,7 @@ impl RecordKey {
     }
 }
 
-fn verify_finished(
+pub(crate) fn verify_finished(
     hash: HashKind,
     secret: &[u8],
     transcript: &[u8],
@@ -1348,7 +1359,7 @@ fn verify_finished(
     if expected.as_slice() == received {
         Ok(())
     } else {
-        bail!("REALITY: server Finished verify_data mismatch");
+        bail!("TLS: server Finished verify_data mismatch");
     }
 }
 
@@ -1410,7 +1421,7 @@ pub fn decode_short_id(s: &str) -> Result<Vec<u8>> {
     hex::decode(s).map_err(|e| anyhow!("shortId decode: {e}"))
 }
 
-fn take<'a>(input: &'a [u8], pos: &mut usize, len: usize) -> Result<&'a [u8]> {
+pub(crate) fn take<'a>(input: &'a [u8], pos: &mut usize, len: usize) -> Result<&'a [u8]> {
     let end = pos
         .checked_add(len)
         .ok_or_else(|| anyhow!("TLS parser offset overflow"))?;
@@ -1421,11 +1432,11 @@ fn take<'a>(input: &'a [u8], pos: &mut usize, len: usize) -> Result<&'a [u8]> {
     Ok(out)
 }
 
-fn take_u8(input: &[u8], pos: &mut usize) -> Result<u8> {
+pub(crate) fn take_u8(input: &[u8], pos: &mut usize) -> Result<u8> {
     Ok(take(input, pos, 1)?[0])
 }
 
-fn take_u16(input: &[u8], pos: &mut usize) -> Result<u16> {
+pub(crate) fn take_u16(input: &[u8], pos: &mut usize) -> Result<u16> {
     let b = take(input, pos, 2)?;
     Ok(u16::from_be_bytes([b[0], b[1]]))
 }
@@ -1435,15 +1446,15 @@ fn take_u24(input: &[u8], pos: &mut usize) -> Result<usize> {
     Ok(read_u24(b))
 }
 
-fn read_u24(b: &[u8]) -> usize {
+pub(crate) fn read_u24(b: &[u8]) -> usize {
     ((b[0] as usize) << 16) | ((b[1] as usize) << 8) | b[2] as usize
 }
 
-fn put_u16(value: u16, out: &mut Vec<u8>) {
+pub(crate) fn put_u16(value: u16, out: &mut Vec<u8>) {
     out.extend_from_slice(&value.to_be_bytes());
 }
 
-fn put_u24(value: usize, out: &mut Vec<u8>) {
+pub(crate) fn put_u24(value: usize, out: &mut Vec<u8>) {
     out.push(((value >> 16) & 0xff) as u8);
     out.push(((value >> 8) & 0xff) as u8);
     out.push((value & 0xff) as u8);

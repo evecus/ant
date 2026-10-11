@@ -25,7 +25,7 @@ use tokio::{
 };
 use tracing::trace;
 
-use super::reality::RealityTlsStream;
+use super::reality::Tls13Stream;
 
 const TLS_13_SUPPORTED_VERSIONS: &[u8] = &[0x00, 0x2b, 0x00, 0x02, 0x03, 0x04];
 const TLS_CLIENT_HANDSHAKE_START: &[u8] = &[0x16, 0x03];
@@ -51,9 +51,8 @@ fn is_tls13_aead_cipher(cipher: u16) -> bool {
 pub(crate) enum TlsLayer {
     // Box 抑制 large_enum_variant：rustls 变体 >1KB，而 Reality/Plain 都很小。
     Rustls(Box<tokio_rustls::client::TlsStream<TcpStream>>),
-    /// uTLS（浏览器指纹伪造）的 rustls TLS 流。
-    RustlsUtls(Box<tokio_rustls::client::TlsStream<super::utls::UtlsStream>>),
-    Reality(RealityTlsStream),
+    /// 自实现 TLS 1.3 流：REALITY 与 uTLS（浏览器 ClientHello 指纹）共用同一类型。
+    Tls13(Tls13Stream),
     Plain(TcpStream),
 }
 
@@ -66,11 +65,7 @@ impl TlsLayer {
                 let (tcp, _) = s.get_mut();
                 tcp
             }
-            TlsLayer::RustlsUtls(s) => {
-                let (io, _) = s.get_mut();
-                io.get_mut_tcp()
-            }
-            TlsLayer::Reality(r) => r.get_mut_tcp(),
+            TlsLayer::Tls13(r) => r.get_mut_tcp(),
             TlsLayer::Plain(s) => s,
         }
     }
@@ -84,8 +79,7 @@ impl AsyncRead for TlsLayer {
     ) -> Poll<io::Result<()>> {
         match self.get_mut() {
             TlsLayer::Rustls(s) => Pin::new(s).poll_read(cx, buf),
-            TlsLayer::RustlsUtls(s) => Pin::new(s.as_mut()).poll_read(cx, buf),
-            TlsLayer::Reality(r) => Pin::new(r).poll_read(cx, buf),
+            TlsLayer::Tls13(s) => Pin::new(s).poll_read(cx, buf),
             TlsLayer::Plain(s) => Pin::new(s).poll_read(cx, buf),
         }
     }
@@ -99,8 +93,7 @@ impl AsyncWrite for TlsLayer {
     ) -> Poll<io::Result<usize>> {
         match self.get_mut() {
             TlsLayer::Rustls(s) => Pin::new(s).poll_write(cx, buf),
-            TlsLayer::RustlsUtls(s) => Pin::new(s.as_mut()).poll_write(cx, buf),
-            TlsLayer::Reality(r) => Pin::new(r).poll_write(cx, buf),
+            TlsLayer::Tls13(s) => Pin::new(s).poll_write(cx, buf),
             TlsLayer::Plain(s) => Pin::new(s).poll_write(cx, buf),
         }
     }
@@ -108,8 +101,7 @@ impl AsyncWrite for TlsLayer {
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         match self.get_mut() {
             TlsLayer::Rustls(s) => Pin::new(s).poll_flush(cx),
-            TlsLayer::RustlsUtls(s) => Pin::new(s.as_mut()).poll_flush(cx),
-            TlsLayer::Reality(r) => Pin::new(r).poll_flush(cx),
+            TlsLayer::Tls13(s) => Pin::new(s).poll_flush(cx),
             TlsLayer::Plain(s) => Pin::new(s).poll_flush(cx),
         }
     }
@@ -117,8 +109,7 @@ impl AsyncWrite for TlsLayer {
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         match self.get_mut() {
             TlsLayer::Rustls(s) => Pin::new(s).poll_shutdown(cx),
-            TlsLayer::RustlsUtls(s) => Pin::new(s.as_mut()).poll_shutdown(cx),
-            TlsLayer::Reality(r) => Pin::new(r).poll_shutdown(cx),
+            TlsLayer::Tls13(s) => Pin::new(s).poll_shutdown(cx),
             TlsLayer::Plain(s) => Pin::new(s).poll_shutdown(cx),
         }
     }
