@@ -702,6 +702,8 @@ mod tests {
         let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = l.local_addr().unwrap();
         let s = std::net::TcpStream::connect(addr).unwrap();
+        // tokio 要求注册的 fd 必须非阻塞（Linux 上阻塞 fd 会直接 panic）
+        s.set_nonblocking(true).unwrap();
         TlsLayer::Plain(tokio::net::TcpStream::from_std(s).unwrap())
     }
 
