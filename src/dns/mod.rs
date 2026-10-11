@@ -10,7 +10,7 @@ pub use upstream::{apply_bootstrap, exchange, parse_nameserver, DnsUpstream};
 
 use crate::config::Config;
 use crate::app::router::{DnsAction, Router};
-use anyhow::{Context, Result};
+use anyhow::Result;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
