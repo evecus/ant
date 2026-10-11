@@ -68,16 +68,34 @@ fn default_log_level() -> String {
     "info".into()
 }
 
+fn default_true_bool() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct DnsConfig {
     #[serde(rename = "port", alias = "dns-port")]
     pub port: u16,
-    #[serde(rename = "direct-nameserver", alias = "direct-dns")]
-    pub direct_nameserver: String,
-    #[serde(rename = "proxy-nameserver", alias = "proxy-dns")]
-    pub proxy_nameserver: String,
+    /// Used when `rule-follow-route: true` (default): domains routed to direct.
+    #[serde(default, rename = "direct-nameserver", alias = "direct-dns")]
+    pub direct_nameserver: Option<String>,
+    /// Used when `rule-follow-route: true`: domains routed to a proxy node.
+    #[serde(default, rename = "proxy-nameserver", alias = "proxy-dns")]
+    pub proxy_nameserver: Option<String>,
     #[serde(rename = "default-nameserver")]
     pub default_nameserver: String,
+    /// true (default): reuse top-level `route:` for DNS — direct → direct-nameserver,
+    /// node → proxy-nameserver, block → rcode://success.
+    /// false: use `dns.rules` + `nameserver` instead.
+    #[serde(default = "default_true_bool", rename = "rule-follow-route")]
+    pub rule_follow_route: bool,
+    /// Custom DNS rules when `rule-follow-route: false`.
+    /// Format: `TYPE,payload,upstream` where upstream is a nameserver URL or `rcode://success`.
+    #[serde(default)]
+    pub rules: Vec<String>,
+    /// Default upstream when `rule-follow-route: false` and `rules` is empty.
+    #[serde(default)]
+    pub nameserver: Option<String>,
     #[serde(default = "default_dns_mode")]
     pub mode: String,
     #[serde(default, rename = "fakeip-range")]
@@ -442,6 +460,139 @@ pub fn parse_rule_line(line: &str) -> Result<ParsedRule> {
     }
 }
 
+/// Parsed `dns.rules` line (when `rule-follow-route: false`).
+#[derive(Debug, Clone)]
+pub struct ParsedDnsRule {
+    pub kind: RuleKind,
+    /// Nameserver URL or `rcode://success`.
+    pub upstream: String,
+}
+
+impl ParsedDnsRule {
+    pub fn is_match(&self) -> bool {
+        matches!(self.kind, RuleKind::Match)
+    }
+    pub fn ruleset_name(&self) -> Option<&str> {
+        match &self.kind {
+            RuleKind::RuleSet(n) => Some(n.as_str()),
+            _ => None,
+        }
+    }
+}
+
+/// Parse a `dns.rules` line. Same types as route; last field is upstream
+/// (nameserver URL or `rcode://success`), never an outbound name.
+pub fn parse_dns_rule_line(line: &str) -> Result<ParsedDnsRule> {
+    let line = line.trim();
+    if line.is_empty() {
+        bail!("empty dns rule line");
+    }
+    let parts: Vec<&str> = line.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+    if parts.is_empty() {
+        bail!("empty dns rule line");
+    }
+    let kind = parts[0].to_ascii_uppercase();
+    match kind.as_str() {
+        "RULE-SET" => {
+            if parts.len() < 3 {
+                bail!("dns rules RULE-SET needs name and upstream, got: {line}");
+            }
+            Ok(ParsedDnsRule {
+                kind: RuleKind::RuleSet(parts[1].to_string()),
+                upstream: parts[2].to_string(),
+            })
+        }
+        "MATCH" => {
+            if parts.len() < 2 {
+                bail!("dns rules MATCH needs upstream, got: {line}");
+            }
+            Ok(ParsedDnsRule {
+                kind: RuleKind::Match,
+                upstream: parts[1].to_string(),
+            })
+        }
+        "DOMAIN" => {
+            if parts.len() < 3 {
+                bail!("dns rules DOMAIN needs domain and upstream, got: {line}");
+            }
+            Ok(ParsedDnsRule {
+                kind: RuleKind::Domain(parts[1].to_ascii_lowercase()),
+                upstream: parts[2].to_string(),
+            })
+        }
+        "DOMAIN-SUFFIX" => {
+            if parts.len() < 3 {
+                bail!("dns rules DOMAIN-SUFFIX needs suffix and upstream, got: {line}");
+            }
+            Ok(ParsedDnsRule {
+                kind: RuleKind::DomainSuffix(
+                    parts[1].trim_start_matches('.').to_ascii_lowercase(),
+                ),
+                upstream: parts[2].to_string(),
+            })
+        }
+        "DOMAIN-KEYWORD" => {
+            if parts.len() < 3 {
+                bail!("dns rules DOMAIN-KEYWORD needs keyword and upstream, got: {line}");
+            }
+            Ok(ParsedDnsRule {
+                kind: RuleKind::DomainKeyword(parts[1].to_ascii_lowercase()),
+                upstream: parts[2].to_string(),
+            })
+        }
+        "DOMAIN-REGEX" => {
+            if parts.len() < 3 {
+                bail!("dns rules DOMAIN-REGEX needs regex and upstream, got: {line}");
+            }
+            regex::Regex::new(parts[1])
+                .with_context(|| format!("invalid dns DOMAIN-REGEX: {}", parts[1]))?;
+            Ok(ParsedDnsRule {
+                kind: RuleKind::DomainRegex(parts[1].to_string()),
+                upstream: parts[2].to_string(),
+            })
+        }
+        "IP-CIDR" | "IP-CIDR6" => {
+            if parts.len() < 3 {
+                bail!("dns rules {kind} needs cidr and upstream, got: {line}");
+            }
+            Ok(ParsedDnsRule {
+                kind: RuleKind::IpCidr(parts[1].to_string()),
+                upstream: parts[2].to_string(),
+            })
+        }
+        "SRC-IP-CIDR" | "SRC-IP-CIDR6" => {
+            if parts.len() < 3 {
+                bail!("dns rules {kind} needs cidr and upstream, got: {line}");
+            }
+            Ok(ParsedDnsRule {
+                kind: RuleKind::SrcIpCidr(parts[1].to_string()),
+                upstream: parts[2].to_string(),
+            })
+        }
+        other => bail!(
+            "dns rules: unsupported type `{other}` (got: {line});              supported: DOMAIN, DOMAIN-SUFFIX, DOMAIN-KEYWORD, DOMAIN-REGEX,              IP-CIDR, SRC-IP-CIDR, RULE-SET, MATCH"
+        ),
+    }
+}
+
+/// Validate dns.rules upstream: `rcode://success` or parseable nameserver URL.
+pub fn validate_dns_upstream(upstream: &str, node_names: &[String]) -> Result<()> {
+    let lower = upstream.trim().to_ascii_lowercase();
+    if lower == "rcode://success" {
+        return Ok(());
+    }
+    if RESERVED_OUTBOUND_NAMES.contains(&lower.as_str())
+        || node_names.iter().any(|n| n.to_ascii_lowercase() == lower)
+    {
+        bail!(
+            "dns rules upstream must be a nameserver url or rcode://success,              not an outbound name (got `{upstream}`)"
+        );
+    }
+    crate::dns::parse_nameserver(upstream)
+        .with_context(|| format!("dns rules upstream `{upstream}`"))
+        .map(|_| ())
+}
+
 fn normalize_behavior(behavior: &str) -> Result<String> {
     match behavior.to_ascii_lowercase().as_str() {
         "domain" => Ok("domain".into()),
@@ -592,9 +743,79 @@ impl Config {
                 bail!("fakeip-filter-mode=whitelist requires non-empty fakeip-filter");
             }
         }
-        crate::dns::parse_nameserver(&self.dns.direct_nameserver).context("invalid direct-nameserver")?;
-        crate::dns::parse_nameserver(&self.dns.proxy_nameserver).context("invalid proxy-nameserver")?;
         crate::dns::parse_nameserver(&self.dns.default_nameserver).context("invalid default-nameserver")?;
+
+        // DNS routing strategy
+        let node_names: Vec<String> = self.proxies.iter().map(|p| p.name.clone()).collect();
+        if self.dns.rule_follow_route {
+            if !self.dns.rules.is_empty() {
+                bail!("dns.rules is only used with rule-follow-route=false");
+            }
+            if self.dns.nameserver.is_some() {
+                bail!("dns.nameserver is only used with rule-follow-route=false");
+            }
+            let direct = self
+                .dns
+                .direct_nameserver
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .context("rule-follow-route=true requires dns.direct-nameserver")?;
+            let proxy = self
+                .dns
+                .proxy_nameserver
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .context("rule-follow-route=true requires dns.proxy-nameserver")?;
+            crate::dns::parse_nameserver(direct).context("invalid direct-nameserver")?;
+            crate::dns::parse_nameserver(proxy).context("invalid proxy-nameserver")?;
+        } else {
+            if self.dns.direct_nameserver.as_ref().is_some_and(|s| !s.is_empty())
+                || self.dns.proxy_nameserver.as_ref().is_some_and(|s| !s.is_empty())
+            {
+                bail!(
+                    "direct-nameserver/proxy-nameserver are only used with rule-follow-route=true"
+                );
+            }
+            if self.dns.rules.is_empty() {
+                let ns = self
+                    .dns
+                    .nameserver
+                    .as_deref()
+                    .filter(|s| !s.is_empty())
+                    .context(
+                        "rule-follow-route=false without dns.rules requires dns.nameserver",
+                    )?;
+                crate::dns::parse_nameserver(ns).context("invalid dns.nameserver")?;
+            } else {
+                let ruleset_names: std::collections::HashSet<&str> =
+                    self.rule_providers.keys().map(|s| s.as_str()).collect();
+                let parsed_dns: Vec<ParsedDnsRule> = self
+                    .dns
+                    .rules
+                    .iter()
+                    .enumerate()
+                    .map(|(i, line)| {
+                        parse_dns_rule_line(line).with_context(|| format!("dns.rules[{i}]"))
+                    })
+                    .collect::<Result<_>>()?;
+                let last = parsed_dns.last().unwrap();
+                if !last.is_match() {
+                    bail!("last dns.rules entry must be MATCH,<upstream>");
+                }
+                for (i, r) in parsed_dns.iter().enumerate() {
+                    if i + 1 != parsed_dns.len() && r.is_match() {
+                        bail!("MATCH is only allowed as the last dns.rules entry (at [{i}])");
+                    }
+                    if let Some(name) = r.ruleset_name() {
+                        if !ruleset_names.contains(name) {
+                            bail!("dns.rules[{i}]: unknown rule-provider `{name}`");
+                        }
+                    }
+                    validate_dns_upstream(&r.upstream, &node_names)
+                        .with_context(|| format!("dns.rules[{i}]"))?;
+                }
+            }
+        }
 
         // rule-providers
         let rulesets = self.ruleset_list()?;

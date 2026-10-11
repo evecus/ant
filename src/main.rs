@@ -111,8 +111,13 @@ async fn main() -> Result<()> {
     let config_path = enter_dir(&cli.directory, cli.config)?;
     let mut cfg = Config::load(&config_path)?;
     crate::dns::apply_bootstrap(&mut cfg).await?;
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new(&cfg.global.log_level));
+    // `log-level: off` disables logging entirely. RUST_LOG overrides when set.
+    let level = cfg.global.log_level.trim();
+    let filter = if level.eq_ignore_ascii_case("off") {
+        EnvFilter::new("off")
+    } else {
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(level))
+    };
     tracing_subscriber::fmt()
         .with_ansi(false)
         .with_env_filter(filter)
@@ -239,7 +244,7 @@ async fn cmd_check(path: &str) -> Result<()> {
         .context("bootstrap DNS via default-nameserver failed")?;
     println!(
         "  ok    bootstrap dns: direct={} proxy={}",
-        cfg.dns.direct_nameserver, cfg.dns.proxy_nameserver
+        cfg.dns.direct_nameserver.as_deref().unwrap_or("-"), cfg.dns.proxy_nameserver.as_deref().unwrap_or("-")
     );
 
     Router::from_config(&cfg).context("router build failed")?;
@@ -299,8 +304,8 @@ fn print_summary(cfg: &Config) {
     println!(
         "  dns    mode={dns_mode} port={} direct={} proxy={} default={}",
         cfg.dns.port,
-        cfg.dns.direct_nameserver,
-        cfg.dns.proxy_nameserver,
+        cfg.dns.direct_nameserver.as_deref().unwrap_or("-"),
+        cfg.dns.proxy_nameserver.as_deref().unwrap_or("-"),
         cfg.dns.default_nameserver
     );
     println!(
