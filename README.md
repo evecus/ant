@@ -8,7 +8,8 @@ Inspired by [clash-rs](https://github.com/Watfaq/clash-rs) (protocol code patter
 
 - **Inbound**: `mixed-port` (HTTP CONNECT + SOCKS5 TCP/UDP), `tproxy-port` (Linux TProxy TCP+UDP), `redir-port`
 - **Outbound**: Hysteria2 / VLESS (ws / xhttp / REALITY) + direct / block
-- **DNS**: local UDP/TCP DNS; domain rules that route to direct use `direct-nameserver`, others use `proxy-nameserver`
+- **DNS**: local UDP/TCP DNS; `rule-follow-route` (default true) reuses `route:`; or custom `dns.rules` + `nameserver`
+- **log-level**: `error`|`warn`|`info`|`debug`|`trace`|`off` (`off` disables all logging; `RUST_LOG` overrides)
 - **Routing**: sequential `RULE-SET` match; TLS/HTTP sniff first; required `MATCH` last
 - **Rulesets**: local binary `.ars` via `rule-providers` (convert from sing-box JSON)
 
@@ -35,7 +36,7 @@ See `config.example.yaml`.
 
 Layout (mihomo-style):
 
-- Flat top-level: `mixed-port`, `tproxy-port`, `log-level`, `sniff`, … (`sniff: true` enables
+- Flat top-level: `mixed-port`, `tproxy-port`, `log-level`, `ipv6`, `bind-address` (`0.0.0.0`|`127.0.0.1`), `sniff`, … (`sniff: true` enables
   TLS SNI / HTTP Host / QUIC sniffing for domain routing, default off; DNS sniffing follows
   `dns.route-hijack` independently)
 - `dns:` — field names unchanged (`direct-nameserver`, `proxy-nameserver`, `mode`, `fakeip-range`, …)
@@ -43,7 +44,7 @@ Layout (mihomo-style):
 - `rule-providers:` — local `.ars` files (`type: file`, `behavior: domain|ip`)
 - `rules:` — only `RULE-SET,<name>,<outbound>` and final `MATCH,<outbound>`
 
-Outbound aliases: `DIRECT` → direct, `REJECT` → block.
+Outbound aliases: `DIRECT` → direct; `BLOCK` / `REJECT` / `block` / `reject` → block (drop / DNS empty answer).
 
 ```yaml
 rules:
