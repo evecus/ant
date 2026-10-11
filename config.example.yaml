@@ -119,20 +119,21 @@ proxies:
 
 # Local rule providers only (type: file). behavior: domain | ip | ipcidr
 rule-providers:
+  # path: absolute, relative to this config file, or file:/abs/path
   ads:
     type: file
     behavior: domain
-    path: /root/rules/ads.ars
+    path: ./rules/ads.ars
 
   cn-domain:
     type: file
     behavior: domain
-    path: /root/rules/cn-domain.ars
+    path: ./rules/cn-domain.ars
 
   cn-ip:
     type: file
     behavior: ip
-    path: /root/rules/cn-ip.ars
+    path: ./rules/cn-ip.ars
 
 # mihomo-style rules (only RULE-SET and MATCH supported)
 # Outbound: direct/DIRECT, block/REJECT, or a proxies name
