@@ -995,11 +995,8 @@ route:
     #[test]
     fn match_accepts_reject_as_block() {
         for alias in ["REJECT", "reject", "BLOCK", "block"] {
-            let yaml = format!(
-                "{BASE}{}{}",
-                two_nodes(),
-                format!(
-                    r#"
+            let route = format!(
+                r#"
 rule-providers:
   cn:
     type: file
@@ -1009,8 +1006,8 @@ route:
   - RULE-SET,cn,{alias}
   - MATCH,hy2-main
 "#
-                )
             );
+            let yaml = format!("{BASE}{}{route}", two_nodes());
             let cfg = parse(&yaml).unwrap();
             let parsed = cfg.parsed_rules().unwrap();
             assert_eq!(parsed[0].outbound, "block", "alias={alias}");
