@@ -239,11 +239,6 @@ impl Router {
         not(any(target_os = "linux", target_os = "android")),
         allow(dead_code)
     )]
-
-    #[cfg_attr(
-        not(any(target_os = "linux", target_os = "android")),
-        allow(dead_code)
-    )]
     pub fn hijack_dns(&self) -> bool {
         self.hijack_dns
     }
