@@ -275,6 +275,9 @@ impl Params {
             .clone()
             .filter(|s| !s.trim().is_empty())
             .unwrap_or_else(|| CGROUP_ID.to_string());
+        // Default rule path; `apply` overwrites it with the directory the
+        // process actually landed in (`cgroup::enter` may fall back upwards).
+        let cgroup_path = format!("services/{cgroup_name}");
 
         Ok(Self {
             ipv6: iar.ipv6 && cfg.global.ipv6,
@@ -327,7 +330,7 @@ impl Params {
             bypass_type,
             cgroup_name,
             cgroup_id,
-            cgroup_path: format!("services/{cgroup_name}"),
+            cgroup_path,
             cgroup_level: 2,
             cgroup_v2: version == cgroup::Version::V2,
             mark,
