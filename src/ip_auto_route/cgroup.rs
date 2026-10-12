@@ -42,15 +42,9 @@ pub fn detect() -> Version {
         }
         let (mount_point, fs_type, opts) = (f[1], f[2], f[3]);
         match fs_type {
-            "cgroup2" => {
-                if v2.is_none() {
-                    v2 = Some(PathBuf::from(mount_point));
-                }
-            }
-            "cgroup" => {
-                if opts.contains("net_cls") && v1.is_none() {
-                    v1 = Some(PathBuf::from(mount_point));
-                }
+            "cgroup2" if v2.is_none() => v2 = Some(PathBuf::from(mount_point)),
+            "cgroup" if opts.contains("net_cls") && v1.is_none() => {
+                v1 = Some(PathBuf::from(mount_point))
             }
             _ => {}
         }
