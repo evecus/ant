@@ -16,7 +16,6 @@
 //! directory the process really ended up in.
 
 use std::fs;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use tracing::{info, warn};
 
@@ -92,71 +91,70 @@ fn writable(dir: &Path) -> bool {
 ///
 /// Candidates are tried deepest-first: `services/<name>`, then `services`, then
 /// `<name>` directly under the root — the shallower ones still work when the
-/// parent cannot be created (read-only, nested delegation, systemd layout).
+/// Same shape as nexa `placeIntoCgroup` + `writeCgroupProcs`.
+///
+/// The write itself has to be a **single `write(2)` with no trailing newline**:
+/// `cgroup.procs` parses every write separately, so a second write of `"\n"`
+/// comes back as `-EINVAL` (the migration already succeeded, but the caller
+/// sees an error). `fs::write` maps to nexa's `os.WriteFile` semantics exactly.
 pub fn enter(name: &str, classid: &str) -> anyhow::Result<Placement> {
-    let pid = std::process::id();
-    let mut errors: Vec<String> = Vec::new();
-
-    for root in ["/sys/fs/cgroup", "/sys/fs/cgroup/unified"] {
-        for rel in [
-            format!("services/{name}"),
-            "services".to_string(),
-            name.to_string(),
-        ] {
-            match try_place(Path::new(root), &rel, pid) {
-                Ok(()) => {
-                    let level = rel.split('/').filter(|s| !s.is_empty()).count().max(1);
-                    return Ok(Placement {
-                        path: rel,
-                        level,
-                        version: Version::V2,
-                    });
-                }
-                Err(e) => errors.push(format!("{root}/{rel}: {e}")),
+    let pid = std::process::id().to_string();
+    match detect() {
+        Version::V2 => {
+            let dir = PathBuf::from("/sys/fs/cgroup/services").join(name);
+            if let Err(e) = fs::create_dir_all(&dir) {
+                warn!(
+                    err = %e,
+                    dir = %dir.display(),
+                    "ip-auto-route: cannot create cgroup dir, writing into `services` instead"
+                );
+                // nexa fallback: keep the process under `services` itself.
+                let path = "/sys/fs/cgroup/services/cgroup.procs";
+                fs::write(path, &pid)
+                    .map_err(|e| anyhow::anyhow!("write {path} ({e})"))?;
+                return Ok(Placement {
+                    path: "services".to_string(),
+                    level: 1,
+                    version: Version::V2,
+                });
             }
+            let path = dir.join("cgroup.procs");
+            fs::write(&path, &pid)
+                .map_err(|e| anyhow::anyhow!("write {} ({e})", path.display()))?;
+            info!(
+                path = %dir.display(),
+                pid = %pid,
+                "ip-auto-route: core process placed into cgroup (loop prevention)"
+            );
+            Ok(Placement {
+                path: format!("services/{name}"),
+                level: 2,
+                version: Version::V2,
+            })
         }
-    }
-    // cgroup v1 (net_cls): iptables can express this too, nft uses the classid.
-    let v1root = Path::new("/sys/fs/cgroup/net_cls");
-    match try_place(v1root, name, pid) {
-        Ok(()) => {
+        Version::V1 => {
+            let dir = PathBuf::from("/sys/fs/cgroup/net_cls").join(name);
+            fs::create_dir_all(&dir)
+                .map_err(|e| anyhow::anyhow!("mkdir {} ({e})", dir.display()))?;
             if !classid.is_empty() {
-                if let Err(e) = fs::write(v1root.join(name).join("net_cls.classid"), classid) {
+                if let Err(e) = fs::write(dir.join("net_cls.classid"), classid) {
                     warn!(err = %e, "ip-auto-route: net_cls.classid write failed");
                 }
             }
-            return Ok(Placement {
+            let path = dir.join("cgroup.procs");
+            fs::write(&path, &pid)
+                .map_err(|e| anyhow::anyhow!("write {} ({e})", path.display()))?;
+            info!(
+                path = %dir.display(),
+                pid = %pid,
+                "ip-auto-route: core process placed into cgroup (loop prevention)"
+            );
+            Ok(Placement {
                 path: name.to_string(),
                 level: 1,
                 version: Version::V1,
-            });
+            })
         }
-        Err(e) => errors.push(format!("{}/{name}: {e}", v1root.display())),
+        Version::None => anyhow::bail!("no cgroup mount available"),
     }
-
-    anyhow::bail!("no writable cgroup accepted this process [{}]", errors.join("; "))
-}
-
-/// `mkdir -p <root>/<rel>` then write the PID into its `cgroup.procs`.
-fn try_place(root: &Path, rel: &str, pid: u32) -> anyhow::Result<()> {
-    let dir = root.join(rel);
-    fs::create_dir_all(&dir)
-        .map_err(|e| anyhow::anyhow!("mkdir {} ({e})", dir.display()))?;
-    write_procs(&dir, pid)?;
-    info!(
-        path = %dir.display(),
-        pid,
-        "ip-auto-route: core process placed into cgroup (loop prevention)"
-    );
-    Ok(())
-}
-
-fn write_procs(dir: &Path, pid: u32) -> anyhow::Result<()> {
-    let path = dir.join("cgroup.procs");
-    let mut f = fs::OpenOptions::new()
-        .write(true)
-        .open(&path)
-        .map_err(|e| anyhow::anyhow!("open {} ({e})", path.display()))?;
-    writeln!(f, "{pid}").map_err(|e| anyhow::anyhow!("write {} ({e})", path.display()))?;
-    Ok(())
 }
