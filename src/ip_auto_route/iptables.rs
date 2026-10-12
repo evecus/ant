@@ -651,7 +651,6 @@ fn build_bypass(w: &W, caps: &Caps, target: (&str, &str), p: &Params, scope: Sco
                 "RETURN",
             ]);
         }
-    }
         // Loop prevention: cgroup match when possible, SO_MARK otherwise.
         let mut used_cgroup = false;
         if p.bypass_type == BypassType::Cgroup {
