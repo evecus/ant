@@ -152,6 +152,11 @@ pub struct Params {
     pub cgroup_name: String,
     /// cgroup v1 net_cls classid (nexa `routing.cgroup_id`).
     pub cgroup_id: String,
+    /// Directory the core process actually lives in: relative to the cgroup2
+    /// root for v2 (`services/ant`), to the net_cls mount for v1 (`ant`).
+    pub cgroup_path: String,
+    /// Depth of `cgroup_path` — nft needs it as `socket cgroupv2 level <n>`.
+    pub cgroup_level: usize,
     /// True when the detected cgroup flavour is v2 (false → v1 `meta cgroup`).
     pub cgroup_v2: bool,
     /// ant's own SO_MARK (`global.mark`) — consumed by `BypassType::Mark`.
@@ -322,6 +327,8 @@ impl Params {
             bypass_type,
             cgroup_name,
             cgroup_id,
+            cgroup_path: format!("services/{cgroup_name}"),
+            cgroup_level: 2,
             cgroup_v2: version == cgroup::Version::V2,
             mark,
             bypass_ip: RESERVED_IP4.iter().map(|s| s.to_string()).collect(),
@@ -368,21 +375,24 @@ pub async fn apply(cfg: &Config) -> Result<Guard> {
     {
         let mut params = Params::from_config(cfg)?;
 
-        // 0. Loop prevention: place ant inside the cgroup the rules match on.
-        //    If that fails the cgroup match would never hit, so degrade to the
-        //    fwmark match instead of running with no loop prevention at all.
+        // 0. Loop prevention: place ant inside a cgroup and emit the rule for
+        //    the directory it really ended up in. If no cgroup accepts us the
+        //    match would never hit, so degrade to the fwmark match instead of
+        //    running with no loop prevention at all.
         if params.bypass_type == BypassType::Cgroup {
-            let version = if params.cgroup_v2 {
-                cgroup::Version::V2
-            } else {
-                cgroup::Version::V1
-            };
-            if let Err(e) = cgroup::join(&params.cgroup_name, version, &params.cgroup_id) {
-                tracing::warn!(
-                    error = %e,
-                    "ip-auto-route: could not join cgroup, falling back to mark bypass"
-                );
-                params.bypass_type = BypassType::Mark;
+            match cgroup::enter(&params.cgroup_name, &params.cgroup_id) {
+                Ok(pl) => {
+                    params.cgroup_path = pl.path;
+                    params.cgroup_level = pl.level;
+                    params.cgroup_v2 = pl.version == cgroup::Version::V2;
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "ip-auto-route: could not join cgroup, falling back to mark bypass"
+                    );
+                    params.bypass_type = BypassType::Mark;
+                }
             }
         }
 
@@ -390,6 +400,7 @@ pub async fn apply(cfg: &Config) -> Result<Guard> {
             tcp = ?params.tcp_mode,
             udp = ?params.udp_mode,
             bypass = ?params.bypass_type,
+            cgroup = %params.cgroup_path,
             tproxy_fwmark = format!("0x{:x}/0x{:x}", params.tproxy_fwmark, params.tproxy_fwmask),
             tun_fwmark = format!("0x{:x}/0x{:x}", params.tun_fwmark, params.tun_fwmask),
             router = params.router_proxy,

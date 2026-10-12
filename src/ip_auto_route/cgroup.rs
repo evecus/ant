@@ -1,17 +1,19 @@
 //! cgroup-based loop prevention (nexa `internal/cgroupsupport` +
 //! `core.placeIntoCgroup`).
 //!
-//! Two supported flavours, both matching what the nft / iptables rules can
-//! express:
-//!
 //! | version | core process placement          | nft match                    | iptables match        |
 //! |---------|--------------------------------|------------------------------|-----------------------|
 //! | v2      | `/sys/fs/cgroup/services/<n>`  | `socket cgroupv2 level 2`    | — (degrades to mark)  |
 //! | v1      | `/sys/fs/cgroup/net_cls/<n>`   | `meta cgroup <classid>`      | `-m cgroup --path`    |
 //!
-//! Detection mirrors nexa exactly: the mount must actually be **writable**
-//! (a real `mkdir` probe), because containers frequently show correct
-//! permission bits while the kernel refuses the write.
+//! "Detected as supported" and "actually usable" must be the same test: a
+//! mount can be writable (`mkdir` succeeds) while the kernel still refuses the
+//! process migration — hybrid `/sys/fs/cgroup/unified` and systemd-managed
+//! hierarchies return `EINVAL` on `cgroup.procs`. That is why [`enter`] does
+//! the real write instead of a probe, and why it walks several candidate
+//! directories before giving up. Whatever it succeeds on is reported back, so
+//! the emitted rule (`socket cgroupv2 level N "path"`) always matches the
+//! directory the process really ended up in.
 
 use std::fs;
 use std::io::Write;
@@ -26,9 +28,23 @@ pub enum Version {
     V2,
 }
 
+/// Where the core process actually ended up.
+#[derive(Debug, Clone)]
+pub struct Placement {
+    /// v2: path relative to the cgroup2 root (`services/ant`).
+    /// v1: path relative to the net_cls mount point (`ant`).
+    pub path: String,
+    /// Number of path components — nft wants it as `level <n>`.
+    pub level: usize,
+    pub version: Version,
+}
+
 /// Scan `/proc/mounts` for a cgroup2 mount (preferred) or a cgroup mount
 /// carrying `net_cls`, keeping only the ones that are really writable
 /// (nexa `cgroupsupport.Detect`).
+///
+/// This is the *cheap* check used to decide the default `bypass-type`; the
+/// authoritative one is [`enter`], which also performs the migration.
 pub fn detect() -> Version {
     let Ok(mounts) = fs::read_to_string("/proc/mounts") else {
         return Version::None;
@@ -72,39 +88,64 @@ fn writable(dir: &Path) -> bool {
     true
 }
 
-/// Place ant's own PID into the cgroup the firewall rules match on
-/// (nexa `placeIntoCgroup`). Without this the `socket cgroupv2` /
-/// `meta cgroup` match never hits and loop prevention silently does nothing.
-pub fn join(name: &str, version: Version, classid: &str) -> anyhow::Result<()> {
-    let root = match version {
-        Version::V2 => PathBuf::from("/sys/fs/cgroup/services"),
-        Version::V1 => PathBuf::from("/sys/fs/cgroup/net_cls"),
-        Version::None => anyhow::bail!("cgroup is not available"),
-    };
-    let dir = root.join(name);
+/// Place the core process into a cgroup and report where it landed.
+///
+/// Candidates are tried deepest-first: `services/<name>`, then `services`, then
+/// `<name>` directly under the root — the shallower ones still work when the
+/// parent cannot be created (read-only, nested delegation, systemd layout).
+pub fn enter(name: &str, classid: &str) -> anyhow::Result<Placement> {
     let pid = std::process::id();
+    let mut errors: Vec<String> = Vec::new();
 
-    // Parent may be read-only (e.g. a delegated sub-cgroup); nexa then writes
-    // into the parent itself so the match still resolves.
-    if let Err(e) = fs::create_dir_all(&dir) {
-        warn!(
-            err = %e,
-            dir = %dir.display(),
-            "ip-auto-route: cannot create cgroup dir, writing into the parent instead"
-        );
-        write_procs(&root, pid)?;
-        return Ok(());
-    }
-    if version == Version::V1 && !classid.is_empty() {
-        if let Err(e) = fs::write(dir.join("net_cls.classid"), classid) {
-            warn!(err = %e, "ip-auto-route: net_cls.classid write failed");
+    for root in ["/sys/fs/cgroup", "/sys/fs/cgroup/unified"] {
+        for rel in [
+            format!("services/{name}"),
+            "services".to_string(),
+            name.to_string(),
+        ] {
+            match try_place(Path::new(root), &rel, pid) {
+                Ok(()) => {
+                    let level = rel.split('/').filter(|s| !s.is_empty()).count().max(1);
+                    return Ok(Placement {
+                        path: rel,
+                        level,
+                        version: Version::V2,
+                    });
+                }
+                Err(e) => errors.push(format!("{root}/{rel}: {e}")),
+            }
         }
     }
+    // cgroup v1 (net_cls): iptables can express this too, nft uses the classid.
+    let v1root = Path::new("/sys/fs/cgroup/net_cls");
+    match try_place(v1root, name, pid) {
+        Ok(()) => {
+            if !classid.is_empty() {
+                if let Err(e) = fs::write(v1root.join(name).join("net_cls.classid"), classid) {
+                    warn!(err = %e, "ip-auto-route: net_cls.classid write failed");
+                }
+            }
+            return Ok(Placement {
+                path: name.to_string(),
+                level: 1,
+                version: Version::V1,
+            });
+        }
+        Err(e) => errors.push(format!("{}/{name}: {e}", v1root.display())),
+    }
+
+    anyhow::bail!("no writable cgroup accepted this process [{}]", errors.join("; "))
+}
+
+/// `mkdir -p <root>/<rel>` then write the PID into its `cgroup.procs`.
+fn try_place(root: &Path, rel: &str, pid: u32) -> anyhow::Result<()> {
+    let dir = root.join(rel);
+    fs::create_dir_all(&dir)
+        .map_err(|e| anyhow::anyhow!("mkdir {} ({e})", dir.display()))?;
     write_procs(&dir, pid)?;
     info!(
         path = %dir.display(),
         pid,
-        version = ?version,
         "ip-auto-route: core process placed into cgroup (loop prevention)"
     );
     Ok(())
@@ -112,7 +153,10 @@ pub fn join(name: &str, version: Version, classid: &str) -> anyhow::Result<()> {
 
 fn write_procs(dir: &Path, pid: u32) -> anyhow::Result<()> {
     let path = dir.join("cgroup.procs");
-    let mut f = fs::OpenOptions::new().write(true).open(&path)?;
-    writeln!(f, "{pid}")?;
+    let mut f = fs::OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .map_err(|e| anyhow::anyhow!("open {} ({e})", path.display()))?;
+    writeln!(f, "{pid}").map_err(|e| anyhow::anyhow!("write {} ({e})", path.display()))?;
     Ok(())
 }

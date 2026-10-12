@@ -141,8 +141,8 @@ fn identity_bypass(p: &Params, scope: Scope) -> String {
         BypassType::Cgroup => {
             if p.cgroup_v2 {
                 s.push_str(&format!(
-                    "\t\tsocket cgroupv2 level 2 \"services/{}\" counter return\n",
-                    p.cgroup_name
+                    "\t\tsocket cgroupv2 level {} \"{}\" counter return\n",
+                    p.cgroup_level, p.cgroup_path
                 ));
             } else {
                 s.push_str(&format!(

@@ -655,9 +655,9 @@ fn build_bypass(w: &W, caps: &Caps, target: (&str, &str), p: &Params, scope: Sco
         let mut used_cgroup = false;
         if p.bypass_type == BypassType::Cgroup {
             if caps.supports_match(w.bin, "cgroup", "--path") {
-                let path = format!("services/{}", p.cgroup_name);
                 w.run(&[
-                    "-t", table, "-A", chain, "-m", "cgroup", "--path", &path, "-j", "RETURN",
+                    "-t", table, "-A", chain, "-m", "cgroup", "--path", &p.cgroup_path, "-j",
+                    "RETURN",
                 ]);
                 used_cgroup = true;
             } else {
