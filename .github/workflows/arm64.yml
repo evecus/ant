@@ -1,0 +1,50 @@
+name: Build Linux ARM64
+on:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-aarch64:
+    name: linux-aarch64
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-musl
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-aarch64-unknown-linux-musl-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-aarch64-unknown-linux-musl-cargo-
+
+      - name: Install cross
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross
+
+      - name: Build release (aarch64)
+        run: cross build --release --target aarch64-unknown-linux-musl --locked
+
+      - run: |
+          mkdir -p dist
+          cp target/aarch64-unknown-linux-musl/release/ant dist/ant-linux-arm64
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: bin
+          prerelease: false
+          files: dist/ant-*
