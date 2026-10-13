@@ -146,10 +146,9 @@ netlink-packet-route = "0.19"
 
 [profile.release]
 lto = true
+codegen-units = 1
 panic = "abort"
-strip = "symbols"
-debug = false
-incremental = false
+strip = true
 
 # macOS TUN: ioctl address/MTU setup (sing-tun tun_darwin.go equivalent)
 [target.'cfg(target_os = "macos")'.dependencies]
