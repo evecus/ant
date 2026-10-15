@@ -295,7 +295,11 @@ pub fn udp_decide<S: ProxySink>(ctx: &TcContext, tuple: &TuplesKey) -> Verdict {
         return apply_cached::<S>(ctx, tuple, &state);
     }
     let (_, dip) = tuple_addrs(tuple);
-    let decision = route_decision(&dip)?;
+    let Some(decision) = route_decision(&dip) else {
+        // No routing table published yet (not ready, or the default entry is
+        // missing): pass the packet through so the nft fallback handles it.
+        return Err(TC_ACT_OK);
+    };
     apply_decision::<S>(ctx, tuple, decision, IPPROTO_UDP)
 }
 
@@ -303,7 +307,10 @@ pub fn udp_decide<S: ProxySink>(ctx: &TcContext, tuple: &TuplesKey) -> Verdict {
 #[inline(always)]
 pub fn tcp_new_flow<S: ProxySink>(ctx: &TcContext, tuple: &TuplesKey) -> Verdict {
     let (_, dip) = tuple_addrs(tuple);
-    let decision = route_decision(&dip)?;
+    let Some(decision) = route_decision(&dip) else {
+        // See `udp_decide`: unpublished table → nft fallback.
+        return Err(TC_ACT_OK);
+    };
     apply_decision::<S>(ctx, tuple, decision, IPPROTO_TCP)
 }
 

@@ -240,8 +240,9 @@ fn do_tproxy_wan_egress(ctx: &TcContext, link_h_len: u32) -> Verdict {
         return Err(TC_ACT_OK);
     }
     // Connections to ant's own management IP would loop back into the
-    // datapath (honk's `param.local_ip` check).
-    if param.local_ip != 0 && is_v4 && unsafe { dip.u6_addr32[3] } == param.local_ip {
+    // datapath (honk's `param.local_ip` check). `dip` is the raw address
+    // words; for IPv4 the mapped word is the last one.
+    if param.local_ip != 0 && is_v4 && dip[3] == param.local_ip {
         return Err(TC_ACT_OK);
     }
 
