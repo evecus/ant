@@ -1,0 +1,67 @@
+name: Build Linux ARM64
+on:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-aarch64:
+    name: linux-aarch64
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-musl
+
+      - name: Install bpf-linker
+        uses: taiki-e/install-action@v2
+        with:
+          tool: bpf-linker
+
+      - name: Prebuild eBPF object (host)
+        run: |
+          CHANNEL=$(grep -E '^\s*channel' src/ebpf/program/rust-toolchain.toml | sed -E 's/.*"(.*)".*/\1/')
+          rustup toolchain install "$CHANNEL" --profile minimal --component rust-src --component llvm-tools
+          cd src/ebpf/program
+          env -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS \
+            CARGO_TARGET_DIR="$PWD/target" \
+            cargo +"$CHANNEL" build --release -Zbuild-std=core --target bpfel-unknown-none
+          # build.rs 用这个文件判断对象是否可复用（内容必须与 channel 完全一致，无换行）
+          printf '%s' "$CHANNEL" > target/bpfel-unknown-none/release/ant-ebpf.toolchain
+          ls -l target/bpfel-unknown-none/release/ant-ebpf*
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-aarch64-unknown-linux-musl-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-aarch64-unknown-linux-musl-cargo-
+
+      - name: Install cross
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross
+
+      - name: Build release (aarch64)
+        run: cross build --release --target aarch64-unknown-linux-musl --locked --features ebpf
+
+      - run: |
+          mkdir -p dist
+          cp target/aarch64-unknown-linux-musl/release/ant dist/ant-linux-arm64-ebpf
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: bin
+          prerelease: false
+          files: dist/ant-*

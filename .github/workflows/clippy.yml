@@ -1,0 +1,43 @@
+name: Clippy
+
+on:
+  workflow_dispatch:
+
+jobs:
+  clippy:
+    name: clippy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Install eBPF nightly toolchain
+        run: |
+          CHANNEL=$(grep -E '^\s*channel' src/ebpf/program/rust-toolchain.toml | sed -E 's/.*"(.*)".*/\1/')
+          rustup toolchain install "$CHANNEL" --profile minimal --component rust-src --component llvm-tools
+
+      - name: Install bpf-linker
+        uses: taiki-e/install-action@v2
+        with:
+          tool: bpf-linker
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+            src/ebpf/program/target/
+          key: ${{ runner.os }}-clippy-${{ hashFiles('**/Cargo.lock', 'src/ebpf/program/rust-toolchain.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-clippy-
+
+      - name: Clippy
+        run: cargo clippy --all-targets --locked --features ebpf -- -D warnings
