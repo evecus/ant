@@ -1,0 +1,171 @@
+name: ruleset
+
+on:
+  workflow_dispatch:       # 支持手动触发
+
+permissions:
+  contents: write          # 需要推送到 ruleset 分支
+
+jobs:
+  sync:
+    name: Sync & compile rulesets (.ars)
+    runs-on: ubuntu-latest
+
+    steps:
+      # ── 1. 下载本仓库最新 release 的 ant-linux-x86_64 ────────────────────────
+      - name: Download latest ant binary
+        run: |
+          set -euo pipefail
+          DOWNLOAD_URL=$(curl -sSf \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            "https://api.github.com/repos/${{ github.repository }}/releases/latest" \
+            | jq -r '[.assets[] | select(.name | startswith("ant-linux-x86_64"))][0].browser_download_url // empty')
+
+          if [ -z "$DOWNLOAD_URL" ]; then
+            echo "::error::No ant-linux-x86_64 release asset found"
+            exit 1
+          fi
+
+          echo "Downloading: $DOWNLOAD_URL"
+          mkdir -p dl
+          curl -sSfL "$DOWNLOAD_URL" -o "dl/asset"
+
+          # 兼容：直接是二进制，或是 tar.gz / zip 压缩包
+          case "$DOWNLOAD_URL" in
+            *.tar.gz|*.tgz) tar -xzf dl/asset -C dl ;;
+            *.zip)          unzip -q -o dl/asset -d dl ;;
+            *)              cp dl/asset dl/ant ;;
+          esac
+
+          ANT_BIN=$(find dl -type f -name ant | head -n1)
+          if [ -z "$ANT_BIN" ]; then
+            echo "::error::ant binary not found in downloaded asset"
+            exit 1
+          fi
+          cp "$ANT_BIN" ./ant
+          chmod +x ./ant
+          ./ant ruleset-convert --help | head -n 5
+
+      # ── 2. 拉取 meta-rules-dat sing 分支 ──────────────────────────────────
+      - name: Checkout meta-rules-dat (sing branch)
+        uses: actions/checkout@v4
+        with:
+          repository: MetaCubeX/meta-rules-dat
+          ref: sing
+          path: meta-rules-dat
+          # 只拉取规则目录，节省时间
+          sparse-checkout: |
+            geo/geosite
+            geo/geoip
+          sparse-checkout-cone-mode: false
+
+      # ── 3. 编译 geosite JSON → geosite-<name>.ars ─────────────────────────
+      - name: Compile geosite rules
+        run: |
+          GEOSITE_SRC="meta-rules-dat/geo/geosite"
+          GEOSITE_OUT="out/geosite"
+          mkdir -p "$GEOSITE_OUT"
+
+          ok=0; fail=0
+          for json_file in "$GEOSITE_SRC"/*.json; do
+            [ -f "$json_file" ] || continue
+            base=$(basename "$json_file" .json)
+            ars_file="$GEOSITE_OUT/geosite-${base}.ars"
+
+            if ./ant ruleset-convert -i "$json_file" -o "$ars_file"; then
+              ok=$((ok + 1))
+            else
+              echo "::warning::Failed to compile geosite/${base}.json"
+              rm -f "$ars_file"
+              fail=$((fail + 1))
+            fi
+          done
+
+          echo "geosite: compiled $ok files, $fail failed"
+          ls -lh "$GEOSITE_OUT" | tail -5
+
+      # ── 4. 编译 geoip JSON → geoip-<name>.ars ─────────────────────────────
+      - name: Compile geoip rules
+        run: |
+          GEOIP_SRC="meta-rules-dat/geo/geoip"
+          GEOIP_OUT="out/geoip"
+          mkdir -p "$GEOIP_OUT"
+
+          ok=0; fail=0
+          for json_file in "$GEOIP_SRC"/*.json; do
+            [ -f "$json_file" ] || continue
+            base=$(basename "$json_file" .json)
+            ars_file="$GEOIP_OUT/geoip-${base}.ars"
+
+            if ./ant ruleset-convert -i "$json_file" -o "$ars_file"; then
+              ok=$((ok + 1))
+            else
+              echo "::warning::Failed to compile geoip/${base}.json"
+              rm -f "$ars_file"
+              fail=$((fail + 1))
+            fi
+          done
+
+          echo "geoip: compiled $ok files, $fail failed"
+          ls -lh "$GEOIP_OUT" | tail -5
+
+      # ── 5. 检出本仓库的 ruleset 分支（不存在则自动建立孤立分支）──────────
+      - name: Checkout or create ruleset branch
+        run: |
+          git clone https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git ruleset-branch
+          cd ruleset-branch
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          if git ls-remote --heads origin ruleset | grep -q ruleset; then
+            echo "Branch 'ruleset' exists, checking out..."
+            git checkout ruleset
+          else
+            echo "Branch 'ruleset' does not exist, creating orphan branch..."
+            git checkout --orphan ruleset
+            git rm -rf .
+
+            echo "# Ant Ruleset" > README.md
+            echo "" >> README.md
+            echo "Auto-synced from [MetaCubeX/meta-rules-dat](https://github.com/MetaCubeX/meta-rules-dat) (sing branch), compiled to .ars." >> README.md
+
+            git add README.md
+            git commit -m "chore: initialize ruleset branch"
+            git push -u origin ruleset
+          fi
+
+      # ── 6. 将 .ars 同步到 ruleset 分支（不含 json）────────────────────────
+      - name: Sync files to ruleset branch
+        run: |
+          cd ruleset-branch
+
+          mkdir -p geosite geoip
+
+          # 先清空旧文件（含历史遗留的 json / rrs / ars），保证删除的规则不残留
+          rm -f geosite/*.json geosite/*.rrs geosite/*.ars
+          rm -f geoip/*.json   geoip/*.rrs   geoip/*.ars
+
+          cp ../out/geosite/*.ars geosite/ 2>/dev/null || true
+          cp ../out/geoip/*.ars   geoip/   2>/dev/null || true
+
+          echo "geosite: $(ls geosite/*.ars 2>/dev/null | wc -l) ars"
+          echo "geoip:   $(ls geoip/*.ars   2>/dev/null | wc -l) ars"
+
+      # ── 7. 提交并推送（内容无变化时跳过）─────────────────────────────────
+      - name: Commit and push
+        run: |
+          cd ruleset-branch
+
+          git add -A geosite/ geoip/
+
+          if git diff --cached --quiet; then
+            echo "No changes detected, skipping commit."
+            exit 0
+          fi
+
+          META_SHA=$(cd ../meta-rules-dat && git rev-parse --short HEAD)
+          DATE=$(date -u +"%Y-%m-%d")
+
+          git commit -m "chore: sync ruleset ${DATE} (meta-rules-dat@${META_SHA})"
+          git push origin ruleset

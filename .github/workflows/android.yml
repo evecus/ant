@@ -1,0 +1,99 @@
+name: Build Android
+
+on:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+
+  build-android:
+    name: android-aarch64
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - name: Setup Android NDK
+        uses: nttld/setup-ndk@v1
+        id: ndk
+        with:
+          ndk-version: r27c
+          add-to-path: true
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-aarch64-linux-android-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-aarch64-linux-android-cargo-
+
+      - name: Install cargo-ndk
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-ndk
+
+      # NDK r23+ dropped libgcc, but rustc still links -lgcc for android.
+      # Patch every NDK dir containing libunwind.a with a libgcc.a stub that
+      # redirects to -lunwind (same trick as the openlist-rs release workflow).
+      - name: Workaround NDK r23+ missing libgcc
+        shell: bash
+        run: |
+          NDK_HOME="${{ steps.ndk.outputs.ndk-path }}"
+          find "${NDK_HOME}" -name "libunwind.a" -print | while read -r f; do
+            dir=$(dirname "$f")
+            echo "INPUT(-lunwind)" > "${dir}/libgcc.a"
+            echo "Patched: ${dir}/libgcc.a"
+          done
+
+      # Android kernel is Linux: tproxy/redir inbounds compile on
+      # aarch64-linux-android (run via iptables TPROXY, e.g. with root).
+      - name: Build release (aarch64-android)
+        run: cargo ndk --target aarch64-linux-android --platform 24 build --release --locked
+        env:
+          ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
+
+      - run: |
+          mkdir -p dist
+          cp target/aarch64-linux-android/release/ant dist/libant.so
+          cp target/aarch64-linux-android/release/ant dist/ant-android-arm64
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: bin
+          prerelease: false
+          files: dist/ant-*
+
+      - name: Checkout afa branch
+        uses: actions/checkout@v4
+        with:
+          ref: afa
+          path: afa-branch
+          fetch-depth: 0
+
+      - name: Push libant.so to afa branch (jniLibs/arm64-v8a)
+        run: |
+          mkdir -p afa-branch/app/src/main/jniLibs/arm64-v8a
+          cp dist/libant.so afa-branch/app/src/main/jniLibs/arm64-v8a/libant.so
+          cd afa-branch
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add app/src/main/jniLibs/arm64-v8a/libant.so
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "chore: update libant.so (arm64-v8a) from CI"
+            git push origin afa
+          fi
