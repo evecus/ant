@@ -1,4 +1,4 @@
-name: Build Linux ARM64 glibc
+name: Build Linux ARM64 gnu
 on:
   workflow_dispatch:
 
@@ -16,7 +16,7 @@ jobs:
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-unknown-linux-glibc
+          targets: aarch64-unknown-linux-gnu
 
       - name: Cache cargo registry
         uses: actions/cache@v4
@@ -26,9 +26,9 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: ${{ runner.os }}-aarch64-unknown-linux-glibc-cargo-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-aarch64-unknown-linux-gnu-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-aarch64-unknown-linux-glibc-cargo-
+            ${{ runner.os }}-aarch64-unknown-linux-gnu-cargo-
 
       - name: Install cross
         uses: taiki-e/install-action@v2
@@ -36,11 +36,11 @@ jobs:
           tool: cross
 
       - name: Build release (aarch64)
-        run: cross build --release --target aarch64-unknown-linux-glibc --locked
+        run: cross build --release --target aarch64-unknown-linux-gnu --locked
 
       - run: |
           mkdir -p dist
-          cp target/aarch64-unknown-linux-glibc/release/ant dist/ant-linux-arm64-glibc
+          cp target/aarch64-unknown-linux-gnu/release/ant dist/ant-linux-arm64-gnu
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
