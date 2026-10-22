@@ -2234,6 +2234,19 @@ impl Config {
                     "ip-auto-route.enable is mutually exclusive with tun.auto-redirect; disable one of them"
                 );
             }
+            // External TUN fd (Android VpnService / sing-tun FileDescriptor):
+            // the OS already owns addresses + routing, and `tun::run_tun`
+            // force-disables tun.auto-route in that mode. ip-auto-route would
+            // install a second, conflicting control plane (fwmark rules,
+            // catch-all into our own table) — reject explicitly instead of
+            // letting the two diverge.
+            if self.tun.enable && self.tun.is_external_fd() {
+                bail!(
+                    "ip-auto-route.enable is mutually exclusive with an external TUN \
+                     file-descriptor (tun.file-descriptor / ANT_TUN_FD); the OS/VpnService \
+                     owns routing in that mode"
+                );
+            }
 
             let tcp = iar
                 .tcp_mode
