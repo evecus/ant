@@ -200,7 +200,7 @@ fn default_tun_mtu() -> u32 {
     1500
 }
 
-/// Linux system-wide transparent proxy control plane (`ip-auto-route:`).
+/// Linux/Android system-wide transparent proxy control plane (`ip-auto-route:`).
 ///
 /// Deploys nftables (preferred) or iptables + policy routing via rtnetlink.
 /// Mutually exclusive with `tun.auto-route` / `tun.auto-redirect`.
@@ -2208,7 +2208,7 @@ impl Config {
     /// Validate `ip-auto-route:` against mutual exclusion and required base configs.
     ///
     /// `&mut self` because it may auto-assign `global.mark` (loop prevention).
-    // 非 Linux 上首个块直接 bail!，末尾的 `Ok(())` 不可达（clippy -D warnings）。
+    // 非 Linux/Android 上首个块直接 bail!，末尾的 `Ok(())` 不可达（clippy -D warnings）。
     #[allow(unreachable_code)]
     fn validate_ip_auto_route(&mut self) -> Result<()> {
         let iar = &self.ip_auto_route;
@@ -2216,12 +2216,12 @@ impl Config {
             return Ok(());
         }
 
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", target_os = "android")))]
         {
-            bail!("ip-auto-route is only supported on Linux");
+            bail!("ip-auto-route is only supported on Linux and Android");
         }
 
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "android"))]
         {
             // Mutual exclusion with TUN auto-route / auto-redirect.
             if self.tun.auto_route {

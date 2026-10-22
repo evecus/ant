@@ -7,7 +7,7 @@ mod app;
 mod config;
 mod dns;
 mod inbound;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 mod ip_auto_route;
 #[cfg(any(target_os = "linux", target_os = "android", target_os = "windows", target_os = "macos"))]
 mod tun;
@@ -402,9 +402,9 @@ async fn main() -> Result<()> {
         );
     }
 
-    // System-wide transparent proxy (Linux): nft/iptables + policy routing.
+    // System-wide transparent proxy (Linux/Android): nft/iptables + policy routing.
     // On failure: cleanup partial state and abort startup.
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     let _ip_auto_route_guard = if cfg.ip_auto_route.enable {
         Some(
             ip_auto_route::apply(&cfg)
