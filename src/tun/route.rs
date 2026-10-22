@@ -13,7 +13,7 @@
 use crate::config::TunConfig;
 use anyhow::{Context, Result};
 use std::net::IpAddr;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::process::Command;
 use tracing::info;
@@ -1088,8 +1088,6 @@ async fn install_android(
     use crate::tun::marks::{DEFAULT_ANDROID_RULE_PRIORITY, DEFAULT_TABLE};
     use futures::stream::TryStreamExt;
     use netlink_packet_route::rule::RuleAction;
-    use std::net::{Ipv4Addr, Ipv6Addr};
-    use tracing::warn;
 
     let table = if cfg.iproute2_table_index != 0 {
         cfg.iproute2_table_index as u32
