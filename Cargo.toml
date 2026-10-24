@@ -10,7 +10,19 @@ repository = "https://github.com/aazz77/ant"
 name = "ant"
 path = "src/main.rs"
 
+[features]
+default = []
+# Use jemalloc as the global allocator (recommended on Linux for better
+# multi-threaded allocation performance). Disabled by default so that
+# Windows MSVC / Android NDK builds stay simple; enable with:
+#   cargo build --release --features jemalloc
+jemalloc = ["dep:tikv-jemallocator"]
+
 [dependencies]
+# Optional high-performance allocator (Linux/macOS/musl recommended).
+# Enabled only when building with `--features jemalloc`.
+tikv-jemallocator = { version = "0.6", optional = true }
+
 brotli-decompressor = "4"
 tokio = { version = "1.35", features = ["full"] }
 tokio-util = { version = "0.7", features = ["codec", "net", "io"] }
