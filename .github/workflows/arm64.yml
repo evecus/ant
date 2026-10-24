@@ -36,11 +36,11 @@ jobs:
           tool: cross
 
       - name: Build release (aarch64)
-        run: cross build --release --target aarch64-unknown-linux-musl --locked
+        run: cross build --release --target aarch64-unknown-linux-musl --features jemalloc --locked
 
       - run: |
           mkdir -p dist
-          cp target/aarch64-unknown-linux-musl/release/ant dist/ant-linux-arm64
+          cp target/aarch64-unknown-linux-musl/release/ant dist/ant-linux-arm64-jemalloc
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
