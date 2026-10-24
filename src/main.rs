@@ -1,3 +1,9 @@
+// Optional jemalloc global allocator (enable with `--features jemalloc`).
+// Skipped on MSVC targets where jemalloc support is weaker / requires extra setup.
+#[cfg(all(feature = "jemalloc", not(target_env = "msvc")))]
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
