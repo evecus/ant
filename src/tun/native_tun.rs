@@ -92,8 +92,12 @@ impl NativeTun {
         darwin_batch::configure_fd(fd, mtu, rcvbuf)?;
 
         let batch_size = darwin_batch::batch_size_for_mtu(mtu);
-        let async_fd = AsyncFd::new(fd).map_err(|e| {
-            io::Error::new(e.kind(), format!("AsyncFd for utun: {e}"))
+        // SAFETY: `fd` is a valid open utun descriptor. `OwnedTunFd` below
+        // keeps it open for the lifetime of this AsyncFd; we never replace
+        // the FD number (tokio AsyncFd::register I/O-safety, see #8587).
+        let async_fd = unsafe { AsyncFd::register(fd) }.map_err(|e| {
+            let err = std::io::Error::from(e);
+            io::Error::new(err.kind(), format!("AsyncFd for utun: {err}"))
         })?;
 
         let write_gate = Arc::new(WriteGate::new());

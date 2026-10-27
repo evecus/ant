@@ -215,7 +215,10 @@ async fn run_icmp_flow(
         Socket::new(Domain::IPV4, Type::RAW, Some(Protocol::from(1)))?
     };
     sock.set_nonblocking(true)?;
-    let async_fd = AsyncFd::new(sock)?;
+    // SAFETY: `sock` is a freshly created, owned `socket2::Socket`. Ownership
+    // moves into AsyncFd; the FD is not closed or replaced until AsyncFd drops
+    // (tokio AsyncFd::register I/O-safety requirement, see #8587).
+    let async_fd = unsafe { AsyncFd::register(sock) }.map_err(std::io::Error::from)?;
 
     loop {
         tokio::select! {
