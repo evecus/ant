@@ -63,7 +63,7 @@ jobs:
       - name: Compile geosite rules
         run: |
           GEOSITE_SRC="meta-rules-dat/geo/geosite"
-          GEOSITE_OUT="out/geosite"
+          GEOSITE_OUT="out/domain"
           mkdir -p "$GEOSITE_OUT"
 
           ok=0; fail=0
@@ -88,7 +88,7 @@ jobs:
       - name: Compile geoip rules
         run: |
           GEOIP_SRC="meta-rules-dat/geo/geoip"
-          GEOIP_OUT="out/geoip"
+          GEOIP_OUT="out/ip"
           mkdir -p "$GEOIP_OUT"
 
           ok=0; fail=0
@@ -140,24 +140,24 @@ jobs:
         run: |
           cd ruleset-branch
 
-          mkdir -p geosite geoip
+          mkdir -p domain ip
 
           # 先清空旧文件（含历史遗留的 json / rrs / ars），保证删除的规则不残留
-          rm -f geosite/*.json geosite/*.rrs geosite/*.ars
-          rm -f geoip/*.json   geoip/*.rrs   geoip/*.ars
+          rm -f domain/*.json domain/*.rrs domain/*.ars
+          rm -f ip/*.json   ip/*.rrs   ip/*.ars
 
-          cp ../out/geosite/*.ars geosite/ 2>/dev/null || true
-          cp ../out/geoip/*.ars   geoip/   2>/dev/null || true
+          cp ../out/domain/*.ars domain/ 2>/dev/null || true
+          cp ../out/ip/*.ars   ip/   2>/dev/null || true
 
-          echo "geosite: $(ls geosite/*.ars 2>/dev/null | wc -l) ars"
-          echo "geoip:   $(ls geoip/*.ars   2>/dev/null | wc -l) ars"
+          echo "domain: $(ls domain/*.ars 2>/dev/null | wc -l) ars"
+          echo "ip:   $(ls ip/*.ars   2>/dev/null | wc -l) ars"
 
       # ── 7. 提交并推送（内容无变化时跳过）─────────────────────────────────
       - name: Commit and push
         run: |
           cd ruleset-branch
 
-          git add -A geosite/ geoip/
+          git add -A domain/ ip/
 
           if git diff --cached --quiet; then
             echo "No changes detected, skipping commit."
