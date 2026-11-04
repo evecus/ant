@@ -171,8 +171,16 @@ fn split_host_port(s: &str) -> (String, Option<u16>) {
         return (host.to_string(), port);
     }
     match s.rsplit_once(':') {
-        Some((h, p)) if !h.is_empty() && p.chars().all(|c| c.is_ascii_digit()) => {
-            (h.to_string(), p.parse().ok())
+        Some((h, p)) if !h.is_empty() => {
+            // `host:443/?insecure=1` — generators put a path separator before
+            // the query; strip it so the port still parses (a base64 blob
+            // legacy `ss://` payload never contains `:`, so this is safe).
+            let p = p.strip_suffix('/').unwrap_or(p);
+            if !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()) {
+                (h.to_string(), p.parse().ok())
+            } else {
+                (s.to_string(), None)
+            }
         }
         _ => (s.to_string(), None),
     }
@@ -791,6 +799,31 @@ mod tests {
         assert_eq!(c.fingerprint.as_deref(), Some("deadbeef"));
         assert_eq!(c.name, "香港");
         assert!(c.tls);
+    }
+
+    #[test]
+    fn parses_links_with_path_separator_before_query() {
+        // v2rayN / sing-box generators emit `host:443/?insecure=1&...`
+        for link in [
+            "hysteria2://pass@h2.example.com:8443/?insecure=1&sni=real.example.com#HK",
+            "hysteria2://pass@h2.example.com:8443/?insecure=1&sni=real.example.com",
+        ] {
+            let c = from_link(link).unwrap();
+            assert_eq!(c.server, "h2.example.com");
+            assert_eq!(c.port, 8443);
+            assert_eq!(c.password.as_deref(), Some("pass"));
+            assert!(c.skip_cert_verify);
+        }
+        // trailing slash without query
+        let c = from_link("hysteria2://pass@h2.example.com:8443/#HK").unwrap();
+        assert_eq!(c.server, "h2.example.com");
+        assert_eq!(c.port, 8443);
+        // vless with trailing slash
+        let c = from_link("vless://uuid@v.example.com:443/?security=tls&sni=v.example.com&type=ws&path=/ws#V").unwrap();
+        assert_eq!(c.server, "v.example.com");
+        assert_eq!(c.port, 443);
+        assert!(c.tls);
+        assert_eq!(c.ws_path.as_deref(), Some("/ws"));
     }
 
     #[test]
