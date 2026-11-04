@@ -16,7 +16,13 @@ APK (Kotlin)
 ## Features
 
 - Start / stop VPN (system VpnService)
-- **Import config**: pick a local YAML file (mihomo-style); auto-injects TUN block if missing
+- **零配置使用**：内置「绕过大陆」配置模板（master 分支 config.example.yaml 模式）与
+  内置规则集 `geosite-cn.ars` / `geoip-cn.ars`（ruleset 分支）
+- **导入节点链接**：粘贴 `vless://` 等分享链接（支持 vmess / ss / trojan /
+  hysteria2 / tuic / anytls 等，多行 / base64 订阅均可），写入
+  `proxy-providers`（type: file）即可使用
+- 路由策略：国内域名 + 国内 IP **直连**，其余全部走 `PROXY` 组
+- TUN 参数（stack / mtu / dns-hijack / log-level）由应用统一管理
 - Live process log
 - Bundled `ant` aarch64 binary (built in CI)
 
@@ -52,6 +58,20 @@ cd ant-android
 
 ## Config notes
 
+配置完全由应用内置生成（`assets/config-template.yaml`），用户只需「导入节点」粘贴分享链接：
+
+```yaml
+route:
+  - RULE-SET,geosite-cn,DIRECT
+  - RULE-SET,geoip-cn,DIRECT,no-resolve
+  - MATCH,PROXY
+```
+
+- 内置规则集释放到 `files/rules/`，节点链接写入 `files/providers/nodes.txt`
+  （`proxy-providers.nodes`，type: file）
+- 未导入节点时 `PROXY` 组回落为 DIRECT
+- 导入或修改设置后，重启 VPN 生效（每次启动都会重新生成 config.yaml）
+
 TUN must match VpnService:
 
 ```yaml
@@ -66,7 +86,7 @@ tun:
 
 Do **not** set `file-descriptor` in YAML — the FD is passed via `ANT_TUN_FD` at runtime.
 
-After **Import Config**, stop and start VPN to apply.
+导入节点后，重启 VPN 生效。
 
 ## Limitations (v0.1)
 

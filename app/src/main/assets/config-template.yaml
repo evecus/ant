@@ -1,0 +1,54 @@
+# AFA 内置「绕过大陆」配置模板（基于 ant master 分支 config.example.yaml 模式）
+# 应用启动时由 ConfigManager 生成最终 config.yaml：
+#   __FILES_DIR__        → 应用私有目录绝对路径
+#   # __PROXY_PROVIDER__ → 有节点时替换为 proxy-providers 段，否则删除
+#   # __USE_NODES__      → 有节点时替换为 PROXY 组的 use: [nodes]，否则删除
+# 内置规则集：geosite-cn.ars / geoip-cn.ars（assets/rules → files/rules）
+# 路由策略：国内域名 + 国内 IP 直连，其余全部走 PROXY 组。
+
+log-level: info
+api: "127.0.0.1:9095"
+mixed-port: 7898
+sniff: true
+
+dns:
+  port: 5353
+  default-nameserver: "223.5.5.5:53"
+  rule-follow-route: true
+  direct-nameserver: "223.5.5.5:53"
+  proxy-nameserver: "https://1.1.1.1/dns-query"
+
+# __PROXY_PROVIDER__
+
+proxy-groups:
+  - name: PROXY
+    type: select
+    proxies:
+      - DIRECT
+    # __USE_NODES__
+
+rule-providers:
+  geosite-cn:
+    type: file
+    behavior: domain
+    path: __FILES_DIR__/rules/geosite-cn.ars
+  geoip-cn:
+    type: file
+    behavior: ip
+    path: __FILES_DIR__/rules/geoip-cn.ars
+
+route:
+  - RULE-SET,geosite-cn,DIRECT
+  - RULE-SET,geoip-cn,DIRECT,no-resolve
+  - MATCH,PROXY
+
+tun:
+  enable: true
+  close-fd-on-drop: false
+  address:
+    - 172.19.0.1/30
+  mtu: 1500
+  dns-hijack:
+    - any:53
+  auto-route: false
+  auto-detect-interface: true

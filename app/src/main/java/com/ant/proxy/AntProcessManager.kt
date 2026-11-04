@@ -35,7 +35,6 @@ class AntProcessManager(private val context: Context) {
         const val TUN_ADDRESS = "172.19.0.1"
         const val TUN_PREFIX = 30
         const val TUN_MTU = 1500
-        const val API_ADDR = "127.0.0.1:9095"
 
         // 托管设置（设置页写入，启动 VPN 时应用到配置文件）
         const val SETTINGS_NAME = "settings"
@@ -111,51 +110,6 @@ class AntProcessManager(private val context: Context) {
         }
         Log.i(TAG, "Extracted ant → ${dest.absolutePath} exec=${dest.canExecute()}")
         return dest
-    }
-
-    fun writeDefaultConfigIfNeeded() {
-        val cfg = File(context.filesDir, CONFIG_NAME)
-        if (cfg.exists() && cfg.length() > 0) return
-
-        val yaml = """
-            |log-level: info
-            |api: "$API_ADDR"
-            |mixed-port: 7890
-            |
-            |tun:
-            |  enable: true
-            |  close-fd-on-drop: false
-            |  address:
-            |    - $TUN_ADDRESS/$TUN_PREFIX
-            |  mtu: $TUN_MTU
-            |  dns-hijack:
-            |    - any:53
-            |  auto-route: false
-            |  auto-detect-interface: true
-            |
-            |dns:
-            |  enable: true
-            |  listen: 0.0.0.0:1053
-            |  enhanced-mode: fake-ip
-            |  nameserver:
-            |    - 8.8.8.8
-            |    - 1.1.1.1
-            |
-            |proxies: []
-            |
-            |proxy-groups:
-            |  - name: PROXY
-            |    type: select
-            |    proxies:
-            |      - DIRECT
-            |
-            |route:
-            |  - MATCH,PROXY
-            |
-        """.trimMargin()
-
-        cfg.writeText(yaml)
-        Log.i(TAG, "Wrote default config → ${cfg.absolutePath}")
     }
 
     /**
@@ -237,7 +191,9 @@ class AntProcessManager(private val context: Context) {
             return false
         }
 
-        writeDefaultConfigIfNeeded()
+        // 内置规则集释放 + 从内置模板重新生成配置（绕过大陆）
+        if (!ConfigManager.ensureAssets(context, onLog)) return false
+        if (!ConfigManager.regenerateConfig(context, onLog)) return false
         // TUN 参数由应用统一管理：每次启动都覆盖配置文件中的 tun 段
         applyManagedConfig(onLog)
         val configFile = File(context.filesDir, CONFIG_NAME)

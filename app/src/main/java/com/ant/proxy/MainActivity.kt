@@ -2,25 +2,24 @@ package com.ant.proxy
 
 import android.Manifest
 import android.content.BroadcastReceiver
+import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.content.res.ColorStateList
-import android.net.Uri
 import android.net.VpnService
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
-import android.provider.OpenableColumns
+import android.widget.EditText
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import com.ant.proxy.databinding.ActivityMainBinding
-import java.io.File
-import java.io.FileOutputStream
+import com.google.android.material.dialog.MaterialAlertDialogBuilder
 
 class MainActivity : AppCompatActivity() {
 
@@ -48,13 +47,6 @@ class MainActivity : AppCompatActivity() {
         ActivityResultContracts.RequestPermission()
     ) { /* optional */ }
 
-    private val importConfigLauncher = registerForActivityResult(
-        ActivityResultContracts.OpenDocument()
-    ) { uri: Uri? ->
-        if (uri == null) return@registerForActivityResult
-        importConfigFromUri(uri)
-    }
-
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         binding = ActivityMainBinding.inflate(layoutInflater)
@@ -68,6 +60,8 @@ class MainActivity : AppCompatActivity() {
                 prepareAndStart()
             }
         }
+
+        binding.btnImport.setOnClickListener { showImportDialog() }
 
         binding.btnLogs.setOnClickListener {
             startActivity(Intent(this, LogsActivity::class.java))
@@ -86,7 +80,6 @@ class MainActivity : AppCompatActivity() {
         }
 
         updateUi()
-        refreshConfigStatus()
     }
 
     override fun onStart() {
@@ -107,64 +100,72 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun importConfigFromUri(uri: Uri) {
-        try {
-            try {
-                contentResolver.takePersistableUriPermission(
-                    uri, Intent.FLAG_GRANT_READ_URI_PERMISSION
-                )
-            } catch (_: SecurityException) {
-            }
+    // ------------------------------------------------------------ node import
 
-            val displayName = queryDisplayName(uri) ?: "config.yaml"
-            val dest = File(filesDir, AntProcessManager.CONFIG_NAME)
-
-            contentResolver.openInputStream(uri)?.use { input ->
-                FileOutputStream(dest).use { output ->
-                    input.copyTo(output)
-                }
-            } ?: throw IllegalStateException("cannot open input stream")
-
-            getSharedPreferences("ant", MODE_PRIVATE)
-                .edit()
-                .putString("config_display_name", displayName)
-                .apply()
-
-            Toast.makeText(
-                this,
-                getString(R.string.config_import_ok),
-                Toast.LENGTH_LONG
-            ).show()
-            refreshConfigStatus()
-        } catch (e: Exception) {
-            Toast.makeText(
-                this,
-                getString(R.string.config_import_fail, e.message ?: "unknown"),
-                Toast.LENGTH_LONG
-            ).show()
+    private fun showImportDialog() {
+        val input = EditText(this).apply {
+            hint = getString(R.string.hint_node_links)
+            minLines = 4
+            setSingleLine(false)
         }
+        val pad = (20 * resources.displayMetrics.density).toInt()
+        val wrap = android.widget.FrameLayout(this).apply {
+            setPadding(pad, pad / 2, pad, 0)
+            addView(input)
+        }
+
+        MaterialAlertDialogBuilder(this)
+            .setTitle(R.string.btn_import)
+            .setView(wrap)
+            .setPositiveButton(R.string.node_import_btn) { _, _ ->
+                doImport(input.text.toString())
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .setNeutralButton(R.string.node_clear_btn) { _, _ ->
+                ConfigManager.clearNodes(this)
+                Toast.makeText(this, R.string.node_clear_ok, Toast.LENGTH_SHORT).show()
+                refreshConfigStatus()
+            }
+            .show()
     }
 
-    private fun queryDisplayName(uri: Uri): String? {
-        contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
-            ?.use { cursor ->
-                if (cursor.moveToFirst()) {
-                    val idx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
-                    if (idx >= 0) return cursor.getString(idx)
-                }
+    private fun doImport(raw: String) {
+        if (raw.isBlank()) {
+            // 空输入 → 直接尝试剪贴板
+            val clip = (getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager)
+                ?.primaryClip?.getItemAt(0)?.text?.toString().orEmpty()
+            if (clip.isBlank()) {
+                Toast.makeText(this, R.string.node_import_none, Toast.LENGTH_SHORT).show()
+                return
             }
-        return uri.lastPathSegment
+            importAndReport(clip)
+            return
+        }
+        importAndReport(raw)
+    }
+
+    private fun importAndReport(raw: String) {
+        val n = try {
+            ConfigManager.importNodeLinks(this, raw)
+        } catch (e: Exception) {
+            Toast.makeText(this, getString(R.string.node_import_fail, e.message ?: ""), Toast.LENGTH_LONG).show()
+            return
+        }
+        if (n > 0) {
+            Toast.makeText(this, getString(R.string.node_import_ok, n), Toast.LENGTH_LONG).show()
+            refreshConfigStatus()
+        } else {
+            Toast.makeText(this, R.string.node_import_none, Toast.LENGTH_LONG).show()
+        }
     }
 
     private fun refreshConfigStatus() {
-        val cfg = File(filesDir, AntProcessManager.CONFIG_NAME)
-        if (!cfg.exists() || cfg.length() == 0L) {
+        val n = ConfigManager.nodeCount(this)
+        if (n == 0) {
             binding.configStatus.setText(R.string.config_none)
-            return
+        } else {
+            binding.configStatus.text = getString(R.string.config_loaded, n)
         }
-        val name = getSharedPreferences("ant", MODE_PRIVATE)
-            .getString("config_display_name", cfg.name) ?: cfg.name
-        binding.configStatus.text = getString(R.string.config_loaded, name, cfg.length())
     }
 
     private fun prepareAndStart() {

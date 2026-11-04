@@ -7,7 +7,14 @@
     <string name="notification_running">VPN 运行中</string>
     <string name="btn_start">启动 VPN</string>
     <string name="btn_stop">停止 VPN</string>
-    <string name="btn_import">导入配置</string>
+    <string name="btn_import">导入节点</string>
+    <string name="node_import_btn">导入</string>
+    <string name="node_clear_btn">清空节点</string>
+    <string name="node_clear_ok">节点已清空</string>
+    <string name="node_import_ok">已导入 %1$d 条节点，重启 VPN 后生效</string>
+    <string name="node_import_none">未找到有效的节点链接（vless://、vmess://、ss://、trojan:// 等）</string>
+    <string name="node_import_fail">导入失败：%1$s</string>
+    <string name="hint_node_links">粘贴节点分享链接，每行一条，支持 vless://、vmess://、ss://、trojan://、hysteria2://、tuic:// 等；留空则读取剪贴板</string>
     <string name="toggle_start">启动</string>
     <string name="toggle_stop">停止</string>
     <string name="btn_logs">日志</string>
@@ -23,16 +30,13 @@
     <string name="settings_mtu_label">MTU</string>
     <string name="settings_dns_hijack">DNS 劫持（any:53）</string>
     <string name="settings_loglevel_label">核心日志级别</string>
-    <string name="settings_note">TUN 地址固定为 172.19.0.1/30。全部 TUN 参数在启动 VPN 时由应用写入，覆盖导入配置中的 tun 段；修改后需重启 VPN 生效。</string>
+    <string name="settings_note">TUN 地址固定为 172.19.0.1/30。全部 TUN 参数在启动 VPN 时由应用写入内置配置模板；修改后需重启 VPN 生效。</string>
     <string name="settings_saved">已保存，重启 VPN 后生效</string>
     <string name="settings_mtu_invalid">MTU 需在 576 – 10000 之间</string>
     <string name="status_stopped">已停止</string>
     <string name="status_starting">正在启动…</string>
     <string name="status_running">运行中</string>
     <string name="status_error">错误</string>
-    <string name="config_none">配置：默认（未导入文件）</string>
-    <string name="config_loaded">配置：%1$s（%2$d 字节）</string>
-    <string name="config_import_ok">配置导入成功，重启 VPN 后生效。TUN 参数由应用统一管理。</string>
-    <string name="config_import_fail">配置导入失败：%1$s</string>
-    <string name="hint_config">导入 mihomo 风格的 YAML 配置文件。TUN 参数由应用统一管理，无需在文件中配置 tun 段。</string>
+    <string name="config_none">节点：未导入（点「导入节点」粘贴 vless:// 等链接）</string>
+    <string name="config_loaded">节点：%1$d 条 · 内置绕过大陆规则（geosite-cn / geoip-cn 直连）</string>
 </resources>
