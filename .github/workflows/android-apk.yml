@@ -3,9 +3,6 @@ name: Build Android APK
 on:
   workflow_dispatch:
 
-env:
-  CARGO_TERM_COLOR: always
-
 jobs:
   build-apk:
     name: Build APK (arm64-v8a)
@@ -22,23 +19,68 @@ jobs:
         uses: actions/setup-java@v5
         with:
           distribution: temurin
-          java-version: '17'
+          java-version: "17"
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v4
+
+      # Fix: "Install CMake 3.22.1 failed — Error on ZipFile unknown archive"
+      # dl.google.com occasionally serves a truncated/corrupt zip; retry the
+      # sdkmanager install, and fall back to a direct download + manual
+      # extraction into $ANDROID_HOME/cmake/3.22.1 (AGP discovers it there).
+      - name: Install CMake & NDK (with retry)
+        run: |
+          set -uo pipefail
+          SDKM="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          [ -x "$SDKM" ] || SDKM="$(ls "$ANDROID_HOME"/cmdline-tools/*/bin/sdkmanager | head -n1)"
+          echo "sdkmanager: $SDKM"
+          yes | "$SDKM" --licenses > /dev/null 2>&1 || true
+
+          ok=0
+          for i in 1 2 3 4 5; do
+            echo "::group::Attempt $i: sdkmanager install cmake;3.22.1"
+            if "$SDKM" --install "cmake;3.22.1"; then ok=1; fi
+            echo "::endgroup::"
+            [ -x "$ANDROID_HOME/cmake/3.22.1/bin/cmake" ] && ok=1
+            [ "$ok" = "1" ] && break
+            sleep 15
+          done
+
+          if [ "$ok" != "1" ]; then
+            echo "sdkmanager failed — falling back to direct download"
+            curl -fSL --retry 5 --retry-delay 10 --retry-all-errors \
+              -o /tmp/cmake-3.22.1-linux.zip \
+              https://dl.google.com/android/repository/cmake-3.22.1-linux.zip
+            mkdir -p "$ANDROID_HOME/cmake/3.22.1"
+            unzip -q /tmp/cmake-3.22.1-linux.zip -d "$ANDROID_HOME/cmake/3.22.1"
+          fi
+
+          ls -l "$ANDROID_HOME/cmake/3.22.1/bin/cmake"
+
+          # AGP 8.7 default NDK; runner usually preinstalls it — install only if missing
+          if [ ! -d "$ANDROID_HOME/ndk/27.0.12077973" ]; then
+            for i in 1 2 3; do
+              "$SDKM" --install "ndk;27.0.12077973" && break
+              sleep 15
+            done
+          fi
+          echo "NDK versions installed:"
+          ls "$ANDROID_HOME/ndk" 2>/dev/null || true
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
-        with:
-          cache-read-only: false
+
       - name: Build debug APK
         run: |
           if [ ! -f gradlew ]; then
             gradle wrapper --gradle-version 8.9
           fi
           chmod +x gradlew
-          ./gradlew :app:assembleRelease --stacktrace
+          ./gradlew :app:assembleDebug --no-daemon --stacktrace
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: ant-proxy-debug-apk
-          path: app/build/outputs/apk/release/*.apk
+          path: app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
