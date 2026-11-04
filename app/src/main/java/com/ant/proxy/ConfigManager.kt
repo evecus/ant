@@ -10,7 +10,7 @@ import java.io.File
  *
  * 应用完全接管 config.yaml 的生成：
  *  1. assets/config-template.yaml（绕过大陆模板，geosite-cn / geoip-cn 直连，其余走 PROXY 组）
- *  2. assets/rules/*.ars（内置规则集，版本变化时释放到 files/rules）
+ *  2. assets/rules 下的 .ars 规则集（版本变化时释放到 files/rules）
  *  3. 用户只导入节点分享链接（vless:// 等），写入 files/providers/nodes.txt，
  *     作为 type: file 的 proxy-provider 引用。
  */
