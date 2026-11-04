@@ -27,7 +27,10 @@ android {
 
     buildTypes {
         release {
-            isMinifyEnabled = false
+            // R8 压缩：剔除 appcompat/material/constraintlayout 中未用到的类与资源
+            // （11.6MB 的 libant.so 是 Rust 静态核心，不受 R8 影响，已 strip + arm64-only）
+            isMinifyEnabled = true
+            isShrinkResources = true
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
