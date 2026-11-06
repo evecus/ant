@@ -166,7 +166,6 @@ netlink-packet-route = "0.22"
 [profile.release]
 lto = true
 codegen-units = 1
-panic = "abort"
 strip = true
 
 # macOS TUN: ioctl address/MTU setup (sing-tun tun_darwin.go equivalent)
