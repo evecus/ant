@@ -36,7 +36,7 @@ jobs:
           tool: cross
 
       - name: Build release (aarch64)
-        run: cross build --release --target aarch64-unknown-linux-musl --locked
+        run: cross build --release --target aarch64-unknown-linux-musl --features wireguard,ssh,tailscale --locked
 
       - run: |
           mkdir -p dist
