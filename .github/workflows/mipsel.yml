@@ -1,0 +1,136 @@
+name: Build MIPS
+
+on:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # MediaTek MT7621 (MIPS 1004Kc, MIPS32r2, 32-bit LE, OpenWrt).
+  #
+  # cross is NOT used: its musl-cross image cannot resolve crt1.o etc.
+  # Instead, install the cross-tools/musl-cross mipsel soft-float toolchain
+  # and wrap its gcc so rustc's bare crt* arguments resolve to absolute
+  # paths. std is built from source (-Z build-std) because MIPS is Tier 3
+  # since Rust 1.73. nightly is pinned to a fixed date: rolling nightly
+  # ICEs during tokio codegen on this cold target combination.
+  build-mipsel:
+    name: mipsel (MT7621 / 1004Kc soft-float)
+    runs-on: ubuntu-latest
+
+    env:
+      TARGET: mipsel-unknown-linux-musl
+      ARTIFACT: ant-linux-mipsel
+      TOOLCHAIN_NAME: mipsel-unknown-linux-muslsf
+      TOOLCHAIN_PREFIX: mipsel-linux-muslsf
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust nightly + rust-src
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-07-01
+          components: rust-src
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-mipsle-softfloat-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-mipsle-softfloat-cargo-
+
+      - name: Install mipsel-linux-muslsf toolchain
+        run: |
+          RELEASE_URL="https://github.com/cross-tools/musl-cross/releases/latest/download/${TOOLCHAIN_NAME}.tar.xz"
+          curl -fsSL "$RELEASE_URL" -o toolchain.tar.xz
+          tar -xJf toolchain.tar.xz -C /opt
+
+          TOOLCHAIN_BIN=$(find /opt -type f -name "*mipsel*-gcc" 2>/dev/null \
+            | grep -v '\-gcc-[0-9]' | head -1 | xargs -r dirname)
+          [ -z "$TOOLCHAIN_BIN" ] && \
+            TOOLCHAIN_BIN=$(find /opt -type f -name "*-gcc" 2>/dev/null | head -1 | xargs -r dirname)
+          [ -z "$TOOLCHAIN_BIN" ] && { find /opt -maxdepth 5 | sort; exit 1; }
+
+          ACTUAL_GCC=$(find "$TOOLCHAIN_BIN" -maxdepth 1 -type f -name "*-gcc" | head -1 | xargs basename)
+          ACTUAL_PREFIX="${ACTUAL_GCC%-gcc}"
+          echo "$TOOLCHAIN_BIN" >> "$GITHUB_PATH"
+          echo "TOOLCHAIN_PREFIX=$ACTUAL_PREFIX" >> "$GITHUB_ENV"
+
+      - name: Verify toolchain
+        run: |
+          ${TOOLCHAIN_PREFIX}-gcc --version
+          echo "Machine: $(${TOOLCHAIN_PREFIX}-gcc -dumpmachine)"
+
+      - name: Write .cargo/config.toml
+        run: |
+          mkdir -p .cargo
+          SYSROOT=$(${TOOLCHAIN_PREFIX}-gcc --print-sysroot)
+          MUSL_CRT_DIR=$(find "$SYSROOT" -name "crt1.o" 2>/dev/null | head -1 | xargs -r dirname)
+          [ -z "$MUSL_CRT_DIR" ] && \
+            MUSL_CRT_DIR=$(find /opt -name "crt1.o" 2>/dev/null | head -1 | xargs -r dirname)
+          [ -z "$MUSL_CRT_DIR" ] && { echo "ERROR: crt1.o not found"; exit 1; }
+
+          GCC_CRT_DIR=$(${TOOLCHAIN_PREFIX}-gcc -print-libgcc-file-name | xargs dirname)
+          ls "$GCC_CRT_DIR"/crtbegin.o "$GCC_CRT_DIR"/crtend.o 2>/dev/null || \
+            GCC_CRT_DIR=$(find /opt -name "crtbegin.o" 2>/dev/null | head -1 | xargs -r dirname)
+
+          mkdir -p stub-libs
+          LIBGCC_EH=$(find /opt -name "libgcc_eh.a" 2>/dev/null | head -1)
+          if [ -n "$LIBGCC_EH" ]; then
+            cp "$LIBGCC_EH" stub-libs/libunwind.a
+          else
+            ${TOOLCHAIN_PREFIX}-ar rcs stub-libs/libunwind.a
+          fi
+          STUB_DIR="$(pwd)/stub-libs"
+          LIBGCC_A=$(${TOOLCHAIN_PREFIX}-gcc -print-libgcc-file-name)
+
+          WRAPPER_PATH=/usr/local/bin/mipsle-musl-linker
+          cat > "$WRAPPER_PATH" << WRAPPER_EOF
+          #!/bin/bash
+          args=()
+          for a in "\$@"; do
+            case "\$a" in
+              crt1.o|crti.o|crtn.o) args+=("${MUSL_CRT_DIR}/\$a");;
+              crtbegin.o|crtend.o)  args+=("${GCC_CRT_DIR}/\$a");;
+              *) args+=("\$a");;
+            esac
+          done
+          exec ${TOOLCHAIN_PREFIX}-gcc -B"${MUSL_CRT_DIR}" -B"${GCC_CRT_DIR}" -L"${MUSL_CRT_DIR}" -L"${GCC_CRT_DIR}" -L"${STUB_DIR}" "\${args[@]}" "${LIBGCC_A}"
+          WRAPPER_EOF
+          chmod +x "$WRAPPER_PATH"
+
+          printf '[target.%s]\nlinker = "%s"\nrustflags = [\n  "-C", "target-cpu=mips32r2",\n  "-C", "target-feature=+crt-static,+mips32r2,+dsp,-fp64",\n  "-C", "panic=abort",\n]\n' \
+            "${TARGET}" "${WRAPPER_PATH}" > .cargo/config.toml
+
+      - name: Build ant
+        run: |
+          export CC_mipsel_unknown_linux_musl="${TOOLCHAIN_PREFIX}-gcc"
+          export AR_mipsel_unknown_linux_musl="${TOOLCHAIN_PREFIX}-ar"
+          cargo clean --target ${{ env.TARGET }} 2>/dev/null || true
+          cargo build \
+            --release \
+            --locked \
+            -Z build-std="std,panic_abort" \
+            --target ${{ env.TARGET }}
+
+      - name: Collect binary
+        run: |
+          cp "target/${{ env.TARGET }}/release/ant" "${{ env.ARTIFACT }}"
+          sha256sum "${{ env.ARTIFACT }}" > "${{ env.ARTIFACT }}.sha256"
+          ls -lh "${{ env.ARTIFACT }}"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ARTIFACT }}
+          path: |
+            ${{ env.ARTIFACT }}
+            ${{ env.ARTIFACT }}.sha256
+          if-no-files-found: error
