@@ -818,9 +818,7 @@ fn ssh(uri: &Uri) -> Option<ProxyConfig> {
             algorithm: "sha1".into(),
         });
     }
-    if c.username.is_none() {
-        return None;
-    }
+    c.username.as_ref()?;
     Some(with_name(c, uri))
 }
 
