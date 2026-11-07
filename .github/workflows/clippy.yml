@@ -29,4 +29,4 @@ jobs:
             ${{ runner.os }}-clippy-
 
       - name: Clippy
-        run: cargo clippy --all-targets --locked -- -D warnings
+        run: cargo clippy --all-targets --features wireguard,ssh,tailscale --locked -- -D warnings
