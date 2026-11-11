@@ -76,14 +76,14 @@ jobs:
           prerelease: false
           files: dist/ant-*
 
-      - name: Checkout afa branch
+      - name: Checkout afa-next branch
         uses: actions/checkout@v4
         with:
-          ref: afa
+          ref: afa-next
           path: afa-branch
           fetch-depth: 0
 
-      - name: Push libant.so to afa branch (jniLibs/arm64-v8a)
+      - name: Push libant.so to afa-next branch (jniLibs/arm64-v8a)
         run: |
           mkdir -p afa-branch/app/src/main/jniLibs/arm64-v8a
           cp dist/libant.so afa-branch/app/src/main/jniLibs/arm64-v8a/libant.so
@@ -95,5 +95,5 @@ jobs:
             echo "No changes to commit"
           else
             git commit -m "chore: update libant.so (arm64-v8a) from CI"
-            git push origin afa
+            git push origin afa-next
           fi
