@@ -205,7 +205,7 @@ fn node_supported(m: &Mapping) -> bool {
         return false;
     }
     if let Some(Value::Mapping(o)) = get(m, "ws-opts") {
-        if o.get(&Value::String("v2ray-http-upgrade".into()))
+        if o.get(Value::String("v2ray-http-upgrade".into()))
             .and_then(as_bool)
             .unwrap_or(false)
         {
@@ -373,13 +373,13 @@ fn normalize_clash(m: &mut Mapping) {
     }
     // Nested `*-opts` → ant's flat fields.
     if let Some(Value::Mapping(o)) = get(m, "ws-opts").cloned() {
-        if let Some(p) = o.get(&Value::String("path".into())).cloned() {
+        if let Some(p) = o.get(Value::String("path".into())).cloned() {
             insert(m, "ws-path", p);
         }
-        if let Some(Value::Mapping(h)) = o.get(&Value::String("headers".into())).cloned() {
+        if let Some(Value::Mapping(h)) = o.get(Value::String("headers".into())).cloned() {
             if let Some(host) = h
-                .get(&Value::String("Host".into()))
-                .or_else(|| h.get(&Value::String("host".into())))
+                .get(Value::String("Host".into()))
+                .or_else(|| h.get(Value::String("host".into())))
                 .cloned()
             {
                 insert(m, "ws-host", host);
@@ -393,19 +393,19 @@ fn normalize_clash(m: &mut Mapping) {
             ("host", "xhttp-host"),
             ("mode", "xhttp-mode"),
         ] {
-            if let Some(v) = o.get(&Value::String(src.into())).cloned() {
+            if let Some(v) = o.get(Value::String(src.into())).cloned() {
                 insert(m, dst, v);
             }
         }
-        if let Some(Value::Mapping(h)) = o.get(&Value::String("headers".into())).cloned() {
+        if let Some(Value::Mapping(h)) = o.get(Value::String("headers".into())).cloned() {
             insert(m, "xhttp-headers", Value::Mapping(stringify_map(&h)));
         }
     }
     if let Some(Value::Mapping(o)) = get(m, "reality-opts").cloned() {
-        if let Some(v) = o.get(&Value::String("public-key".into())).cloned() {
+        if let Some(v) = o.get(Value::String("public-key".into())).cloned() {
             insert(m, "reality-public-key", v);
         }
-        if let Some(v) = o.get(&Value::String("short-id".into())).cloned() {
+        if let Some(v) = o.get(Value::String("short-id".into())).cloned() {
             insert(m, "reality-short-id", v);
         }
     }
@@ -471,7 +471,7 @@ fn normalize_clash(m: &mut Mapping) {
                     ("pre-shared-key", "pre-shared-key"),
                 ] {
                     if get(m, dst).is_none() {
-                        if let Some(v) = p.get(&Value::String(src.into())).cloned() {
+                        if let Some(v) = p.get(Value::String(src.into())).cloned() {
                             insert(m, dst, v);
                         }
                     }
@@ -611,7 +611,7 @@ fn stringify_map(h: &Mapping) -> Mapping {
 }
 
 fn get<'a>(m: &'a Mapping, k: &str) -> Option<&'a Value> {
-    m.get(&Value::String(k.into()))
+    m.get(Value::String(k.into()))
 }
 
 fn insert(m: &mut Mapping, k: &str, v: Value) {
@@ -619,7 +619,7 @@ fn insert(m: &mut Mapping, k: &str, v: Value) {
 }
 
 fn remove(m: &mut Mapping, k: &str) {
-    m.remove(&Value::String(k.into()));
+    m.remove(Value::String(k.into()));
 }
 
 fn str_field(m: &Mapping, k: &str) -> Option<String> {

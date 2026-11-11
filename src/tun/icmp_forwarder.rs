@@ -4,9 +4,8 @@
 //! - `Outbound::Direct` → raw ICMP/ICMPv6 socket to upstream, reply to TUN
 //! - `Outbound::Node` → cannot tunnel ICMP through typical proxies; drop with log
 //!
-//! Unix only (raw sockets). On non-unix builds the module is empty stub.
-
-#![cfg(unix)]
+//! Unix only (raw sockets). `tun/mod.rs` already gates this module with
+//! `#[cfg(unix)]`, so no module-level cfg is needed here.
 
 use crate::app::router::{Outbound, Router};
 use crate::outbound::OutboundManager;
