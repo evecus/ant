@@ -139,6 +139,8 @@ dns:
 
 # Multiple nodes under proxies:; each has a unique `name` referenced by route
 # or by proxy-groups. Reserved node names (case-insensitive): direct, block, reject.
+# `proxy` / `PROXY` are ordinary names (allowed for nodes and groups) and
+# must be configured before being referenced.
 # DNS: domains routed to any node/group resolve via proxy-nameserver;
 # direct-routed domains via direct-nameserver.
 
@@ -457,7 +459,8 @@ proxies:
 #   relay        — exit = last member (dialer-proxy style chain)
 # Membership: `proxies` list, and/or `use: [provider]`, and/or
 # include-all-proxies / include-all-providers. Optional filter / exclude-filter
-# (regex; multiple patterns separated by `).
+# (regex; multiple patterns separated by `). Built-in DIRECT / REJECT / BLOCK
+# (any case) need no configuration and are never removed by either filter.
 proxy-groups:
   - name: PROXY
     type: select

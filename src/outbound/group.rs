@@ -2,7 +2,7 @@
 //! load-balance / relay, plus `filter` / `use` provider membership.
 
 use super::{BoxedStream, OutboundDialer, UdpSession};
-use crate::config::ProxyGroupConfig;
+use crate::config::{is_reserved_outbound, ProxyGroupConfig};
 use anyhow::{bail, Result};
 use async_trait::async_trait;
 use std::collections::{HashMap, HashSet};
@@ -148,6 +148,12 @@ fn apply_filter(
     Ok(members
         .into_iter()
         .filter(|name| {
+            // Built-in outbounds (DIRECT / REJECT / BLOCK, any case) are
+            // explicit choices, not provider nodes: they are never subject
+            // to `filter` / `exclude-filter` regexes.
+            if is_reserved_outbound(name) {
+                return true;
+            }
             if !include_regs.is_empty() && !include_regs.iter().any(|r| r.is_match(name)) {
                 return false;
             }
@@ -692,5 +698,59 @@ async fn probe(dialer: &dyn OutboundDialer, url: &str) -> Option<Duration> {
         Some(start.elapsed())
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn members() -> Vec<String> {
+        vec![
+            "hy2-hk".into(),
+            "hy2-jp".into(),
+            "DIRECT".into(),
+            "direct".into(),
+            "REJECT".into(),
+            "reject".into(),
+            "BLOCK".into(),
+            "block".into(),
+        ]
+    }
+
+    fn builtins() -> Vec<String> {
+        ["DIRECT", "direct", "REJECT", "reject", "BLOCK", "block"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect()
+    }
+
+    #[test]
+    fn builtin_members_bypass_include_filter() {
+        let mut want = vec!["hy2-hk".to_string()];
+        want.extend(builtins());
+        assert_eq!(apply_filter(members(), Some("(?i)hk"), None).unwrap(), want);
+    }
+
+    #[test]
+    fn builtin_members_bypass_exclude_filter() {
+        assert_eq!(apply_filter(members(), None, Some(".*")).unwrap(), builtins());
+    }
+
+    #[test]
+    fn builtin_members_bypass_both_filters() {
+        assert_eq!(
+            apply_filter(members(), Some("(?i)nothing-matches"), Some(".*")).unwrap(),
+            builtins()
+        );
+    }
+
+    #[test]
+    fn ordinary_members_are_still_filtered() {
+        // include selects hy2-hk, exclude removes it again → only built-ins left
+        assert_eq!(
+            apply_filter(members(), Some("(?i)hk"), Some("(?i)hk")).unwrap(),
+            builtins()
+        );
     }
 }

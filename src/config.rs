@@ -34,8 +34,9 @@ pub struct Config {
     #[serde(default, rename = "rule-providers")]
     pub rule_providers: HashMap<String, RuleProviderConfig>,
     /// mihomo-style route strings: `RULE-SET,name,outbound` / `MATCH,outbound`.
-    /// Outbound: `direct`/`DIRECT`, `block`/`BLOCK`, `reject`/`REJECT`, or a
-    /// `proxies` node name (reserved names are rejected for node names).
+    /// Outbound: built-in `direct`/`block`/`reject` (any case), a `proxies`
+    /// node name, or a `proxy-groups` name. `proxy` is an ordinary name and
+    /// must be configured before it can be referenced.
     #[serde(default)]
     pub route: Vec<String>,
 }
@@ -493,7 +494,9 @@ pub struct ProxyGroupConfig {
     /// `select` | `url-test` | `fallback` | `load-balance` | `relay`
     #[serde(rename = "type")]
     pub ty: String,
-    /// Member names: proxy node names, other group names, or `DIRECT` / `REJECT`.
+    /// Member names: proxy node names, other group names, or the built-in
+    /// `DIRECT` / `REJECT` / `BLOCK` (any case, no configuration needed).
+    /// Built-ins are never removed by `filter` / `exclude-filter`.
     #[serde(default)]
     pub proxies: Vec<String>,
     /// Provider names under `proxy-providers:` whose nodes are included.
@@ -579,8 +582,9 @@ pub struct ProxyProviderConfig {
 ///
 /// Configured under `proxies:` — multiple nodes, each identified by `name`.
 /// Route rules reference nodes by name: `RULE-SET,cn,my-hk` or `MATCH,my-hk`.
-/// Reserved (case-insensitive): `direct`, `block`, `reject` (+ internal
-/// `final` / `proxy`) — node names must not use any of them.
+/// Reserved (case-insensitive): `direct`, `block`, `reject` — node names
+/// must not use any of them. `proxy` / `PROXY` are ordinary names and are
+/// allowed here.
 ///
 /// ## hysteria2
 /// `password`, optional `sni` / `alpn` / `skip-cert-verify` / `fingerprint` / `udp-mtu`
@@ -1065,10 +1069,23 @@ impl ParsedRule {
     }
 }
 
-/// Outbound names that cannot be used as proxy node names. Case-insensitive:
-/// `direct`/`DIRECT`, `block`/`BLOCK`, `reject`/`REJECT` (+ internal `final`,
-/// `proxy`) are all reserved.
-pub const RESERVED_OUTBOUND_NAMES: &[&str] = &["direct", "block", "final", "proxy", "reject"];
+/// Built-in outbound names (case-insensitive): `direct` / `block` / `reject`.
+///
+/// These map to dialers that always exist, so they can be referenced from
+/// `route:`, `proxy-groups[].proxies` and `selected` without ever being
+/// configured under `proxies:`. They cannot be used as node / group names.
+///
+/// `proxy` / `PROXY` are NOT reserved: they are ordinary node / group names.
+/// Referencing one that was never configured fails fast like any other
+/// unknown name.
+pub const RESERVED_OUTBOUND_NAMES: &[&str] = &["direct", "block", "reject"];
+
+/// Case-insensitive check for built-in outbound names.
+pub fn is_reserved_outbound(name: &str) -> bool {
+    RESERVED_OUTBOUND_NAMES
+        .iter()
+        .any(|r| r.eq_ignore_ascii_case(name))
+}
 
 /// Normalize reserved outbound aliases (`DIRECT`→`direct`, `REJECT`→`block`).
 pub fn normalize_outbound_name(s: &str) -> String {
@@ -1415,7 +1432,7 @@ pub fn validate_dns_upstream(upstream: &str, node_names: &[String]) -> Result<()
     if lower == "rcode://success" {
         return Ok(());
     }
-    if RESERVED_OUTBOUND_NAMES.contains(&lower.as_str())
+    if is_reserved_outbound(&lower)
         || node_names.iter().any(|n| n.to_ascii_lowercase() == lower)
     {
         bail!(
@@ -1433,11 +1450,12 @@ fn known_has(known: &[String], name: &str) -> bool {
 }
 
 impl Config {
-    /// All routable outbound names: reserved + node names + group names.
+    /// All routable outbound names: built-ins + node names + group names.
     pub fn outbound_names(&self) -> Vec<String> {
         RESERVED_OUTBOUND_NAMES
             .iter()
-            .filter(|n| **n != "final" && **n != "proxy" && **n != "reject")
+            // `reject` is normalized to `block` by `parse_rule_line`.
+            .filter(|n| **n != "reject")
             .map(|s| s.to_string())
             .chain(self.proxies.iter().map(|p| p.name.clone()))
             .chain(self.proxy_groups.iter().map(|g| g.name.clone()))
@@ -1567,7 +1585,7 @@ impl Config {
             if p.name.is_empty() {
                 bail!("proxies[{i}] requires a non-empty `name`");
             }
-            if RESERVED_OUTBOUND_NAMES.contains(&p.name.to_ascii_lowercase().as_str()) {
+            if is_reserved_outbound(&p.name) {
                 bail!("proxy node name `{}` is reserved", p.name);
             }
             // Tailscale 出站没有固定服务器；其余类型必须给出 server / port。
@@ -1925,13 +1943,9 @@ impl Config {
             if g.name.trim().is_empty() {
                 bail!("proxy-groups[{i}] requires a non-empty `name`");
             }
-            // Only direct/block/reject are reserved for groups. Names like
-            // `PROXY` / `proxy` are allowed (mihomo-compatible); `final`/`proxy`
-            // remain reserved only for leaf `proxies:` node names.
-            if ["direct", "block", "reject"]
-                .iter()
-                .any(|r| r.eq_ignore_ascii_case(&g.name))
-            {
+            // Built-in dialers cannot be shadowed by a group name.
+            // `proxy` / `PROXY` are ordinary names (mihomo-compatible).
+            if is_reserved_outbound(&g.name) {
                 bail!(
                     "proxy-groups[{i}]: name `{}` is reserved (direct/block/reject)",
                     g.name
@@ -2031,8 +2045,10 @@ impl Config {
                 validate_group_regex(name, "exclude-filter", f)?;
             }
         }
-        // Member references: node / group / DIRECT / REJECT. Groups may
-        // reference each other; cycles are rejected after building the graph.
+        // Member references: node / group / built-in (DIRECT / REJECT /
+        // BLOCK, any case). Groups may reference each other; cycles are
+        // rejected after building the graph. A `proxy` / `PROXY` member is
+        // an ordinary name: it must actually be configured.
         let all_group: std::collections::HashSet<String> = self
             .proxy_groups
             .iter()
@@ -2046,7 +2062,7 @@ impl Config {
         for (i, g) in self.proxy_groups.iter().enumerate() {
             for m in &g.proxies {
                 let key = m.to_ascii_lowercase();
-                if key == "direct" || key == "reject" || key == "block" {
+                if is_reserved_outbound(m) {
                     continue;
                 }
                 if all_node.contains(&key) || all_group.contains(&key) {
@@ -2057,16 +2073,13 @@ impl Config {
                     continue;
                 }
                 bail!(
-                    "proxy-groups[{i}] (`{}`): unknown member `{m}`                      (must be a proxies name, another group, DIRECT, or REJECT)",
+                    "proxy-groups[{i}] (`{}`): unknown member `{m}`                      (must be a proxies name, another group, or a built-in DIRECT/REJECT/BLOCK)",
                     g.name
                 );
             }
             if let Some(sel) = &g.selected {
-                let key = sel.to_ascii_lowercase();
                 let ok = g.proxies.iter().any(|m| m.eq_ignore_ascii_case(sel))
-                    || key == "direct"
-                    || key == "reject"
-                    || key == "block";
+                    || is_reserved_outbound(sel);
                 if !ok {
                     bail!(
                         "proxy-groups[{i}] (`{}`): selected `{sel}` is not in proxies list",
@@ -3439,4 +3452,78 @@ rules:
         assert_eq!(t.digits, 6);
         assert_eq!(t.algorithm, "sha1");
     }
+    // ── proxy-groups / reserved-name semantics ──────────────────────────
+    fn group_yaml(name: &str, members: &str, final_ob: &str) -> String {
+        format!(
+            "{BASE}{}\nproxy-groups:\n  - name: {}\n    type: select\n    proxies: [{}]\nroute:\n  - MATCH,{}\n",
+            two_nodes(), name, members, final_ob
+        )
+    }
+
+    #[test]
+    fn reserved_names_are_only_direct_block_reject() {
+        for n in ["direct", "DIRECT", "DiReCt", "block", "BLOCK", "reject", "REJECT"] {
+            assert!(is_reserved_outbound(n), "`{n}` 应为保留名");
+        }
+        for n in ["proxy", "PROXY", "final", "hy2-main", "GLOBAL", ""] {
+            assert!(!is_reserved_outbound(n), "`{n}` 不应为保留名");
+        }
+        assert_eq!(RESERVED_OUTBOUND_NAMES, &["direct", "block", "reject"]);
+    }
+
+    #[test]
+    fn proxy_lower_and_upper_are_valid_node_names() {
+        for n in ["proxy", "PROXY"] {
+            let y = format!(
+                "{BASE}\nproxies:\n  - name: {}\n    type: hysteria2\n    server: 1.2.3.4\n    port: 443\n    password: pw\nroute:\n  - MATCH,{}\n",
+                n, n
+            );
+            let cfg = parse(&y).unwrap();
+            assert_eq!(cfg.proxies[0].name, n);
+        }
+    }
+
+    #[test]
+    fn reserved_names_cannot_be_node_names_any_case() {
+        for n in ["direct", "DIRECT", "block", "BLOCK", "reject", "REJECT"] {
+            let y = format!(
+                "{BASE}\nproxies:\n  - name: {}\n    type: hysteria2\n    server: 1.2.3.4\n    port: 443\n    password: pw\nroute:\n  - MATCH,direct\n",
+                n
+            );
+            let err = parse(&y).unwrap_err().to_string();
+            assert!(err.contains("reserved"), "`{n}`: {err}");
+        }
+    }
+
+    #[test]
+    fn unconfigured_proxy_and_final_references_fail_fast() {
+        for ob in ["proxy", "PROXY", "final"] {
+            let y = format!("{BASE}{}\nroute:\n  - MATCH,{}\n", two_nodes(), ob);
+            let err = parse(&y).unwrap_err().to_string();
+            assert!(err.contains("unknown outbound"), "`{ob}`: {err}");
+            let y2 = group_yaml("G1", ob, "G1");
+            let err2 = parse(&y2).unwrap_err().to_string();
+            assert!(err2.contains("unknown member"), "`{ob}`: {err2}");
+        }
+    }
+
+    #[test]
+    fn builtin_members_need_no_configuration() {
+        let cfg = parse(&group_yaml(
+            "G1",
+            "hy2-main, DIRECT, direct, REJECT, reject, BLOCK, block",
+            "G1",
+        ))
+        .unwrap();
+        assert_eq!(cfg.proxy_groups[0].proxies.len(), 7);
+    }
+
+    #[test]
+    fn proxy_can_be_a_group_name_and_referenced() {
+        for n in ["proxy", "PROXY"] {
+            let cfg = parse(&group_yaml(n, "hy2-main", n)).unwrap();
+            assert_eq!(cfg.proxy_groups[0].name, n);
+        }
+    }
+
 }
