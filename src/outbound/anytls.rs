@@ -237,25 +237,37 @@ fn build_frame(cmd: u8, sid: u32, data: &[u8]) -> Vec<u8> {
     buf
 }
 
-/// Apply padding to an outbound write unit (anytls-go writeConn).
+/// Apply padding to an outbound write unit (anytls-go `writeConn`).
 ///
 /// anytls-go counts packets with `pkt = pktCounter.Add(1)` (returns the NEW
 /// value, first packet = 1). Rust's `fetch_add` returns the OLD value, hence
 /// the internal `+ 1`. Scheme rule "0=..." is reserved for the auth frame's
 /// padding0 and must never be picked by the session layer.
-fn apply_padding(pkt_counter: &AtomicU32, padding: &PaddingScheme, data: Vec<u8>) -> Vec<u8> {
+///
+/// Returns ONE buffer per TLS record. anytls-go calls `s.conn.Write` once for
+/// every size produced by the scheme, and each of those writes becomes a
+/// separate TLS application-data record — that record-length distribution is
+/// the whole point of the padding scheme. Concatenating all chunks into a
+/// single `write_all` (the old behaviour here) collapses them into one TLS
+/// record and silently defeats traffic shaping, even though the byte stream
+/// stays parseable. Callers must write each returned buffer individually.
+fn apply_padding(
+    pkt_counter: &AtomicU32,
+    padding: &PaddingScheme,
+    data: Vec<u8>,
+) -> Vec<Vec<u8>> {
     let pkt = pkt_counter.fetch_add(1, Ordering::SeqCst) + 1;
 
     if pkt >= padding.stop {
-        return data;
+        return vec![data];
     }
 
     let sizes = padding.generate_sizes(pkt);
     if sizes.is_empty() {
-        return data;
+        return vec![data];
     }
 
-    let mut out: Vec<u8> = Vec::with_capacity(data.len() + 512);
+    let mut writes: Vec<Vec<u8>> = Vec::new();
     let mut remaining = data;
 
     for size in sizes {
@@ -269,33 +281,37 @@ fn apply_padding(pkt_counter: &AtomicU32, padding: &PaddingScheme, data: Vec<u8>
         let rem_len = remaining.len();
 
         if rem_len > size {
-            // This chunk is pure payload
-            out.extend_from_slice(&remaining[..size]);
+            // This record is all payload.
+            writes.push(remaining[..size].to_vec());
             remaining = remaining[size..].to_vec();
         } else if rem_len > 0 {
-            // Payload exhausted; pad up to `size` with a Waste frame
+            // Last payload record, padded up to `size` with a Waste frame.
             let padding_data_len = size.saturating_sub(rem_len + FRAME_HEADER_SIZE);
-            out.extend_from_slice(&remaining);
-            remaining.clear();
+            let mut record = std::mem::take(&mut remaining);
             if padding_data_len > 0 {
-                out.push(CMD_WASTE);
-                out.extend_from_slice(&0u32.to_be_bytes());
-                out.extend_from_slice(&(padding_data_len as u16).to_be_bytes());
-                out.extend(std::iter::repeat_n(0u8, padding_data_len));
+                record.push(CMD_WASTE);
+                record.extend_from_slice(&0u32.to_be_bytes());
+                record.extend_from_slice(&(padding_data_len as u16).to_be_bytes());
+                record.extend(std::iter::repeat_n(0u8, padding_data_len));
             }
+            writes.push(record);
         } else {
-            // Pure padding packet
-            out.push(CMD_WASTE);
-            out.extend_from_slice(&0u32.to_be_bytes());
-            out.extend_from_slice(&(size as u16).to_be_bytes());
-            out.extend(std::iter::repeat_n(0u8, size));
+            // Pure padding record: a single Waste frame of `size` data bytes.
+            let mut record = Vec::with_capacity(FRAME_HEADER_SIZE + size);
+            record.push(CMD_WASTE);
+            record.extend_from_slice(&0u32.to_be_bytes());
+            record.extend_from_slice(&(size as u16).to_be_bytes());
+            record.extend(std::iter::repeat_n(0u8, size));
+            writes.push(record);
         }
     }
 
     if !remaining.is_empty() {
-        out.extend_from_slice(&remaining);
+        // Payload left over after all sizes were consumed (anytls-go writes
+        // the remainder with one final `s.conn.Write`).
+        writes.push(remaining);
     }
-    out
+    writes
 }
 
 fn password_hash(password: &str) -> [u8; 32] {
@@ -434,10 +450,14 @@ async fn read_uot_packet<R: AsyncRead + Unpin>(reader: &mut R) -> Result<(Target
 // ── 会话（单条 TLS 连接上的多路复用）────────────────────────────────────────
 
 /// Messages for the per-session write task.
+///
+/// anytls-go routes BOTH `writeControlFrame` and `writeDataFrame` through the
+/// same `writeConn`, so control frames are buffered during the handshake and
+/// consume a padding packet number just like data frames. There is deliberately
+/// no "control bypass" variant here.
 enum WriteMsg {
-    /// Control frame (FIN / HEART...): written directly, bypasses padding
-    Control(Vec<u8>),
-    /// Data frame: buffered while the session is in buffering mode
+    /// Any frame (control or data): buffered while the session is in
+    /// buffering mode, otherwise written through the padding path.
     Frame(Vec<u8>),
     /// Stop buffering; write pending + this data through the padding path
     Flush(Vec<u8>),
@@ -512,10 +532,16 @@ impl AnyTlsSession {
         }
     }
 
-    /// Send a control frame (bypasses buffering and padding)
+    /// Send a control frame (FIN / SYNACK / HEART...).
+    ///
+    /// Goes through the normal Frame path: anytls-go's `writeControlFrame`
+    /// calls `writeConn` too, so control frames are buffered with SETTINGS/SYN
+    /// during the handshake and take part in padding/pkt counting. Writing
+    /// them directly used to let a FIN reach the server before SETTINGS, which
+    /// servers (sing-anytls / flux / clash-rs inbound) reject with an alert.
     fn write_control(&self, cmd: u8, sid: u32, data: &[u8]) -> std::io::Result<()> {
         self.write_tx
-            .send(WriteMsg::Control(build_frame(cmd, sid, data)))
+            .send(WriteMsg::Frame(build_frame(cmd, sid, data)))
             .map_err(|_| std::io::Error::from(std::io::ErrorKind::BrokenPipe))
     }
 
@@ -601,6 +627,21 @@ impl AnyTlsSession {
 
 // ── 写任务 ───────────────────────────────────────────────────────────────────
 
+/// Write each padding buffer with its OWN `write_all` call.
+///
+/// One `write_all` on a TLS stream becomes one TLS application-data record;
+/// anytls-go's `writeConn` does exactly one `s.conn.Write` per scheme size.
+/// Merging them would flatten the whole padding scheme into a single record.
+async fn write_records(
+    writer: &mut WriteHalf<BoxedStream>,
+    records: Vec<Vec<u8>>,
+) -> std::io::Result<()> {
+    for record in records {
+        writer.write_all(&record).await?;
+    }
+    Ok(())
+}
+
 async fn write_task(
     mut writer: WriteHalf<BoxedStream>,
     mut rx: mpsc::UnboundedReceiver<WriteMsg>,
@@ -615,19 +656,16 @@ async fn write_task(
                 let _ = writer.shutdown().await;
                 return;
             }
-            WriteMsg::Control(data) => {
-                // Control frames bypass padding and buffering state
-                if writer.write_all(&data).await.is_err() {
-                    session.close();
-                    return;
-                }
-            }
             WriteMsg::Frame(data) => {
+                // Control frames (FIN/HEART/...) take this same path — they
+                // must stay buffered until the handshake is flushed, and they
+                // consume a padding packet number (anytls-go writeConn).
                 if buffering {
                     pending.extend_from_slice(&data);
                 } else {
-                    let out = apply_padding(&session.pkt_counter, &session.padding.get(), data);
-                    if writer.write_all(&out).await.is_err() {
+                    let records =
+                        apply_padding(&session.pkt_counter, &session.padding.get(), data);
+                    if write_records(&mut writer, records).await.is_err() {
                         session.close();
                         return;
                     }
@@ -642,8 +680,9 @@ async fn write_task(
                 } else {
                     data
                 };
-                let out = apply_padding(&session.pkt_counter, &session.padding.get(), combined);
-                if writer.write_all(&out).await.is_err() {
+                let records =
+                    apply_padding(&session.pkt_counter, &session.padding.get(), combined);
+                if write_records(&mut writer, records).await.is_err() {
                     session.close();
                     return;
                 }
@@ -1358,7 +1397,8 @@ mod tests {
         };
         let counter = AtomicU32::new(0);
         let data = vec![1u8, 2, 3, 4];
-        assert_eq!(apply_padding(&counter, &scheme, data.clone()), data);
+        // After `stop`, the payload is emitted as ONE untouched record.
+        assert_eq!(apply_padding(&counter, &scheme, data.clone()), vec![data]);
     }
 
     #[test]
@@ -1368,12 +1408,51 @@ mod tests {
         let scheme = PaddingScheme::parse(DEFAULT_PADDING_SCHEME).unwrap();
         let counter = AtomicU32::new(0);
         let data = vec![0xABu8; 10];
-        let out = apply_padding(&counter, &scheme, data);
+        let records = apply_padding(&counter, &scheme, data);
+        let total: usize = records.iter().map(|r| r.len()).sum();
         assert!(
-            out.len() >= 100 && out.len() <= 400,
-            "expected pkt=1 padding (100..=400 bytes), got {}",
-            out.len()
+            (100..=400).contains(&total),
+            "expected pkt=1 padding (100..=400 bytes), got {total}"
         );
         assert_eq!(counter.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn padding_splits_each_scheme_size_into_its_own_record() {
+        // Regression: scheme "2=..." lists several sizes / check marks. Each
+        // size MUST be a separate write (= separate TLS record); the old code
+        // concatenated everything into one write and flattened the padding.
+        let scheme = PaddingScheme::parse(
+            b"stop=8\n0=30-30\n1=100-400\n2=400-400,c,500-500,c,600-600",
+        )
+        .unwrap();
+        let counter = AtomicU32::new(1); // next fetch_add -> pkt 2
+        // Payload smaller than the first size, so record 1 = payload + Waste.
+        let data = vec![0xCDu8; 20];
+        let records = apply_padding(&counter, &scheme, data.clone());
+
+        // "400-400,c,500-500,c,600-600": first size consumes all payload,
+        // the check mark then stops because payload is exhausted. The final
+        // size is a pure-padding record only if payload ran out — here the
+        // check mark breaks, so we expect exactly one 400-byte record.
+        assert_eq!(records.len(), 1, "only one size before the check mark");
+        assert_eq!(records[0].len(), 400);
+        assert_eq!(&records[0][..20], &data[..]);
+
+        // With a payload large enough to survive the check mark, later sizes
+        // appear as independent records.
+        let counter2 = AtomicU32::new(1);
+        let big = vec![0xEFu8; 450];
+        let records2 = apply_padding(&counter2, &scheme, big);
+        assert!(
+            records2.len() >= 2,
+            "a large payload must be split across multiple TLS records, got {}",
+            records2.len()
+        );
+        assert_eq!(records2[0].len(), 400, "first record must be exactly 400 bytes");
+        // Byte stream must remain identical to the input + waste frames.
+        let reassembled: Vec<u8> = records2.concat();
+        let expected = vec![0xEFu8; 450];
+        assert_eq!(&reassembled[..450], &expected[..]);
     }
 }
