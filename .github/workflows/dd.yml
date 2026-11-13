@@ -1,0 +1,24 @@
+name: Bui
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    # 注意：不要改回 windows-latest —— 该镜像默认已装 VS2026（v18），
+    # Flutter 3.35 工具链只认 VS2019/2022 生成器，会报
+    # "Generator Visual Studio 16 2019 could not find any instance of Visual Studio"。
+    # windows-2022 镜像自带 VS2022 Enterprise（含 C++ 工作负载）。
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: gui
+          fetch-depth: 0
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: 3.35.3
+          cache: true
