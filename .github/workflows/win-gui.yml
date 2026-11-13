@@ -1,0 +1,143 @@
+# ant GUI Windows 自动构建（单内核 ant）
+# 跑全部测试 → flutter build windows → 打包 portable zip（bin/ant.exe +
+# run/rules/ant/*.ars）→ 上传 artifact / 创建 Release。
+# ant.exe 取自 evecus/ant 最新 release；.ars 规则集随源码内置，CI 不下载。
+name: Build Windows Gui
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    # 注意：不要改回 windows-latest —— 该镜像默认已装 VS2026（v18），
+    # Flutter 3.35 工具链只认 VS2019/2022 生成器，会报
+    # "Generator Visual Studio 16 2019 could not find any instance of Visual Studio"。
+    # windows-2022 镜像自带 VS2022 Enterprise（含 C++ 工作负载）。
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: gui
+          fetch-depth: 0
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: 3.35.3
+          cache: true
+
+      - name: Pub get (workspace)
+        run: flutter pub get
+
+      - name: Core tests (pure Dart)
+        run: dart test packages/core
+
+      - name: UI tests — ui_kit
+        run: flutter test packages/ui_kit
+
+      - name: UI tests — ui_desktop
+        run: flutter test packages/ui_desktop
+
+      - name: UI tests — apps/desktop
+        run: flutter test apps/desktop
+
+      - name: Build Windows (Release)
+        run: flutter build windows --release
+        working-directory: apps/desktop
+
+      # ant 内核：从 evecus/ant 的「最新 release」下载 ant-windows-x64.exe
+      # （gh release download 省略 tag 即取最新 release；产物名对应
+      #  ant/.github/workflows/windows.yml）。仓库地址可用仓库变量 ANT_REPO
+      # 覆盖；离线/私有仓库可把 ant.exe 直接提交到本仓库 bin/ 目录兜底。
+      # 两者都没有则 fail-fast。
+      - name: Download ant kernel
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $repo = "${{ vars.ANT_REPO }}"
+          if (-not $repo) { $repo = "evecus/ant" }
+          New-Item -ItemType Directory -Force -Path "bin" | Out-Null
+          $ok = $false
+          try {
+            # 不带 tag → 该仓库的最新 release
+            gh release download --repo $repo --pattern "ant-windows-x64.exe" --dir "bin" | Out-Null
+            if (Test-Path "bin\ant-windows-x64.exe") {
+              Move-Item "bin\ant-windows-x64.exe" "bin\ant.exe" -Force
+              $ok = $true
+              Write-Host "ant.exe downloaded from $repo (latest release)"
+            }
+          } catch {
+            Write-Warning "从 $repo 最新 release 下载 ant.exe 失败: $_"
+          }
+          if (-not $ok) {
+            if (Test-Path "bin\ant.exe") {
+              Write-Host "使用仓库内置的 bin\ant.exe"
+            } else {
+              Write-Error "缺少 ant.exe：请检查 $repo 最新 release 是否含 ant-windows-x64.exe，或把 ant.exe 放进 bin/ 后重新运行"
+              exit 1
+            }
+          }
+
+      # Windows 下 ant 的 TUN 入站需要 wintun.dll 与 ant.exe 同目录。
+      # 下载失败只警告（不影响普通系统代理模式），可手动补 bin\wintun.dll。
+      - name: Download wintun.dll (TUN on Windows)
+        shell: pwsh
+        run: |
+          try {
+            Invoke-WebRequest -Uri "https://www.wintun.net/builds/wintun-0.14.1.zip" -OutFile "wintun.zip"
+            Expand-Archive -Path "wintun.zip" -DestinationPath "wintun-extracted" -Force
+            $dll = Get-ChildItem "wintun-extracted" -Recurse -Filter "wintun.dll" |
+                   Where-Object { $_.FullName -match "amd64" } | Select-Object -First 1
+            if ($dll) {
+              Copy-Item $dll.FullName "bin\wintun.dll" -Force
+              Write-Host "wintun.dll -> bin\wintun.dll"
+            } else {
+              Write-Warning "wintun.zip 里没找到 amd64/wintun.dll"
+            }
+          } catch {
+            Write-Warning "wintun.dll 下载失败（仅 TUN 模式需要）: $_"
+          }
+
+      # 规则集：14 个 .ars 已随源码提交在 apps/desktop/assets/ruleset/ant/，
+      # 编译期由 Flutter 打进 assets，打包时复制到 run/rules/ant/；CI 不下载。
+      - name: Package portable zip
+        shell: pwsh
+        run: |
+          # 内置路由必需的全部 .ars 规则集（与 builtin.dart 的 antRuleFiles 一致）
+          $required = @(
+            "geosite-private", "geoip-private", "geosite-cn", "geosite-google",
+            "geosite-gfw", "geosite-greatfire", "geosite-fakeipfilter",
+            "geoip-cn", "geoip-facebook", "geoip-fastly", "geoip-google",
+            "geoip-netflix", "geoip-telegram", "geoip-twitter"
+          )
+          foreach ($t in $required) {
+            $f = "apps\desktop\assets\ruleset\ant\$t.ars"
+            if (-not (Test-Path $f)) { Write-Error "缺少规则集 $f"; exit 1 }
+          }
+          Write-Host "规则集校验通过 ($($required.Count) 个 .ars)"
+
+          $dst = "ant-gui-windows-x64"
+          Copy-Item "apps/desktop/build/windows/x64/runner/Release" $dst -Recurse
+          # bin/ 单内核（ant.exe + 可选 wintun.dll）
+          Copy-Item -Recurse "bin" "$dst\bin"
+          # 内置 .ars 规则集 → run/rules/ant/（程序合成配置时按绝对路径引用；
+          # assets 里也带一份，程序启动时会兜底释放）
+          New-Item -ItemType Directory -Force -Path "$dst\run\rules\ant" | Out-Null
+          Copy-Item "apps\desktop\assets\ruleset\ant\*.ars" "$dst\run\rules\ant\"
+          Write-Host "run\rules\ant: $((Get-ChildItem "$dst\run\rules\ant").Count) 个 .ars 规则集"
+          Compress-Archive -Path $dst -DestinationPath "ant-gui-windows-x64.zip"
+          Get-Item ant-gui-windows-x64.zip | Select-Object Name, Length
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ant-gui-windows-x64
+          path: ant-gui-windows-x64.zip
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: test
+          files: ant-gui-windows-x64.zip
