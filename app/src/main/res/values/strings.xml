@@ -23,10 +23,6 @@
     <string name="btn_clear">清空</string>
     <string name="title_settings">设置</string>
     <string name="btn_save">保存</string>
-    <string name="settings_stack_label">TUN 协议栈</string>
-    <string name="stack_gvisor">gVisor</string>
-    <string name="stack_system">System（系统栈）</string>
-    <string name="stack_mixed">Mixed（混合栈）</string>
     <string name="settings_mtu_label">MTU</string>
     <string name="settings_dns_hijack">DNS 劫持（any:53）</string>
     <string name="settings_loglevel_label">核心日志级别</string>
