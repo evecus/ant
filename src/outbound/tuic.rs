@@ -401,8 +401,8 @@ struct TuicOption {
 pub struct TuicOutbound {
     opts: TuicOption,
     client_config: ClientConfig,
-    /// Most recent endpoint handle (kept so its driver outlives the connection).
-    endpoint: StdMutex<Option<Endpoint>>,
+    /// Lazily created endpoint + the interface name it was bound under.
+    endpoint: StdMutex<Option<(Endpoint, Option<String>)>>,
     state: tokio::sync::Mutex<ConnState>,
     next_session: AtomicU16,
 }
@@ -488,15 +488,26 @@ impl TuicOutbound {
         })
     }
 
-    /// Build a fresh QUIC endpoint on a freshly bound, loop-protected UDP socket.
+    /// The QUIC endpoint (one UDP socket), created lazily on the first connection
+    /// attempt and then reused for every reconnect.
     ///
-    /// Created per connection attempt, NOT once at startup: on Windows the loop
-    /// prevention is `IP_UNICAST_IF`, which needs the default-interface index.
-    /// A socket created before TUN's interface monitor has run is unbound, and
-    /// once auto-route installs its default route the QUIC packets are captured
-    /// by the TUN and loop back into ant (handshake timeout). Rebuilding per
-    /// attempt also follows default-interface changes (WLAN <-> Ethernet).
-    async fn make_endpoint(&self) -> Result<Endpoint> {
+    /// Not created at startup: on Windows the loop prevention is `IP_UNICAST_IF`,
+    /// which needs the default-interface index. A socket created before TUN's
+    /// interface detection is unbound, and once auto-route installs its default
+    /// route the QUIC packets are captured by the TUN and loop back into ant
+    /// (handshake timeout). `main` primes the detection before outbounds exist;
+    /// creating the socket lazily on first use is the second line of defence.
+    ///
+    /// The endpoint is rebuilt only if the bound default interface changed since
+    /// it was created (e.g. WLAN <-> Ethernet), since the socket stays pinned to
+    /// the old one.
+    async fn get_endpoint(&self) -> Result<Endpoint> {
+        let cur_if = crate::tun::bind_interface();
+        if let Some((ep, bound)) = self.endpoint.lock().unwrap().as_ref() {
+            if *bound == cur_if {
+                return Ok(ep.clone());
+            }
+        }
         // Dual-stack wildcard so IPv6 servers work; fall back to v4-only when
         // the host has IPv6 disabled.
         let udp = match crate::app::sockopt::bind_udp("[::]:0".parse().unwrap()).await {
@@ -512,7 +523,7 @@ impl TuicOutbound {
             udp.into_std()?,
             Arc::new(quinn::TokioRuntime),
         )?;
-        *self.endpoint.lock().unwrap() = Some(endpoint.clone());
+        *self.endpoint.lock().unwrap() = Some((endpoint.clone(), cur_if));
         Ok(endpoint)
     }
 
@@ -561,7 +572,7 @@ impl TuicOutbound {
             self.opts.congestion_control
         );
 
-        let endpoint = self.make_endpoint().await.context("quic endpoint")?;
+        let endpoint = self.get_endpoint().await.context("quic endpoint")?;
         let connecting = endpoint
             .connect_with(self.client_config.clone(), server_addr, &self.opts.sni)
             .context("quic connect start")?;

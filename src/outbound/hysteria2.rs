@@ -78,11 +78,10 @@ struct AuthInfo {
 
 pub struct Hysteria2Outbound {
     opts: HystOption,
-    /// QUIC client config; the UDP socket / `Endpoint` is rebuilt per connection
-    /// attempt (see `make_endpoint`).
+    /// QUIC client config; the `Endpoint` is created lazily (see `get_endpoint`).
     client_config: ClientConfig,
-    /// Most recent endpoint handle (kept so its driver outlives the connection).
-    endpoint: StdMutex<Option<Endpoint>>,
+    /// Lazily created endpoint + the interface name it was bound under.
+    endpoint: StdMutex<Option<(Endpoint, Option<String>)>>,
     state: tokio::sync::Mutex<ConnState>,
     next_session_id: AtomicU32,
 }
@@ -155,16 +154,26 @@ impl Hysteria2Outbound {
         })
     }
 
-    /// Build a fresh QUIC endpoint on a freshly bound, loop-protected UDP socket.
+    /// The QUIC endpoint (one UDP socket), created lazily on the first connection
+    /// attempt and then reused for every reconnect.
     ///
-    /// Must NOT be created once at startup: on Windows the loop prevention is
-    /// `IP_UNICAST_IF`, which needs the default-interface index. That index is
-    /// only known after TUN's interface monitor has run, i.e. after outbounds
-    /// are built. A socket created earlier is unbound, so once auto-route
-    /// installs its default route the QUIC packets are captured by the TUN and
-    /// loop back into ant (handshake timeout). Rebuilding per attempt also
-    /// follows default-interface changes (e.g. WLAN <-> Ethernet).
-    async fn make_endpoint(&self) -> Result<Endpoint> {
+    /// Not created at startup: on Windows the loop prevention is `IP_UNICAST_IF`,
+    /// which needs the default-interface index. A socket created before TUN's
+    /// interface detection is unbound, and once auto-route installs its default
+    /// route the QUIC packets are captured by the TUN and loop back into ant
+    /// (handshake timeout). `main` primes the detection before outbounds exist;
+    /// creating the socket lazily on first use is the second line of defence.
+    ///
+    /// The endpoint is rebuilt only if the bound default interface changed since
+    /// it was created (e.g. WLAN <-> Ethernet), since the socket stays pinned to
+    /// the old one.
+    async fn get_endpoint(&self) -> Result<Endpoint> {
+        let cur_if = crate::tun::bind_interface();
+        if let Some((ep, bound)) = self.endpoint.lock().unwrap().as_ref() {
+            if *bound == cur_if {
+                return Ok(ep.clone());
+            }
+        }
         let udp = crate::app::sockopt::bind_udp("0.0.0.0:0".parse()?).await?;
         let endpoint = Endpoint::new(
             quinn::EndpointConfig::default(),
@@ -172,7 +181,7 @@ impl Hysteria2Outbound {
             udp.into_std()?,
             std::sync::Arc::new(quinn::TokioRuntime),
         )?;
-        *self.endpoint.lock().unwrap() = Some(endpoint.clone());
+        *self.endpoint.lock().unwrap() = Some((endpoint.clone(), cur_if));
         Ok(endpoint)
     }
 
@@ -221,7 +230,7 @@ impl Hysteria2Outbound {
             self.opts.alpn
         );
 
-        let endpoint = self.make_endpoint().await.context("quic endpoint")?;
+        let endpoint = self.get_endpoint().await.context("quic endpoint")?;
         let connecting = endpoint
             .connect_with(self.client_config.clone(), server_addr, &self.opts.sni)
             .context("quic connect start")?;
