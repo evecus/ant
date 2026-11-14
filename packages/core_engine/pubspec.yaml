@@ -1,0 +1,12 @@
+name: ant_engine
+description: >-
+  ant GUI 引擎层：ant 内核进程管理、引擎控制抽象、Windows 系统代理。
+version: 0.1.0
+publish_to: none
+
+environment:
+  sdk: ^3.6.0
+
+dev_dependencies:
+  lints: ^5.0.0
+  test: ^1.25.0

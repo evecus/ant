@@ -1,0 +1,4 @@
+# 工作区级公共分析配置；各包可再 include 自己的规则。
+analyzer:
+  errors:
+    todo: ignore
