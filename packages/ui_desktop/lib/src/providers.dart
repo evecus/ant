@@ -172,8 +172,13 @@ final sysProxyProvider =
     AsyncNotifierProvider<SysProxyNotifier, bool>(SysProxyNotifier.new);
 
 /// TUN 开关（读自 settings.tunEnabled，与设置版本联动）。
-final tunEnabledProvider = Provider<bool>(
-    (ref) => ref.watch(settingsProvider).tunEnabled);
+/// 必须直接 watch settingsVersionProvider：settingsProvider 返回的是
+/// 同一个可变 Settings 实例，tunEnabled 变化时引用不变，
+/// 仅 watch settingsProvider 不会触发本 Provider 重建（开关永远显示关闭）。
+final tunEnabledProvider = Provider<bool>((ref) {
+  ref.watch(settingsVersionProvider);
+  return ref.watch(antAppProvider).settings.tunEnabled;
+});
 
 /// 当前应用的节点对象（可能为 null）。
 final appliedNodeProvider = Provider<Node?>((ref) {
