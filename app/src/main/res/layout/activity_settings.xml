@@ -20,45 +20,10 @@
             android:textSize="22sp"
             android:textStyle="bold" />
 
-        <TextView
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="24dp"
-            android:text="@string/settings_stack_label"
-            android:textSize="15sp"
-            android:textStyle="bold" />
-
-        <RadioGroup
-            android:id="@+id/rgStack"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="6dp"
-            android:orientation="vertical">
-
-            <RadioButton
-                android:id="@+id/rbGvisor"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:checked="true"
-                android:text="@string/stack_gvisor" />
-
-            <RadioButton
-                android:id="@+id/rbSystem"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="@string/stack_system" />
-
-            <RadioButton
-                android:id="@+id/rbMixed"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="@string/stack_mixed" />
-        </RadioGroup>
-
         <com.google.android.material.textfield.TextInputLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="20dp"
+            android:layout_marginTop="24dp"
             android:hint="@string/settings_mtu_label">
 
             <com.google.android.material.textfield.TextInputEditText
@@ -132,6 +97,5 @@
             android:text="@string/settings_note"
             android:textSize="12sp"
             android:textColor="?android:attr/textColorSecondary" />
-
     </LinearLayout>
 </ScrollView>
