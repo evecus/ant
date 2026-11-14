@@ -38,11 +38,9 @@ class AntProcessManager(private val context: Context) {
 
         // 托管设置（设置页写入，启动 VPN 时应用到配置文件）
         const val SETTINGS_NAME = "settings"
-        const val KEY_STACK = "tun_stack"
         const val KEY_MTU = "tun_mtu"
         const val KEY_DNS_HIJACK = "tun_dns_hijack"
         const val KEY_LOG_LEVEL = "log_level"
-        const val DEFAULT_STACK = "gvisor"
 
         init {
             try {
@@ -121,7 +119,6 @@ class AntProcessManager(private val context: Context) {
         if (!cfg.exists() || cfg.length() == 0L) return
 
         val prefs = context.getSharedPreferences(SETTINGS_NAME, Context.MODE_PRIVATE)
-        val stack = prefs.getString(KEY_STACK, DEFAULT_STACK) ?: DEFAULT_STACK
         val mtu = prefs.getInt(KEY_MTU, TUN_MTU)
         val dnsHijack = prefs.getBoolean(KEY_DNS_HIJACK, true)
         val logLevel = prefs.getString(KEY_LOG_LEVEL, "info") ?: "info"
@@ -156,7 +153,6 @@ class AntProcessManager(private val context: Context) {
         out.append("# --- TUN 由 AFA 应用统一管理（启动时覆盖导入配置中的 tun 段）---\n")
         out.append("tun:\n")
         out.append("  enable: true\n")
-        out.append("  stack: $stack\n")
         out.append("  close-fd-on-drop: false\n")
         out.append("  address:\n")
         out.append("    - $TUN_ADDRESS/$TUN_PREFIX\n")
@@ -169,7 +165,7 @@ class AntProcessManager(private val context: Context) {
         out.append("  auto-detect-interface: true\n")
 
         cfg.writeText(out.toString())
-        onLog("已应用托管 TUN 配置：stack=$stack mtu=$mtu dns-hijack=$dnsHijack log-level=$logLevel")
+        onLog("已应用托管 TUN 配置：mtu=$mtu dns-hijack=$dnsHijack log-level=$logLevel")
     }
 
     /**

@@ -17,11 +17,6 @@ class SettingsActivity : AppCompatActivity() {
 
         val prefs = getSharedPreferences(AntProcessManager.SETTINGS_NAME, MODE_PRIVATE)
 
-        when (prefs.getString(AntProcessManager.KEY_STACK, AntProcessManager.DEFAULT_STACK)) {
-            "system" -> binding.rbSystem.isChecked = true
-            "mixed" -> binding.rbMixed.isChecked = true
-            else -> binding.rbGvisor.isChecked = true
-        }
         binding.etMtu.setText(prefs.getInt(AntProcessManager.KEY_MTU, AntProcessManager.TUN_MTU).toString())
         binding.swDnsHijack.isChecked = prefs.getBoolean(AntProcessManager.KEY_DNS_HIJACK, true)
         when (prefs.getString(AntProcessManager.KEY_LOG_LEVEL, "info")) {
@@ -37,11 +32,6 @@ class SettingsActivity : AppCompatActivity() {
                 Toast.makeText(this, R.string.settings_mtu_invalid, Toast.LENGTH_SHORT).show()
                 return@setOnClickListener
             }
-            val stack = when (binding.rgStack.checkedRadioButtonId) {
-                R.id.rbSystem -> "system"
-                R.id.rbMixed -> "mixed"
-                else -> "gvisor"
-            }
             val level = when (binding.rgLogLevel.checkedRadioButtonId) {
                 R.id.rbDebug -> "debug"
                 R.id.rbWarn -> "warn"
@@ -49,7 +39,6 @@ class SettingsActivity : AppCompatActivity() {
                 else -> "info"
             }
             prefs.edit()
-                .putString(AntProcessManager.KEY_STACK, stack)
                 .putInt(AntProcessManager.KEY_MTU, mtu)
                 .putBoolean(AntProcessManager.KEY_DNS_HIJACK, binding.swDnsHijack.isChecked)
                 .putString(AntProcessManager.KEY_LOG_LEVEL, level)
