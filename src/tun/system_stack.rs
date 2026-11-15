@@ -7,13 +7,13 @@ use super::system_nat::TcpNat;
 use super::gso::GroDisablementFlags;
 use super::native_tun::{NativeTun, NativeTunWriter};
 use super::packet::{
-    broadcast_addr_v4, build_tcp_rst_v4, build_tcp_rst_v6, build_udp_reply_with_template,
-    clamp_tcp_mss, compute_effective_mss, is_global_unicast_v4, is_global_unicast_v6,
-    nat_update_ip_checksum_v4, nat_update_tcp_checksum_v4, nat_update_tcp_checksum_v6,
-    verify_checksums_v4,
+    broadcast_addr_v4, build_tcp_rst_v4, build_tcp_rst_v6,
+    build_udp_reply_with_template_into, clamp_tcp_mss, compute_effective_mss,
+    is_global_unicast_v4, is_global_unicast_v6, nat_update_ip_checksum_v4,
+    nat_update_tcp_checksum_v4, nat_update_tcp_checksum_v6, tcp_rst_fields,
 };
 #[cfg(not(unix))]
-use super::packet::{build_icmp_echo_reply_v4, build_icmp_echo_reply_v6};
+use super::packet::{rewrite_icmp_echo_reply_v4, rewrite_icmp_echo_reply_v6};
 use crate::app::router::{Outbound, Router};
 use crate::app::sniffer;
 use crate::app::stats;
@@ -38,8 +38,34 @@ const IPPROTO_ICMP: u8 = 1;
 const IPPROTO_ICMPV6: u8 = 58;
 const UDP_IDLE: Duration = Duration::from_secs(300);
 const TCP_NAT_TIMEOUT: Duration = Duration::from_secs(300);
+/// 每个 UDP 会话的入队深度（对齐 sing-tun handler 侧的缓冲，避免 QUIC 突发
+/// 时静默丢包）。
+const UDP_QUEUE: usize = 256;
+/// `last_seen` 刷新节流（对齐 sing-tun TCPSession.refresh 的 1 秒语义）：
+/// 高频 UDP 会话不必每包写共享时间戳。
+const SESSION_REFRESH: Duration = Duration::from_secs(1);
 
 type UdpPacket = (Bytes, SocketAddr);
+
+/// UDP 队列满丢包计数（每 1024 个打一条 warn，避免日志风暴）。
+static UDP_DROPS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn note_udp_drop() {
+    use std::sync::atomic::Ordering;
+    let n = UDP_DROPS.fetch_add(1, Ordering::Relaxed);
+    if n % 1024 == 0 {
+        warn!(dropped = n + 1, "tun: udp session queue full, dropping packets");
+    }
+}
+
+/// 1 秒节流地刷新 UDP 会话时间戳。
+#[inline]
+fn refresh_session(entry: &mut UdpEntry) {
+    let now = Instant::now();
+    if now.duration_since(entry.last_seen) >= SESSION_REFRESH {
+        entry.last_seen = now;
+    }
+}
 
 /// Diagnostic: render TCP flag byte, e.g. "SYN|ACK".
 fn tcp_flags_str(f: u8) -> String {
@@ -78,7 +104,10 @@ pub struct StackAddrs {
 #[derive(Clone)]
 struct StackRuntime {
     writer: Arc<Mutex<NativeTunWriter>>,
-    tcp_nat: Arc<TcpNat>,
+    /// 独立的 v4 / v6 NAT 表（对齐 sing-tun `tcpNat4` / `tcpNat6`）：
+    /// 端口池容量翻倍，两个协议族的锁互不争用。
+    tcp_nat4: Arc<TcpNat>,
+    tcp_nat6: Arc<TcpNat>,
     /// std Mutex: critical sections never await (try_send is sync) and this
     /// map is hit on every UDP packet.
     udp_sessions: Arc<std::sync::Mutex<HashMap<SocketAddr, UdpEntry>>>,
@@ -169,7 +198,10 @@ pub async fn run_system_stack(p: TunStackParams) -> Result<()> {
         dns_hijack,
     } = p;
     let dns_hijack = Arc::new(dns_hijack);
-    let tcp_nat = Arc::new(TcpNat::new());
+    // sing-tun NewSystem 为每个协议族各建一张 TCPNat（tcpNat4 / tcpNat6），
+    // 而不是 v4/v6 共用一张表。
+    let tcp_nat4 = Arc::new(TcpNat::new());
+    let tcp_nat6 = Arc::new(TcpNat::new());
     // macOS: use AsyncRead path (tun crate strips 4-byte PI). Batch recvmsg_x
     // needs exclusive fd ownership and is available via NativeTun::new_macos
     // when the device is constructed from a raw fd (external FD / future path).
@@ -203,8 +235,18 @@ pub async fn run_system_stack(p: TunStackParams) -> Result<()> {
         info!(interface = %if_name, port = tcp_port_v6, "tun: TCP v6 listener ready");
     }
 
-    for listener in [tcp_listener_v4, tcp_listener_v6].into_iter().flatten() {
-        let nat = tcp_nat.clone();
+    // 每个 listener 只查自己那张 NAT 表：v4/v6 不再共享端口池，
+    // 两把 RwLock 也互不争用（对齐 sing-tun start() 的两次 acceptLoop）。
+    if let Some(listener) = tcp_listener_v4 {
+        let nat = tcp_nat4.clone();
+        let r = router.clone();
+        let o = outbounds.clone();
+        tokio::spawn(async move {
+            accept_loop(listener, nat, r, o).await;
+        });
+    }
+    if let Some(listener) = tcp_listener_v6 {
+        let nat = tcp_nat6.clone();
         let r = router.clone();
         let o = outbounds.clone();
         tokio::spawn(async move {
@@ -224,12 +266,14 @@ pub async fn run_system_stack(p: TunStackParams) -> Result<()> {
 
 
     {
-        let nat = tcp_nat.clone();
+        let nat4 = tcp_nat4.clone();
+        let nat6 = tcp_nat6.clone();
         let sessions = udp_sessions.clone();
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(Duration::from_secs(30)).await;
-                nat.gc(TCP_NAT_TIMEOUT);
+                nat4.gc(TCP_NAT_TIMEOUT);
+                nat6.gc(TCP_NAT_TIMEOUT);
                 let mut map = sessions.lock().unwrap();
                 let now = Instant::now();
                 map.retain(|_, e| now.duration_since(e.last_seen) < UDP_IDLE);
@@ -271,7 +315,8 @@ pub async fn run_system_stack(p: TunStackParams) -> Result<()> {
 
     let rt = StackRuntime {
         writer: writer.clone(),
-        tcp_nat,
+        tcp_nat4,
+        tcp_nat6,
         udp_sessions,
         router,
         outbounds,
@@ -508,7 +553,10 @@ async fn process_ipv4(raw: &mut [u8], rt: &StackRuntime) {
         return;
     }
     let dst_ip = Ipv4Addr::from([raw[16], raw[17], raw[18], raw[19]]);
-    if Some(dst_ip) == rt.inet4_broadcast {
+    // 对齐 sing-tun processIPv4：在协议分发前统一过滤 broadcast 与
+    // 非全局单播目标（loopback / link-local / multicast / reserved），
+    // 避免本机回环或链路本地流量被误 NAT 进代理；各 handler 不再重复判断。
+    if Some(dst_ip) == rt.inet4_broadcast || !is_global_unicast_v4(dst_ip) {
         return;
     }
     match raw[9] {
@@ -533,9 +581,11 @@ async fn process_ipv4(raw: &mut [u8], rt: &StackRuntime) {
                     // forwarder only handles echo request; other ICMP ignored
                 }
             }
+            // 对齐 sing-tun processIPv4ICMP 的 writeBack：就地改写 echo
+            // request 后把同一 buffer 直接写回，零拷贝、零 Vec 分配。
             #[cfg(not(unix))]
-            if let Some(reply) = build_icmp_echo_reply_v4(raw) {
-                tun_write(&rt.writer, &reply).await;
+            if rewrite_icmp_echo_reply_v4(raw) {
+                tun_write(&rt.writer, raw).await;
             }
         }
         _ => {}
@@ -544,6 +594,11 @@ async fn process_ipv4(raw: &mut [u8], rt: &StackRuntime) {
 
 async fn process_ipv6(raw: &mut [u8], rt: &StackRuntime) {
     if raw.len() < 40 {
+        return;
+    }
+    // 对齐 sing-tun processIPv6：入口统一过滤非全局单播目标。
+    let dst_ip = Ipv6Addr::from(<[u8; 16]>::try_from(&raw[24..40]).unwrap());
+    if !is_global_unicast_v6(dst_ip) {
         return;
     }
     // Skip extension headers to find L4 (simplified walk)
@@ -568,8 +623,8 @@ async fn process_ipv6(raw: &mut [u8], rt: &StackRuntime) {
                 };
             }
             #[cfg(not(unix))]
-            if let Some(reply) = build_icmp_echo_reply_v6(raw) {
-                tun_write(&rt.writer, &reply).await;
+            if rewrite_icmp_echo_reply_v6(raw) {
+                tun_write(&rt.writer, raw).await;
             }
         }
         _ => {}
@@ -616,11 +671,10 @@ async fn handle_tcp_v4(raw: &mut [u8], rt: &StackRuntime) {
     let src_port = u16::from_be_bytes([raw[ihl], raw[ihl + 1]]);
     let dst_port = u16::from_be_bytes([raw[ihl + 2], raw[ihl + 3]]);
     let flags = raw[ihl + 13];
-    let seq = u32::from_be_bytes([raw[ihl + 4], raw[ihl + 5], raw[ihl + 6], raw[ihl + 7]]);
     let tcp_port = rt.tcp_port_v4;
 
     if src_ip == server_addr && src_port == tcp_port {
-        if let Some((orig_src, orig_dst)) = rt.tcp_nat.lookup_back(dst_port) {
+        if let Some((orig_src, orig_dst)) = rt.tcp_nat4.lookup_back(dst_port) {
             trace!(
                 nat_port = dst_port,
                 orig_src = %orig_src,
@@ -656,15 +710,15 @@ async fn handle_tcp_v4(raw: &mut [u8], rt: &StackRuntime) {
         return;
     }
 
-    if !is_global_unicast_v4(dst_ip) {
-        return;
-    }
-
     let src = SocketAddr::V4(SocketAddrV4::new(src_ip, src_port));
     let dst = SocketAddr::V4(SocketAddrV4::new(dst_ip, dst_port));
-    let Some(nat_port) = rt.tcp_nat.lookup_or_insert(src, dst) else {
+    let Some(nat_port) = rt.tcp_nat4.lookup_or_insert(src, dst) else {
         warn!("tun: TCP NAT port space exhausted");
-        let rst = build_tcp_rst_v4(dst_ip, src_ip, dst_port, src_port, seq);
+        // 对齐 sing-tun resetIPv4TCP：按触发包的 ACK/SYN/FIN 计算合规 RST
+        //（序列落在对端接收窗口内才会被接受）。旧实现固定 RST|ACK 且把
+        // 触发包 seq 当 AckNum，会被内核当作窗口外 RST 忽略、连接等超时。
+        let rst_fields = tcp_rst_fields(raw, ihl, false).unwrap_or_default();
+        let rst = build_tcp_rst_v4(dst_ip, src_ip, dst_port, src_port, rst_fields);
         tun_write(&rt.writer, &rst).await;
         return;
     };
@@ -673,7 +727,8 @@ async fn handle_tcp_v4(raw: &mut [u8], rt: &StackRuntime) {
         src = %src,
         dst = %dst,
         nat_port,
-        to = %format!("{server_addr}:{tcp_port}"),
+        server = %server_addr,
+        tcp_port,
         "tun: tcp4 forward (app -> listener), writing NAT-ed packet to device"
     );
     raw[12..16].copy_from_slice(&client_addr.octets());
@@ -687,16 +742,9 @@ async fn handle_tcp_v4(raw: &mut [u8], rt: &StackRuntime) {
     if let Some(mss) = rt.tcp_mss {
         clamp_tcp_mss(raw, ihl, mss);
     }
-    {
-        // Diagnostic: dump the first few NAT-ed SYNs and self-verify checksums.
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        static DUMPED: AtomicUsize = AtomicUsize::new(0);
-        if flags & 0x02 != 0 && DUMPED.fetch_add(1, Ordering::Relaxed) < 6 {
-            let (ip_ok, tcp_ok) = verify_checksums_v4(raw, ihl);
-            let hex: String = raw.iter().map(|b| format!("{b:02x}")).collect();
-            info!(ip_csum_ok = ip_ok, tcp_csum_ok = tcp_ok, len = raw.len(), hex = %hex, "tun: DIAG NAT-ed SYN");
-        }
-    }
+    // 旧实现在此对每个 SYN 格式化整包 hex 并打 info 日志（调试残留）：
+    // 生产环境既是 CPU 热点也是日志噪音，已移除；校验和由 packet.rs 的
+    // 单元测试覆盖（incremental_nat_rewrite_matches_full_recompute_v4）。
     tun_write(&rt.writer, raw).await;
 }
 
@@ -713,16 +761,10 @@ async fn handle_tcp_v6(raw: &mut [u8], rt: &StackRuntime) {
     let dst_ip = Ipv6Addr::from(<[u8; 16]>::try_from(&raw[24..40]).unwrap());
     let src_port = u16::from_be_bytes([raw[tcp_off], raw[tcp_off + 1]]);
     let dst_port = u16::from_be_bytes([raw[tcp_off + 2], raw[tcp_off + 3]]);
-    let seq = u32::from_be_bytes([
-        raw[tcp_off + 4],
-        raw[tcp_off + 5],
-        raw[tcp_off + 6],
-        raw[tcp_off + 7],
-    ]);
     let tcp_port = rt.tcp_port_v6;
 
     if src_ip == server_addr && src_port == tcp_port {
-        if let Some((orig_src, orig_dst)) = rt.tcp_nat.lookup_back(dst_port) {
+        if let Some((orig_src, orig_dst)) = rt.tcp_nat6.lookup_back(dst_port) {
             let (ns, nsp) = match orig_dst {
                 SocketAddr::V6(a) => (*a.ip(), a.port()),
                 _ => return,
@@ -746,15 +788,13 @@ async fn handle_tcp_v6(raw: &mut [u8], rt: &StackRuntime) {
         return;
     }
 
-    if !is_global_unicast_v6(dst_ip) {
-        return;
-    }
-
     let src = SocketAddr::V6(SocketAddrV6::new(src_ip, src_port, 0, 0));
     let dst = SocketAddr::V6(SocketAddrV6::new(dst_ip, dst_port, 0, 0));
-    let Some(nat_port) = rt.tcp_nat.lookup_or_insert(src, dst) else {
+    let Some(nat_port) = rt.tcp_nat6.lookup_or_insert(src, dst) else {
         warn!("tun: TCP NAT port space exhausted (v6)");
-        let rst = build_tcp_rst_v6(dst_ip, src_ip, dst_port, src_port, seq);
+        // 对齐 sing-tun resetIPv6TCP
+        let rst_fields = tcp_rst_fields(raw, tcp_off, true).unwrap_or_default();
+        let rst = build_tcp_rst_v6(dst_ip, src_ip, dst_port, src_port, rst_fields);
         tun_write(&rt.writer, &rst).await;
         return;
     };
@@ -784,9 +824,7 @@ async fn handle_udp(raw: &[u8], udp_payload: &[u8], is_v4: bool, rt: &StackRunti
         }
         let src_ip = Ipv4Addr::from([raw[12], raw[13], raw[14], raw[15]]);
         let dst_ip = Ipv4Addr::from([raw[16], raw[17], raw[18], raw[19]]);
-        if !is_global_unicast_v4(dst_ip) {
-            return;
-        }
+        // 目标单播性已在 process_ipv4/ipv6 入口统一过滤（对齐 sing-tun）。
         (
             SocketAddr::V4(SocketAddrV4::new(src_ip, src_port)),
             SocketAddr::V4(SocketAddrV4::new(dst_ip, dst_port)),
@@ -797,9 +835,6 @@ async fn handle_udp(raw: &[u8], udp_payload: &[u8], is_v4: bool, rt: &StackRunti
         }
         let src_ip = Ipv6Addr::from(<[u8; 16]>::try_from(&raw[8..24]).unwrap());
         let dst_ip = Ipv6Addr::from(<[u8; 16]>::try_from(&raw[24..40]).unwrap());
-        if !is_global_unicast_v6(dst_ip) {
-            return;
-        }
         (
             SocketAddr::V6(SocketAddrV6::new(src_ip, src_port, 0, 0)),
             SocketAddr::V6(SocketAddrV6::new(dst_ip, dst_port, 0, 0)),
@@ -811,9 +846,11 @@ async fn handle_udp(raw: &[u8], udp_payload: &[u8], is_v4: bool, rt: &StackRunti
     {
         let mut map = rt.udp_sessions.lock().unwrap();
         if let Some(e) = map.get_mut(&src) {
-            e.last_seen = Instant::now();
+            refresh_session(e);
             let data = Bytes::copy_from_slice(&udp_payload[8..]);
-            let _ = e.packet_tx.try_send((data, dst));
+            if e.packet_tx.try_send((data, dst)).is_err() {
+                note_udp_drop();
+            }
             return;
         }
     }
@@ -865,11 +902,13 @@ async fn feed_udp(
         let mut map = rt.udp_sessions.lock().unwrap();
         if let Some(e) = map.get_mut(&src) {
             // Session appeared between the fast path and here — just feed it.
-            e.last_seen = Instant::now();
-            let _ = e.packet_tx.try_send((data, dst));
+            refresh_session(e);
+            if e.packet_tx.try_send((data, dst)).is_err() {
+                note_udp_drop();
+            }
             return;
         }
-        let (tx, rx) = mpsc::channel::<UdpPacket>(64);
+        let (tx, rx) = mpsc::channel::<UdpPacket>(UDP_QUEUE);
         let _ = tx.try_send((data, dst));
         map.insert(
             src,
@@ -934,13 +973,19 @@ async fn run_udp_session(
 
     let sess_r = sess.clone();
     let writer_r = writer.clone();
-    let tmpl = template.clone();
     let recv_task = tokio::spawn(async move {
+        // 复用单个输出缓冲（对齐 sing-tun buf.Buffer 池）：稳态下每个回包
+        // 不再 to_vec()/clone() 分配。旧实现还多做了一次 template.clone()。
+        let mut reply_buf: Vec<u8> = Vec::new();
         while let Ok((payload, from)) = sess_r.recv_from().await {
-            if let Some(pkt) =
-                build_udp_reply_with_template(&tmpl, from, client, &payload)
-            {
-                tun_write(&writer_r, &pkt).await;
+            if build_udp_reply_with_template_into(
+                &mut reply_buf,
+                &template,
+                from,
+                client,
+                &payload,
+            ) {
+                tun_write(&writer_r, &reply_buf).await;
             }
         }
     });
@@ -957,7 +1002,7 @@ async fn run_udp_session(
 
     while let Ok(Some((payload, dest))) = tokio::time::timeout(UDP_IDLE, rx.recv()).await {
         if let Some(e) = sessions.lock().unwrap().get_mut(&client) {
-            e.last_seen = Instant::now();
+            refresh_session(e);
         }
         if let Err(e) = sess.send_to(&payload, dest, None).await {
             debug!(err = %e, "tun: udp send failed");
