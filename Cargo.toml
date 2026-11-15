@@ -2,9 +2,9 @@
 name = "ant"
 version = "0.1.0"
 edition = "2021"
-description = "Minimal proxy (Linux/macOS/Windows) with Hysteria2/VLESS, YAML config (mihomo-style), binary .ars rulesets"
+description = "Minimal proxy"
 license = "MIT"
-repository = "https://github.com/aazz77/ant"
+repository = "https://github.com/evecus/ant"
 
 [[bin]]
 name = "ant"
@@ -118,4 +118,5 @@ lto = true
 codegen-units = 1
 panic = "abort"
 debug = false
-strip = "symbols"
+strip = true
+opt-level = 2

@@ -1,50 +1,40 @@
-name: Build Linux ARM64
+name: build linux arm64
+
 on:
   workflow_dispatch:
-
-env:
-  CARGO_TERM_COLOR: always
-
+  push:
+    branches: [main, master]
 jobs:
-  build-aarch64:
-    name: linux-aarch64
-    runs-on: ubuntu-latest
+  build-arm64-musl:
+    runs-on: ubuntu-24.04-arm
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install Rust stable
+      - name: Set up Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-unknown-linux-musl
 
-      - name: Cache cargo registry
-        uses: actions/cache@v4
+      - uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ runner.os }}-aarch64-unknown-linux-musl-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-aarch64-unknown-linux-musl-cargo-
+          key: musl-arm64
 
-      - name: Install cross
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cross
+      - name: Install musl tools
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
 
-      - name: Build release (aarch64)
-        run: cross build --release --target aarch64-unknown-linux-musl --locked
+      - name: Build (aarch64-unknown-linux-musl, release)
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+        run: cargo build --release --target aarch64-unknown-linux-musl
 
-      - run: |
-          mkdir -p dist
-          cp target/aarch64-unknown-linux-musl/release/ant dist/ant-linux-arm64
-
-      - name: Create GitHub Release
+      - name: Collect artifact
+        run: |
+          cp target/aarch64-unknown-linux-musl/release/ant ant-linux-arm64
+      
+      - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: bin
-          prerelease: false
-          files: dist/ant-*
+          tag_name: test
+          prerelease: true
+          files: ant-linux-arm64
