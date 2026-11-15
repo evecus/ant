@@ -135,7 +135,9 @@ fn apply_bind_iface(sock: &Socket) {
 /// auto-detect-interface (no SO_BINDTODEVICE / SO_MARK there).
 #[cfg(target_os = "windows")]
 fn apply_unicast_if<S: std::os::windows::io::AsRawSocket>(sock: &S, is_v4: bool) {
-    use std::os::windows::io::AsRawSocket;
+    // `AsRawSocket::as_raw_socket` resolves through the `S: AsRawSocket` bound
+    // above; re-importing the trait here is redundant (Windows unused-import
+    // warning) now that the bound uses the fully-qualified path.
     use windows_sys::Win32::Networking::WinSock::{
         setsockopt, IPPROTO_IP, IPPROTO_IPV6, IP_UNICAST_IF, IPV6_UNICAST_IF,
     };

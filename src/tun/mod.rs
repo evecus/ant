@@ -37,9 +37,21 @@ mod system_stack;
 #[cfg(target_os = "windows")]
 mod wfp;
 
-/// Used by `app::sockopt` for interface binding (unix: SO_BINDTODEVICE /
-/// IP_BOUND_IF). Windows uses `iface::bind_interface_index()` instead.
-#[cfg(unix)]
+/// Current physical default-interface name, detected by the interface monitor.
+///
+/// Must be exported on **every** platform:
+/// - `app::sockopt` uses it for socket binding on unix (SO_BINDTODEVICE on
+///   Linux/Android, IP_BOUND_IF on macOS);
+/// - the QUIC outbounds (hysteria2 / tuic / shadowquic / spectre) compare it
+///   unconditionally to decide whether to rebuild the UDP endpoint after a
+///   default-interface change (WLAN <-> Ethernet).
+///
+/// Windows socket binding itself uses `iface::bind_interface_index()`
+/// (IP_UNICAST_IF), but the name is still required for that change detection.
+/// Gating this re-export behind `#[cfg(unix)]` broke the Windows build with
+/// E0425 (`cannot find function bind_interface in module crate::tun`) in all
+/// four QUIC outbounds, while Linux built fine because their sockopt callers
+/// are cfg-gated.
 pub use iface::bind_interface;
 
 /// Detect the physical default interface before outbound sockets are created.
