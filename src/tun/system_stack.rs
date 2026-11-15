@@ -53,7 +53,7 @@ static UDP_DROPS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::n
 fn note_udp_drop() {
     use std::sync::atomic::Ordering;
     let n = UDP_DROPS.fetch_add(1, Ordering::Relaxed);
-    if n % 1024 == 0 {
+    if n.is_multiple_of(1024) {
         warn!(dropped = n + 1, "tun: udp session queue full, dropping packets");
     }
 }

@@ -563,9 +563,14 @@ fn collect_a(msg: &[u8]) -> Vec<std::net::Ipv4Addr> {
     out
 }
 
+/// 真实解析缓存项：A 记录列表 + 写入时刻。
+type RealCacheValue = (Vec<std::net::IpAddr>, Instant);
+/// 域名 → 缓存项。
+type RealCacheMap = HashMap<String, RealCacheValue>;
+
 /// 真实解析缓存（域名 → A 记录）。与 DNS 模块的应答缓存分离：后者在 fake-ip
 /// 模式下缓存的是 fake-ip 应答，不能拿来做拨号用的真实地址。
-static REAL_CACHE: Lazy<Mutex<HashMap<String, (Vec<std::net::IpAddr>, Instant)>>> =
+static REAL_CACHE: Lazy<Mutex<RealCacheMap>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 const REAL_CACHE_TTL: Duration = Duration::from_secs(60);
 const REAL_CACHE_MAX: usize = 4096;

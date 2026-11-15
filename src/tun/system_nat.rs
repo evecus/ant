@@ -119,8 +119,8 @@ impl TcpNat {
         for _ in 0..total {
             let p = self
                 .port_index
-                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
-                    Some(if cur >= NAT_PORT_END {
+                .try_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
+                    Some(if cur == NAT_PORT_END {
                         NAT_PORT_START
                     } else {
                         cur + 1
