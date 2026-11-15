@@ -2,8 +2,7 @@ name: build linux arm64
 
 on:
   workflow_dispatch:
-  push:
-    branches: [main, master]
+
 jobs:
   build-arm64-musl:
     runs-on: ubuntu-24.04-arm

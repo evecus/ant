@@ -27,26 +27,15 @@ jobs:
           ndk-version: r27c
           add-to-path: true
 
-      - name: Cache cargo
-        uses: actions/cache@v4
+      - uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ runner.os }}-aarch64-linux-android-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-aarch64-linux-android-cargo-
+          key: musl-android-arm64
 
       - name: Install cargo-ndk
         uses: taiki-e/install-action@v2
         with:
           tool: cargo-ndk
 
-      # NDK r23+ dropped libgcc, but rustc still links -lgcc for android.
-      # Patch every NDK dir containing libunwind.a with a libgcc.a stub that
-      # redirects to -lunwind (same trick as the openlist-rs release workflow).
       - name: Workaround NDK r23+ missing libgcc
         shell: bash
         run: |

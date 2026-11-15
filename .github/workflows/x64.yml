@@ -1,50 +1,40 @@
-name: Build Linux x64
+name: build linux x64
+
+
 on:
   workflow_dispatch:
 
-env:
-  CARGO_TERM_COLOR: always
-
 jobs:
-  build-x64:
-    name: linux-x64
+  build-x86_64-musl:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install Rust stable
+      - name: Set up Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-unknown-linux-musl
 
-      - name: Cache cargo registry
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ runner.os }}-x86_64-unknown-linux-musl-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-x86_64-unknown-linux-musl-cargo-
 
-      - name: Install cross
-        uses: taiki-e/install-action@v2
+      - uses: Swatinem/rust-cache@v2
         with:
-          tool: cross
+          key: musl-x86_64
 
-      - name: Build release (x86_64)
-        run: cross build --release --target x86_64-unknown-linux-musl --locked
+      - name: Install musl tools
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Build (x86_64-unknown-linux-musl, release)
+        env:
+          CARGO_TARGET_x86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+        run: cargo build --release --target x86_64-unknown-linux-musl
+
+      - name: Collect artifact
+        run: |
+          cp target/x86_64-unknown-linux-musl/release/ant ant-linux-x86_64
       
-      - run: |
-          mkdir -p dist
-          cp target/x86_64-unknown-linux-musl/release/ant dist/ant-linux-x86_64
-
-      - name: Create GitHub Release
+      - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: bin
-          prerelease: false
-          files: dist/ant-*
+          files: ant-linux-x86_64
