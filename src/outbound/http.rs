@@ -412,7 +412,8 @@ mod tests {
 
     #[test]
     fn header_end_detection() {
-        assert_eq!(find_header_end(b"HTTP/1.1 200 OK\r\nA: b\r\n\r\nbody"), Some(26));
+        // `\r\n\r\n` starts at index 21, so the header ends at 25 (body starts there).
+        assert_eq!(find_header_end(b"HTTP/1.1 200 OK\r\nA: b\r\n\r\nbody"), Some(25));
         assert_eq!(find_header_end(b"HTTP/1.1 20"), None);
     }
 
