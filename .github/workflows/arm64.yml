@@ -34,6 +34,6 @@ jobs:
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: test
+          tag_name: ci
           prerelease: true
           files: ant-linux-arm64
