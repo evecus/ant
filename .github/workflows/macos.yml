@@ -1,4 +1,4 @@
-name: Build macOS
+name: macOS ci
 
 on:
   workflow_dispatch:
@@ -52,6 +52,6 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: bin
-          prerelease: false
+          tag_name: ci
+          prerelease: true
           files: dist/ant-*
