@@ -2,7 +2,7 @@
 # 跑全部测试 → flutter build windows → 打包 portable zip（bin/ant.exe +
 # run/rules/ant/*.ars）→ 上传 artifact / 创建 Release。
 # ant.exe 取自 evecus/ant 最新 release；.ars 规则集随源码内置，CI 不下载。
-name: Build Windows Gui
+name: Windows Gui ci
 
 on:
   workflow_dispatch:
@@ -123,6 +123,6 @@ jobs:
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: test
+          tag_name: ci
           prerelease: true
           files: ant-gui-windows-x64.zip
