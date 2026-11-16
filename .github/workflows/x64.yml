@@ -1,4 +1,4 @@
-name: build linux x64
+name: linux x64 ci
 
 
 on:
