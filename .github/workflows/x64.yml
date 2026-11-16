@@ -19,7 +19,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: musl-x86_64
+          key: linux-x86_64
 
       - name: Install musl tools
         run: sudo apt-get update && sudo apt-get install -y musl-tools
