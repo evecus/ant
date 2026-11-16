@@ -1,0 +1,81 @@
+name: release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '发布版本号 (例如: v1.0.0)'
+        required: true
+        default: 'v0.1.0'
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  BIN_NAME: live-server
+  RELEASE_NAME: Live-Server
+
+jobs:
+  build:
+    name: Build ${{ matrix.name }}
+    runs-on: ${{ matrix.run }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            name: linux-x86_64
+            run: ubuntu-latest
+          - target: aarch64-unknown-linux-musl
+            name: linux-arm64
+            run: ubuntu-24.04-arm
+
+    steps:
+      - uses: actions/checkout@v4
+      
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Build web client
+        run: |
+          cd frontend
+          npm ci --no-audit --no-fund
+          npm run build
+      
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.name }}
+
+      - name: Inject version
+        env:
+          VERSION: ${{ github.event.inputs.version }}
+        run: |
+          V="${VERSION#v}"
+          sed -i '/^\[package\]/,/^\[/{/^\[package\]/!{s/^version[[:space:]]*=.*/version = "'"${V}"'"/}}' Cargo.toml
+      
+      - name: Update Cargo.lock
+        run: cargo update
+
+      - name: Install musl tools
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Build (${{ matrix.target }}, release)
+        run: cargo build --release --target ${{ matrix.target }} --locked
+
+      - name: Rename artifact
+        run: |
+          mkdir dist
+          cp target/${{ matrix.target }}/release/${BIN_NAME} \
+             dist/${BIN_NAME}-${{ matrix.name }}
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ env.RELEASE_NAME }} ${{ github.event.inputs.version }}
+          tag_name: ${{ github.event.inputs.version }}
+          files: dist/*
