@@ -1,4 +1,4 @@
-name: Build MIPS
+name: MIPS ci
 
 on:
   workflow_dispatch:
