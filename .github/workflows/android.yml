@@ -1,4 +1,4 @@
-name: Android apk ci
+name: Android ci
 
 on:
   workflow_dispatch:
