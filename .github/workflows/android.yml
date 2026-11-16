@@ -1,4 +1,4 @@
-name: Build Android
+name: Android apk ci
 
 on:
   workflow_dispatch:
@@ -61,8 +61,8 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: bin
-          prerelease: false
+          tag_name: ci
+          prerelease: true
           files: dist/ant-*
 
       - name: Checkout afa branch
