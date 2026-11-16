@@ -11,13 +11,17 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
-  BIN_NAME: live-server
-  RELEASE_NAME: Live-Server
+  BIN_NAME: ant
+  RELEASE_NAME: Ant
 
 jobs:
   build:
     name: Build ${{ matrix.name }}
     runs-on: ${{ matrix.run }}
+    # Windows 默认是 pwsh，统一用 bash，下面的脚本才能三个平台通用
+    defaults:
+      run:
+        shell: bash
     strategy:
       fail-fast: false
       matrix:
@@ -28,20 +32,20 @@ jobs:
           - target: aarch64-unknown-linux-musl
             name: linux-arm64
             run: ubuntu-24.04-arm
+          - target: x86_64-pc-windows-msvc
+            name: windows-x86_64
+            run: windows-latest
+            ext: .exe
+          - target: aarch64-apple-darwin
+            name: macos-arm64
+            run: macos-latest
+          - target: aarch64-linux-android
+            name: android-arm64
+            run: ubuntu-latest
 
     steps:
       - uses: actions/checkout@v4
-      
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
 
-      - name: Build web client
-        run: |
-          cd frontend
-          npm ci --no-audit --no-fund
-          npm run build
-      
       - name: Set up Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -56,13 +60,30 @@ jobs:
           VERSION: ${{ github.event.inputs.version }}
         run: |
           V="${VERSION#v}"
-          sed -i '/^\[package\]/,/^\[/{/^\[package\]/!{s/^version[[:space:]]*=.*/version = "'"${V}"'"/}}' Cargo.toml
-      
+          # 只改 [package] 段里的 version。用 perl 而不是 sed -i：
+          # BSD sed（macOS）的 -i 语法与 GNU 不同，原写法在 macOS 上会报错
+          perl -0pi -e 's/(\[package\][^\[]*?\nversion\s*=\s*)"[^"]*"/$1"'"$V"'"/' Cargo.toml
+          grep -n '^version' Cargo.toml
+
       - name: Update Cargo.lock
         run: cargo update
 
       - name: Install musl tools
+        if: contains(matrix.target, 'musl')
         run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Set up Android NDK toolchain
+        if: matrix.target == 'aarch64-linux-android'
+        run: |
+          NDK="${ANDROID_NDK_LATEST_HOME:-$ANDROID_NDK_ROOT}"
+          BIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          test -x "$BIN/aarch64-linux-android24-clang" || { echo "::error::找不到 NDK clang：$BIN"; exit 1; }
+          {
+            # rustc 链接器 + ring 等 C 依赖（cc crate）的编译器 / 归档器
+            echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$BIN/aarch64-linux-android24-clang"
+            echo "CC_aarch64_linux_android=$BIN/aarch64-linux-android24-clang"
+            echo "AR_aarch64_linux_android=$BIN/llvm-ar"
+          } >> "$GITHUB_ENV"
 
       - name: Build (${{ matrix.target }}, release)
         run: cargo build --release --target ${{ matrix.target }} --locked
@@ -70,8 +91,31 @@ jobs:
       - name: Rename artifact
         run: |
           mkdir dist
-          cp target/${{ matrix.target }}/release/${BIN_NAME} \
-             dist/${BIN_NAME}-${{ matrix.name }}
+          cp "target/${{ matrix.target }}/release/${BIN_NAME}${{ matrix.ext }}" \
+             "dist/${BIN_NAME}-${{ matrix.name }}${{ matrix.ext }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ant-${{ matrix.name }}
+          path: dist/*
+          if-no-files-found: error
+
+  # 单独一个 job 统一发布：多个 matrix 同时创建同一个 Release 会有竞态
+  release:
+    name: Publish release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: ant-*
+          merge-multiple: true
+          path: dist
+
+      - name: List files
+        run: ls -la dist
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
