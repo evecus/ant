@@ -73,5 +73,6 @@ etherparse = "0.15"
 [profile.release]
 lto = true
 codegen-units = 1
-strip = "symbols"
-debug = false
+panic = "abort"
+strip = true
+opt-level = 2
