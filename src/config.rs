@@ -213,8 +213,8 @@ fn default_tun_mtu() -> u32 {
 /// Requires the `ebpf` feature and Linux/Android. `wan`/`lan` select capture
 /// interfaces: a device name, `auto` (default-route device), or `none`/empty
 /// (disabled). `bypass-cgroup` entries are cgroup v2 paths or short unit names
-/// (`frpc` → `system.slice/frpc.service`). `bypass-ruleset` points to IP/CIDR
-/// rule-set files whose networks are forced DIRECT in the kernel.
+/// (`frpc` → `system.slice/frpc.service`). `bypass-ip` names `rule-providers:`
+/// entries whose IP-CIDRs are forced DIRECT in the kernel.
 #[cfg_attr(not(feature = "ebpf"), allow(dead_code))]
 #[derive(Debug, Clone, Deserialize)]
 pub struct EbpfConfig {
@@ -232,9 +232,11 @@ pub struct EbpfConfig {
     /// Cgroups whose traffic is never captured (path or short unit name).
     #[serde(default, rename = "bypass-cgroup")]
     pub bypass_cgroup: Vec<String>,
-    /// IP/CIDR rule-set files (`*.json`/`*.yaml`/`*.ars`) whose networks bypass.
-    #[serde(default, rename = "bypass-ruleset")]
-    pub bypass_ruleset: Vec<String>,
+    /// Names of `rule-providers:` entries whose IP networks are forced DIRECT
+    /// in the kernel (never captured). Like any other ruleset, the provider is
+    /// loaded from its configured path/URL; only its IP-CIDR entries are used.
+    #[serde(default, rename = "bypass-ip")]
+    pub bypass_ip: Vec<String>,
 }
 
 fn default_udp_workers() -> u8 {
@@ -249,7 +251,7 @@ impl Default for EbpfConfig {
             lan: None,
             udp_workers: default_udp_workers(),
             bypass_cgroup: Vec::new(),
-            bypass_ruleset: Vec::new(),
+            bypass_ip: Vec::new(),
         }
     }
 }

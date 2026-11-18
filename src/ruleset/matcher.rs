@@ -7,6 +7,11 @@ use fst::Set;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::Arc;
 
+/// An IP network as `(address, prefix-len)`. Kept public so consumers (e.g.
+/// the eBPF datapath) can use the same shape without repeating the tuple type.
+#[cfg_attr(not(feature = "ebpf"), allow(dead_code))]
+pub type IpCidr<V> = (V, u8);
+
 struct IpRanges<T: Copy + Ord> {
     ranges: Vec<(T, T)>,
 }
@@ -86,6 +91,12 @@ pub struct RuleSet {
     regexes: Option<regex::RegexSet>,
     ipv4: IpRanges<u32>,
     ipv6: IpRanges<u128>,
+    /// Original CIDRs, kept so the eBPF datapath can install them into kernel
+    /// LPM tries (the range form above is for userspace matching only).
+    #[cfg_attr(not(feature = "ebpf"), allow(dead_code))]
+    ipv4_cidrs: Vec<(Ipv4Addr, u8)>,
+    #[cfg_attr(not(feature = "ebpf"), allow(dead_code))]
+    ipv6_cidrs: Vec<(Ipv6Addr, u8)>,
 }
 
 impl RuleSet {
@@ -125,16 +136,18 @@ impl RuleSet {
             }
         };
 
+        let ipv4_cidrs = loaded.ipv4_cidrs.clone();
+        let ipv6_cidrs = loaded.ipv6_cidrs.clone();
         let ipv4 = IpRanges::build(
-            loaded
-                .ipv4_cidrs
-                .into_iter()
+            ipv4_cidrs
+                .iter()
+                .copied()
                 .map(|(a, p)| ipv4_cidr_to_range(a, p)),
         );
         let ipv6 = IpRanges::build(
-            loaded
-                .ipv6_cidrs
-                .into_iter()
+            ipv6_cidrs
+                .iter()
+                .copied()
                 .map(|(a, p)| ipv6_cidr_to_range(a, p)),
         );
 
@@ -154,6 +167,8 @@ impl RuleSet {
             regexes,
             ipv4,
             ipv6,
+            ipv4_cidrs,
+            ipv6_cidrs,
         })
     }
 
@@ -199,16 +214,18 @@ impl RuleSet {
             }
         };
 
+        let ipv4_cidrs = compiled.ipv4_cidrs.clone();
+        let ipv6_cidrs = compiled.ipv6_cidrs.clone();
         let ipv4 = IpRanges::build(
-            compiled
-                .ipv4_cidrs
-                .into_iter()
+            ipv4_cidrs
+                .iter()
+                .copied()
                 .map(|(a, p)| ipv4_cidr_to_range(a, p)),
         );
         let ipv6 = IpRanges::build(
-            compiled
-                .ipv6_cidrs
-                .into_iter()
+            ipv6_cidrs
+                .iter()
+                .copied()
                 .map(|(a, p)| ipv6_cidr_to_range(a, p)),
         );
 
@@ -221,7 +238,16 @@ impl RuleSet {
             regexes,
             ipv4,
             ipv6,
+            ipv4_cidrs,
+            ipv6_cidrs,
         })
+    }
+
+    /// Original IPv4/IPv6 CIDRs as `(addr, prefix)` pairs. Used by the eBPF
+    /// datapath to populate kernel LPM tries for `bypass-ip`.
+    #[cfg_attr(not(feature = "ebpf"), allow(dead_code))]
+    pub fn ip_cidrs(&self) -> (&[IpCidr<Ipv4Addr>], &[IpCidr<Ipv6Addr>]) {
+        (&self.ipv4_cidrs, &self.ipv6_cidrs)
     }
 
     pub fn match_domain(&self, domain: &str) -> bool {

@@ -551,6 +551,18 @@ rule-providers:
     behavior: ip
     path: /root/rules/cn-ip.ars
 
+  # Referenced by ebpf.bypass-ip — only their IP-CIDR entries are installed
+  # into the kernel as DIRECT; domain entries (if any) are ignored.
+  cnip:
+    type: file
+    behavior: ip
+    path: /root/rules/cnip.ars
+
+  privateip:
+    type: file
+    behavior: ip
+    path: /root/rules/privateip.ars
+
   # Remote example — download once at startup, save under rules/geoip.ars
   # geoip:
   #   type: http
@@ -673,6 +685,6 @@ route:
 #     - frpc           #   → system.slice/frpc.service
 #     - system.slice/frps.service
 #     - user-1000.slice/session-c1.scope
-#   bypass-ruleset:    # IP/CIDR rule-set files whose networks are forced DIRECT
-#     - /etc/ant/bypass.json
-#     - /etc/ant/lan.yaml
+#   bypass-ip:         # rule-providers names whose IP-CIDRs are forced DIRECT
+#     - cnip           #   defined under rule-providers: like any other ruleset
+#     - privateip

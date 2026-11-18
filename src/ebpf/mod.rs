@@ -88,7 +88,7 @@ pub async fn run_ebpf(
             maps.add_cidr(range, rules::Verdict::Proxy)?;
         }
     }
-    install_bypass_rulesets(&mut maps, &e.bypass_ruleset)?;
+    install_bypass_ip(&mut maps, &router, &e.bypass_ip)?;
 
     let maps = Arc::new(AsyncMutex::new(maps));
 
@@ -142,62 +142,46 @@ pub async fn run_ebpf(
     result
 }
 
-/// Parse `bypass-ruleset` files and insert their IP/CIDR networks as DIRECT.
-/// Accepts .ars (ARST binary), JSON/YAML text rule-sets. Only IP networks are
-/// used; domain entries are ignored (routing stays in ant's userspace Router).
+/// Install the IP networks of the `bypass-ip` rulesets as DIRECT in the kernel.
+///
+/// Names refer to `rule-providers:` entries, exactly like `RULE-SET` in `route:`.
+/// The providers are loaded once by the Router at startup; we reuse that
+/// in-memory copy so bypass semantics match routing semantics byte-for-byte.
+/// Only the IP-CIDR portion is used; domain entries are ignored (routing stays
+/// in ant's userspace Router).
 #[cfg(all(feature = "ebpf", any(target_os = "linux", target_os = "android")))]
-fn install_bypass_rulesets(
+fn install_bypass_ip(
     maps: &mut rules::StaticMaps,
-    paths: &[String],
+    router: &crate::app::router::Router,
+    names: &[String],
 ) -> Result<()> {
-    for path in paths {
-        let data = std::fs::read(path)
-            .with_context(|| format!("read bypass-ruleset {path}"))?;
-        let cidrs = parse_ip_rules(&data, path)?;
-        for cidr in &cidrs {
-            if let Err(e) = maps.add_cidr(cidr, rules::Verdict::Direct) {
-                tracing::warn!(error = %e, cidr, "bypass-ruleset CIDR");
+    for name in names {
+        let Some((v4, v6)) = router.ruleset_ip_cidrs(name) else {
+            anyhow::bail!("ebpf.bypass-ip: rule-provider `{name}` not loaded");
+        };
+        if v4.is_empty() && v6.is_empty() {
+            anyhow::bail!("ebpf.bypass-ip: rule-provider `{name}` has no IP-CIDR entries");
+        }
+        let mut count = 0usize;
+        for (addr, plen) in &v4 {
+            let cidr = format!("{addr}/{plen}");
+            if let Err(e) = maps.add_cidr(&cidr, rules::Verdict::Direct) {
+                tracing::warn!(error = %e, cidr, "bypass-ip CIDR");
+            } else {
+                count += 1;
             }
         }
-        tracing::info!(path, cidrs = cidrs.len(), "bypass-ruleset loaded");
+        for (addr, plen) in &v6 {
+            let cidr = format!("{addr}/{plen}");
+            if let Err(e) = maps.add_cidr(&cidr, rules::Verdict::Direct) {
+                tracing::warn!(error = %e, cidr, "bypass-ip CIDR");
+            } else {
+                count += 1;
+            }
+        }
+        tracing::info!(name, cidrs = count, "bypass-ip installed");
     }
     Ok(())
-}
-
-/// Extract IP/CIDR strings from a rule-set file. For text formats, any token
-/// that parses as an IP network is collected; for .ars the IP-CIDR FST section
-/// is currently not decoded (text sources are the supported bypass format).
-#[cfg(all(feature = "ebpf", any(target_os = "linux", target_os = "android")))]
-fn parse_ip_rules(data: &[u8], path: &str) -> Result<Vec<String>> {
-    let text = String::from_utf8_lossy(data);
-    let mut out = Vec::new();
-    for line in text.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        // Collect any whitespace/comma-separated token that parses as CIDR/IP.
-        for tok in line.split(|c: char| c.is_whitespace() || c == ',') {
-            let tok = tok.trim_matches(|c: char| c == '\'' || c == '"');
-            if tok.is_empty() {
-                continue;
-            }
-            let cidr = if tok.contains('/') {
-                tok.to_string()
-            } else if tok.parse::<std::net::IpAddr>().is_ok() {
-                format!("{tok}/32")
-            } else {
-                continue;
-            };
-            if rules::parse_v4_cidr(&cidr).is_ok() || rules::parse_v6_cidr(&cidr).is_ok() {
-                out.push(cidr);
-            }
-        }
-    }
-    if out.is_empty() {
-        tracing::warn!(path, "no IP/CIDR entries found in bypass-ruleset");
-    }
-    Ok(out)
 }
 
 /// Stub for builds without the feature / on unsupported platforms.

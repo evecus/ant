@@ -149,7 +149,7 @@ impl StaticMaps {
     }
 
     /// Add one CIDR with an explicit verdict (used for the fake-IP range and
-    /// `bypass-ruleset` IP lists).
+    /// `bypass-ip` ruleset networks).
     pub fn add_cidr(&mut self, cidr: &str, verdict: Verdict) -> Result<()> {
         self.insert_cidr(cidr, verdict.to_u8())
     }

@@ -66,6 +66,13 @@ enum DnsRoute {
     Rules(Vec<(crate::config::RuleKind, DnsAction)>),
 }
 
+/// `(IPv4 CIDRs, IPv6 CIDRs)` of a loaded ruleset, for the eBPF bypass-ip path.
+#[cfg(all(feature = "ebpf", any(target_os = "linux", target_os = "android")))]
+type RulesetCidrs = (
+    Vec<crate::ruleset::IpCidr<std::net::Ipv4Addr>>,
+    Vec<crate::ruleset::IpCidr<std::net::Ipv6Addr>>,
+);
+
 pub struct Router {
     rulesets: RwLock<HashMap<String, RuleSet>>,
     routes: Vec<RouteEntry>,
@@ -395,6 +402,18 @@ impl Router {
             g.insert(name.to_string(), rs);
             tracing::info!(name, "ruleset hot-reloaded");
         }
+    }
+
+    /// Original IP CIDRs of a loaded ruleset, for the eBPF datapath's
+    /// `bypass-ip` (kernel LPM tries). Returns `None` when the named ruleset
+    /// is not loaded. IPv6 is included only when the ruleset still carries it
+    /// (top-level `ipv6: false` strips IPv6 at load time).
+    #[cfg(all(feature = "ebpf", any(target_os = "linux", target_os = "android")))]
+    pub fn ruleset_ip_cidrs(&self, name: &str) -> Option<RulesetCidrs> {
+        let guard = self.rulesets.read().ok()?;
+        let rs = guard.get(name)?;
+        let (v4, v6) = rs.ip_cidrs();
+        Some((v4.to_vec(), v6.to_vec()))
     }
 
     /// Snapshot of loaded rulesets for the API info panel: (name, rule_count).
