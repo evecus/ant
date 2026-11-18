@@ -70,6 +70,79 @@ enum Commands {
     },
 }
 
+/// 启动前统一探测所有需要监听的端口：任一被其他程序占用则立即返回 Err，
+/// 由 `main` 的 `?` 终止进程。避免入站 / API 在后台 task 里绑定失败、
+/// 主进程却因其他常驻 task（provider 刷新等）永远卡在 `join_all` 而「假活」。
+///
+/// 复用各入站实际使用的地址生成（`listen_addrs`）与绑定函数，保证预检
+/// 与真实监听语义一致（dual-stack、IPv6 fallback、SO_REUSEADDR）。
+/// 探测 socket 绑定成功后立即释放，真正监听由后续各 `run_*` 重新绑定；
+/// 极小的释放→重绑竞态窗口可接受（本意是捕获启动期已占用的端口）。
+fn preflight_ports(cfg: &Config) -> Result<()> {
+    let bind = cfg.global.bind_address.as_str();
+    let ipv6 = cfg.global.ipv6;
+
+    // (用途, 端口)：需要 TCP 监听的入站。
+    let mut tcp_ports: Vec<(&str, u16)> = Vec::new();
+    // (用途, 端口)：需要 UDP 监听的入站。
+    let mut udp_ports: Vec<(&str, u16)> = Vec::new();
+
+    if let Some(p) = cfg.global.mixed_port.filter(|p| *p > 0) {
+        tcp_ports.push(("mixed-port", p));
+    }
+    if let Some(p) = cfg.global.http_port.filter(|p| *p > 0) {
+        tcp_ports.push(("http-port", p));
+    }
+    if let Some(p) = cfg.global.socks_port.filter(|p| *p > 0) {
+        tcp_ports.push(("socks-port", p));
+    }
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    {
+        if let Some(p) = cfg.global.tproxy_port.filter(|p| *p > 0) {
+            tcp_ports.push(("tproxy-port", p));
+            udp_ports.push(("tproxy-port", p));
+        }
+        if let Some(p) = cfg.global.redir_port.filter(|p| *p > 0) {
+            tcp_ports.push(("redir-port", p));
+        }
+    }
+    // eBPF 模式下 DNS 由透明 socket 接管，无独立监听端口。
+    if cfg.dns.enable && !cfg.ebpf.enable {
+        let p = cfg.dns.listen_port();
+        if p > 0 {
+            tcp_ports.push(("dns.port", p));
+            udp_ports.push(("dns.port", p));
+        }
+    }
+
+    for (label, port) in &tcp_ports {
+        for addr in app::sockopt::listen_addrs(bind, *port, ipv6) {
+            app::sockopt::bind_tcp_listener(addr).with_context(|| {
+                format!("{label} 监听端口 {addr} 绑定失败：已被其他程序占用（port={port}）")
+            })?;
+        }
+    }
+    for (label, port) in &udp_ports {
+        for addr in app::sockopt::listen_addrs(bind, *port, ipv6) {
+            app::sockopt::bind_udp_listener(addr).with_context(|| {
+                format!("{label} UDP 监听端口 {addr} 绑定失败：已被其他程序占用（port={port}）")
+            })?;
+        }
+    }
+
+    // API 走独立的 host:port 解析（与 run_api 一致）。地址非法时不在此改变行为，
+    // 交由运行期原逻辑报错；仅在地址合法时探测端口占用。
+    if !cfg.global.api.trim().is_empty() {
+        if let Ok(addr) = app::api::parse_listen(&cfg.global.api) {
+            std::net::TcpListener::bind(addr).with_context(|| {
+                format!("api 监听端口 {addr} 绑定失败：已被其他程序占用")
+            })?;
+        }
+    }
+
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let _ = rustls::crypto::ring::default_provider().install_default();
@@ -164,6 +237,10 @@ async fn main() -> Result<()> {
         .init();
 
     tracing::info!("ant starting, config={}", config_path);
+
+    // Fail fast: 任一所需入站 / API / DNS 监听端口被占用则立即退出，
+    // 避免后台 task 绑定失败但主进程假活。放在任何系统副作用之前。
+    preflight_ports(&cfg)?;
 
     // GID loop prevention must run BEFORE any outbound / provider / DNS /
     // inbound sockets are created — skgid is fixed at socket creation time.

@@ -433,6 +433,13 @@ pub struct GlobalConfig {
     /// IP rule-providers. Default false. Per-rule `no-resolve` skips this line.
     #[serde(default, rename = "route-resolve")]
     pub route_resolve: bool,
+    /// 用户态绕过保留/私有地址：目标 IP 命中 RFC1918 / loopback / link-local /
+    /// CGNAT(100.64/10) / multicast / IPv6 ULA 等保留段时，路由直接判为 DIRECT，
+    /// 不进入 `route:` 规则匹配。与 `ebpf.bypass-private`（内核层写 LPM trie 绕过）
+    /// 互补：本项作用于用户态路由决策，对 tun / redir / tproxy / mixed / ebpf relay
+    /// 等所有入站生效，不影响 DNS 上游选择。默认 false（保留地址仍可被规则匹配）。
+    #[serde(default, rename = "ip-is-private")]
+    pub ip_is_private: bool,
     /// Global persistent cache (redb). Default false.
     /// When true: DNS, Fake-IP, and select-group choices are stored in redb
     /// (`cache-file`). Rule-providers always use files (never redb).

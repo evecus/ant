@@ -85,6 +85,8 @@ pub struct Router {
     sniff: bool,
     /// Top-level `route-resolve`.
     route_resolve: bool,
+    /// Top-level `ip-is-private`: user-space bypass of reserved/private IPs.
+    ip_is_private: bool,
     // Read by the DNS-hijack path in tproxy/redir inbounds (linux/android only).
     #[cfg_attr(
         not(any(target_os = "linux", target_os = "android")),
@@ -258,6 +260,7 @@ impl Router {
             fakeip_whitelist: cfg.dns.fakeip_filter_mode == "whitelist",
             sniff: cfg.global.sniff,
             route_resolve: cfg.global.route_resolve,
+            ip_is_private: cfg.global.ip_is_private,
             hijack_dns: dns_enabled && cfg.dns.route_hijack,
             dns_route,
             ipv6,
@@ -502,6 +505,22 @@ impl Router {
     ) -> RouteMatch {
         // Fake-ip addresses must not hit ip rulesets; route by the mapped domain.
         let dst_ip = dst_ip.filter(|addr| self.domain_for_fakeip(*addr).is_none());
+
+        // 顶层 `ip-is-private`：用户态绕过保留/私有地址。命中即 DIRECT，优先于
+        // 任何 route 规则。与 ebpf.bypass-private（内核 LPM trie）互补；DNS
+        // 决策走 dns_outbound_for_domain，不经此处，故不受影响。
+        if self.ip_is_private {
+            if let Some(addr) = dst_ip {
+                if is_private_or_reserved(addr) {
+                    tracing::debug!("route ip-is-private -> direct for {addr}");
+                    return RouteMatch {
+                        outbound: Outbound::Direct,
+                        rule: "IP-IS-PRIVATE".into(),
+                    };
+                }
+            }
+        }
+
         for entry in &self.routes {
             if self.match_kind(
                 &entry.kind,
@@ -643,6 +662,37 @@ fn rule_label(kind: &crate::config::RuleKind) -> String {
     }
 }
 
+/// 用户态保留/私有地址判定（顶层 `ip-is-private`）。
+///
+/// 与内核层 `ebpf::rules::StaticMaps::add_private_direct` 的集合对齐：
+/// RFC1918（10/8、172.16/12、192.168/16）、loopback、link-local、CGNAT
+/// （100.64/10）、multicast、IPv6 ULA/link-local。IPv4-mapped IPv6 先解映射。
+fn is_private_or_reserved(addr: IpAddr) -> bool {
+    match addr {
+        IpAddr::V4(a) => {
+            // `is_shared()`（CGNAT 100.64/10）在 std 仍属 unstable `ip`，这里手动判定。
+            let o = a.octets();
+            let cgnat = o[0] == 100 && (o[1] & 0xC0) == 0x40;
+            a.is_private()
+                || a.is_loopback()
+                || a.is_link_local()
+                || cgnat
+                || a.is_multicast()
+                || a.is_unspecified()
+        }
+        IpAddr::V6(a) => {
+            if let Some(v4) = a.to_ipv4_mapped() {
+                return is_private_or_reserved(IpAddr::V4(v4));
+            }
+            a.is_unique_local()
+                || a.is_unicast_link_local()
+                || a.is_multicast()
+                || a.is_loopback()
+                || a.is_unspecified()
+        }
+    }
+}
+
 fn ip_in_cidr(addr: IpAddr, cidr: &str) -> bool {
     let cidr = cidr.trim();
     if let Ok(ip) = cidr.parse::<IpAddr>() {
@@ -715,6 +765,7 @@ mod tests {
             fakeip_whitelist: whitelist,
             sniff: false,
             route_resolve: false,
+            ip_is_private: false,
             hijack_dns: false,
             dns_route: DnsRoute::FollowRoute {
                 direct: DnsAction::Upstream(parse_nameserver("223.5.5.5:53").unwrap()),
@@ -773,6 +824,7 @@ mod tests {
             fakeip_whitelist: false,
             sniff: false,
             route_resolve: false,
+            ip_is_private: false,
             hijack_dns: false,
             dns_route: DnsRoute::Rules(vec![
                 (
@@ -818,6 +870,7 @@ mod tests {
             fakeip_whitelist: false,
             sniff: false,
             route_resolve: false,
+            ip_is_private: false,
             hijack_dns: false,
             dns_route: DnsRoute::FollowRoute {
                 direct: DnsAction::Upstream(parse_nameserver("223.5.5.5:53").unwrap()),
@@ -834,5 +887,72 @@ mod tests {
             Some(DnsAction::Upstream(u)) => assert_eq!(u.to_string(), "udp://8.8.8.8:53"),
             other => panic!("expected proxy upstream, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn private_or_reserved_ip_classification() {
+        // 命中：RFC1918 / loopback / link-local / CGNAT / multicast / v6 ULA-ll / 映射
+        for s in [
+            "10.1.2.3",
+            "172.16.0.1",
+            "192.168.1.1",
+            "127.0.0.1",
+            "169.254.1.1",
+            "100.64.0.1",
+            "224.0.0.1",
+            "0.0.0.0",
+            "fd00::1",
+            "fe80::1",
+            "ff02::1",
+            "::1",
+            "::ffff:192.168.1.1",
+        ] {
+            let ip: IpAddr = s.parse().unwrap();
+            assert!(is_private_or_reserved(ip), "{s} 应判为保留地址");
+        }
+        // 未命中：公网地址
+        for s in ["8.8.8.8", "1.1.1.1", "223.5.5.5", "2606:4700:4700::1111"] {
+            let ip: IpAddr = s.parse().unwrap();
+            assert!(!is_private_or_reserved(ip), "{s} 不应判为保留地址");
+        }
+    }
+
+    fn router_with_ip_is_private(on: bool) -> Router {
+        Router {
+            rulesets: RwLock::new(HashMap::new()),
+            routes: vec![],
+            final_outbound: Outbound::Node("main".into()),
+            fakeip: false,
+            fakeip_pool: None,
+            fakeip_filter: vec![],
+            fakeip_whitelist: false,
+            sniff: false,
+            route_resolve: false,
+            ip_is_private: on,
+            hijack_dns: false,
+            dns_route: DnsRoute::Rules(vec![]),
+            ipv6: true,
+            global_ipv6: true,
+            dns_cache: None,
+        }
+    }
+
+    #[test]
+    fn ip_is_private_bypasses_private_but_not_public() {
+        let on = router_with_ip_is_private(true);
+        let private: IpAddr = "10.0.0.1".parse().unwrap();
+        let m = on.match_route(Some("example.com"), Some(private), &[]);
+        assert_eq!(m.outbound, Outbound::Direct);
+        assert_eq!(m.rule, "IP-IS-PRIVATE");
+
+        let public: IpAddr = "8.8.8.8".parse().unwrap();
+        let m = on.match_route(None, Some(public), &[]);
+        assert_eq!(m.outbound, Outbound::Node("main".into()));
+        assert_eq!(m.rule, "MATCH");
+
+        // 开关关闭：保留地址仍按常规规则（MATCH → 节点）处理。
+        let off = router_with_ip_is_private(false);
+        let m = off.match_route(None, Some(private), &[]);
+        assert_eq!(m.outbound, Outbound::Node("main".into()));
     }
 }

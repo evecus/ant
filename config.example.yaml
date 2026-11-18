@@ -48,6 +48,15 @@ redir-port: 7892
 # route-resolve: false
 #   When true, domain hosts are DNS-resolved before matching IP rules / IP
 #   rule-providers. Default false. Per-rule opt-out: append `,no-resolve`.
+#
+# ip-is-private: false
+#   User-space bypass of private/reserved destination IPs. When true, any
+#   connection whose target IP is RFC1918 / loopback / link-local / CGNAT
+#   (100.64/10) / multicast / IPv6 ULA-link-local is routed DIRECT before any
+#   route: rule is consulted. Applies to every inbound (mixed/redir/tproxy/
+#   tun/ebpf relay); DNS upstream selection is unaffected. Default false, so
+#   reserved IPs remain matchable by rules. Complements ebpf.bypass-private,
+#   which bypasses the same ranges in the kernel (LPM trie) instead.
 
 # TUN virtual NIC (kernel NAT system stack). Does NOT install routes — you must
 # use auto-route (or point traffic at the device yourself with ip rule/route).

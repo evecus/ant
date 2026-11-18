@@ -44,12 +44,6 @@ pub struct RelayCtx {
     pub nodes: Vec<String>,
 }
 
-fn mark_control(fd: std::os::fd::RawFd) {
-    if let Err(e) = super::datapath::mark_global_control(fd) {
-        tracing::debug!(error = %e, "mark control socket");
-    }
-}
-
 /// Map an ant `Outbound` decision to a kernel verdict (for DOMAIN_ROUTE
 /// publication). A named outbound is encoded as its index in `nodes`.
 fn outbound_verdict(ob: &Outbound, nodes: &[String]) -> Verdict {
@@ -77,8 +71,15 @@ async fn answer_and_publish(
     // Extract qname + answered IPs from the response and publish verdicts.
     let domain = dns::extract_qname(query);
     if let Some(ref name) = domain {
-        let verdict = outbound_verdict(&ctx.router.match_outbound(Some(name), None), &ctx.nodes);
         for ip in dns::answer_addresses(&response) {
+            // Evaluate the rules per answered IP: DOMAIN_ROUTE is consulted
+            // before the CIDR tries in the kernel, so a domain-only verdict
+            // (usually the MATCH/PROXY fallback) would otherwise override
+            // `bypass-ip` / IP-CIDR / RULE-SET ip rules for CN addresses.
+            let verdict = outbound_verdict(
+                &ctx.router.match_outbound(Some(name), Some(ip)),
+                &ctx.nodes,
+            );
             let mut maps = ctx.maps.lock().await;
             if let Err(e) = maps.publish_domain_ip(ip, verdict) {
                 tracing::debug!(error = %e, "publish DOMAIN_ROUTE");
@@ -255,13 +256,9 @@ async fn sniff_client(conn: &mut TcpStream) -> Result<(Vec<u8>, Option<String>)>
 }
 
 async fn dial_direct(dst: SocketAddr) -> Result<TcpStream> {
-    let sock = if dst.is_ipv4() {
-        tokio::net::TcpSocket::new_v4()?
-    } else {
-        tokio::net::TcpSocket::new_v6()?
-    };
-    mark_control(sock.as_raw_fd());
-    tokio::time::timeout(DIRECT_DIAL_TIMEOUT, sock.connect(dst))
+    // sockopt::connect_tcp applies the control-plane mark (plus Android
+    // protect / SO_MARK) before connect(), so the dial is never re-captured.
+    tokio::time::timeout(DIRECT_DIAL_TIMEOUT, crate::app::sockopt::connect_tcp(dst))
         .await
         .map_err(|_| anyhow::anyhow!("direct dial {dst}: timeout"))?
         .with_context(|| format!("direct dial {dst}"))
@@ -331,7 +328,7 @@ async fn run_udp_worker(id: usize, sock: std::net::UdpSocket, ctx: Arc<RelayCtx>
         if orig.port() == DNS_PORT {
             let ctx = ctx.clone();
             tokio::spawn(async move {
-                if let Err(e) = handle_udp_dns(&payload, client, ctx).await {
+                if let Err(e) = handle_udp_dns(&payload, client, orig, ctx).await {
                     tracing::warn!(error = %e, "udp dns flow");
                 }
             });
@@ -372,10 +369,23 @@ async fn run_udp_worker(id: usize, sock: std::net::UdpSocket, ctx: Arc<RelayCtx>
 
 /// UDP DNS: answer and send the reply from a socket bound to the original
 /// destination, so the datapath restores the client-facing framing.
-async fn handle_udp_dns(payload: &[u8], client: SocketAddr, ctx: Arc<RelayCtx>) -> Result<()> {
+///
+/// The reply socket is bound to `orig` (the resolver address the client
+/// queried), NOT to `client`: it lives inside `antns`, and a datagram whose
+/// source and destination are both the client address has no valid route there
+/// (`ENETUNREACH`), so no DNS answer was ever delivered.
+async fn handle_udp_dns(
+    payload: &[u8],
+    client: SocketAddr,
+    orig: SocketAddr,
+    ctx: Arc<RelayCtx>,
+) -> Result<()> {
     let response = answer_and_publish(payload, client, &ctx).await?;
-    let reply = create_reply_socket(client)?;
-    reply.send_to(&response, client).await?;
+    let reply = create_reply_socket(orig).context("dns reply socket")?;
+    reply
+        .send_to(&response, client)
+        .await
+        .with_context(|| format!("dns reply {orig} -> {client}"))?;
     Ok(())
 }
 
@@ -458,22 +468,21 @@ impl UdpSession for DirectUdpSession {
     }
 }
 
+/// Direct UDP upstream. The socket MUST be created in the host netns (this
+/// task never enters `antns`): inside `antns` the only route is back through
+/// `ant0peer`, so a direct send would fail with ENETUNREACH. `bind_udp` applies
+/// the control-plane mark (and Android protect/SO_MARK) so the TC hooks don't
+/// re-capture it.
 async fn direct_udp_session(dst: SocketAddr) -> Result<Box<dyn UdpSession>> {
     let bind: SocketAddr = if dst.is_ipv4() {
         "0.0.0.0:0".parse().unwrap()
     } else {
         "[::]:0".parse().unwrap()
     };
-    let sock = super::ns::with_antns(|| {
-        let s = std::net::UdpSocket::bind(bind)?;
-        mark_control(s.as_raw_fd());
-        Ok(s)
-    })?;
-    sock.set_nonblocking(true)?;
-    Ok(Box::new(DirectUdpSession {
-        sock: tokio::net::UdpSocket::from_std(sock)?,
-        dst,
-    }))
+    let sock = crate::app::sockopt::bind_udp(bind)
+        .await
+        .context("direct udp socket")?;
+    Ok(Box::new(DirectUdpSession { sock, dst }))
 }
 
 async fn pump_udp_replies(flow: Arc<UdpFlow>) -> Result<()> {
