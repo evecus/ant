@@ -1,0 +1,89 @@
+name: Build eBPF Andriod arm64 
+
+on:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-android-arm64:
+    name: ant (android/aarch64, bionic, ebpf)
+    runs-on: ubuntu-24.04   # x86_64 runner + NDK cross compile; NDK preinstalled
+    permissions:
+      contents: write
+    env:
+      ANDROID_API: "28"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install stable toolchain + android target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - name: Install nightly + rust-src (for eBPF)
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src, llvm-tools
+          # bpfel-unknown-none has no prebuilt rust-std -> -Zbuild-std=core
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            .
+            ant-ebpf
+          key: ebpf-android
+
+      - name: Install bpf-linker (prebuilt, x86_64)
+        run: |
+          set -eux
+          sudo apt-get update
+          sudo apt-get install -y zstd
+          curl -fsSL -o bpf-linker.tar.zst \
+            https://github.com/aya-rs/bpf-linker/releases/latest/download/bpf-linker-x86_64-unknown-linux-musl.tar.zst
+          mkdir -p "$HOME/.local/bin"
+          tar -xpf bpf-linker.tar.zst -C "$HOME/.local/bin"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/bpf-linker" --version || true
+
+      - name: Build eBPF object
+        working-directory: ant-ebpf
+        run: |
+          cargo +nightly build --release \
+            -Zbuild-std=core \
+            --target bpfel-unknown-none
+
+      - name: Set up Android NDK toolchain env
+        run: |
+          set -eux
+          NDK="${ANDROID_NDK_LATEST_HOME:-${ANDROID_NDK_HOME:-${ANDROID_NDK_ROOT:-}}}"
+          test -d "$NDK" || { echo "NDK not found on runner"; exit 1; }
+          BIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          CLANG="$BIN/aarch64-linux-android${ANDROID_API}-clang"
+          test -x "$CLANG"
+          {
+            echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$CLANG"
+            echo "CC_aarch64_linux_android=$CLANG"
+            echo "AR_aarch64_linux_android=$BIN/llvm-ar"
+            echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_AR=$BIN/llvm-ar"
+          } >> "$GITHUB_ENV"
+
+      - name: Build userspace (aarch64-linux-android, with ebpf)
+        run: |
+          cargo +stable build --release --features ebpf \
+            --target aarch64-linux-android -p ant
+
+      - name: Package
+        run: |
+          set -eux
+          BIN=target/aarch64-linux-android/release/ant
+          mkdir -p dist
+          cp "$BIN" dist/ant-android-arm64-ebpf
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ebpf-test
+          files: dist/ant-android-arm64-ebpf

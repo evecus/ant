@@ -1,0 +1,15 @@
+[package]
+name = "ant-ebpf-common"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[features]
+default = []
+std = []
+
+[dependencies]
+
+# aya is userspace-only; excluded from BPF target builds (honk's pattern).
+[target.'cfg(not(target_arch = "bpf"))'.dependencies]
+aya = "0.13"

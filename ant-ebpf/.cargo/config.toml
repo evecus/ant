@@ -1,0 +1,5 @@
+# Pass --btf to bpf-linker: BTF emission is off by default and aya
+# requires BTF for BTF maps (btf_map). DWARF must also be present
+# (see debug = 2 in Cargo.toml).
+[target.'cfg(all())']
+rustflags = ["-C", "link-arg=--btf"]

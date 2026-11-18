@@ -1,0 +1,80 @@
+name: Build eBPF Linux arm64 
+
+on:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # ---------------------------------------------------------------- linux aarch64-musl
+  build-linux-arm64:
+    name: ant (linux/aarch64-musl, static, ebpf)
+    runs-on: ubuntu-24.04-arm   # native arm64 runner – no cross needed for BPF
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install musl toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools zstd
+
+      - name: Install stable toolchain + musl target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-musl
+
+      - name: Install nightly + rust-src (for eBPF)
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src, llvm-tools
+          # Do NOT list bpfel-unknown-none here: no prebuilt rust-std for
+          # that target on aarch64 host; we use -Zbuild-std=core instead.
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            .
+            ant-ebpf
+          key: ebpf-musl
+
+      - name: Install bpf-linker (prebuilt, arm64)
+        run: |
+          set -eux
+          curl -fsSL -o bpf-linker.tar.zst \
+            https://github.com/aya-rs/bpf-linker/releases/latest/download/bpf-linker-aarch64-unknown-linux-musl.tar.zst
+          mkdir -p "$HOME/.local/bin"
+          tar -xpf bpf-linker.tar.zst -C "$HOME/.local/bin"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          bpf-linker --version || true
+
+      - name: Build eBPF object
+        working-directory: ant-ebpf
+        run: |
+          cargo +nightly build --release \
+            -Zbuild-std=core \
+            --target bpfel-unknown-none
+
+      - name: Build userspace (aarch64-musl, static, with ebpf)
+        run: |
+          export RUSTFLAGS="-C target-feature=+crt-static -C link-self-contained=yes"
+          cargo +stable build --release --features ebpf \
+            --target aarch64-unknown-linux-musl -p ant
+
+      - name: Package
+        run: |
+          set -eux
+          BIN=target/aarch64-unknown-linux-musl/release/ant
+          mkdir -p dist
+          cp "$BIN" dist/ant-linux-arm64-ebpf
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ebpf-test
+          files: dist/ant-linux-arm64-ebpf
+
+  # ---------------------------------------------------------------- android aarch64

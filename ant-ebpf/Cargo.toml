@@ -1,0 +1,22 @@
+[package]
+name = "ant-ebpf"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-only"
+publish = false
+
+[dependencies]
+aya-ebpf = "0.2"
+aya-ebpf-bindings = "0.2"
+aya-ebpf-cty = "0.3"
+ant-ebpf-common = { path = "../ant-ebpf-common" }
+
+[profile.release]
+opt-level = 2
+# bpf-linker converts full DWARF into BTF (enabled via --btf in
+# .cargo/config.toml); line-tables-only (debug = 1) has no type info.
+debug = 2
+overflow-checks = false
+lto = true
+panic = "abort"
+codegen-units = 1
