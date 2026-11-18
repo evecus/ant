@@ -23,6 +23,8 @@ mod ns;
 mod relay;
 #[cfg(all(feature = "ebpf", any(target_os = "linux", target_os = "android")))]
 mod rules;
+#[cfg(all(feature = "ebpf", any(target_os = "linux", target_os = "android")))]
+mod wan_watch;
 
 use anyhow::Result;
 #[cfg(all(feature = "ebpf", any(target_os = "linux", target_os = "android")))]
@@ -58,6 +60,11 @@ pub async fn run_ebpf(
         stop: Option<Arc<tokio::sync::Notify>>,
         /// cgroup bypass watcher (step 8).
         cgroup: Option<JoinHandle<()>>,
+        /// Dynamic-WAN watcher (step 9b): the shared watcher plus its loop.
+        wan: Option<(
+            Arc<std::sync::Mutex<wan_watch::WanWatcher>>,
+            JoinHandle<()>,
+        )>,
     }
 
     impl Teardown {
@@ -83,6 +90,12 @@ pub async fn run_ebpf(
             if let Some(j) = self.cgroup.take() {
                 j.abort();
             }
+            // Stop the dynamic-WAN loop, then remove our wan_egress filters:
+            // netlink-attached TC filters outlive the process.
+            if let Some((w, j)) = self.wan.take() {
+                j.abort();
+                w.lock().unwrap_or_else(|e| e.into_inner()).detach_all();
+            }
             // Detach TC / sk_lookup programs by dropping the aya loader.
             self.dp.take();
             if self.netns {
@@ -101,10 +114,10 @@ pub async fn run_ebpf(
         janitor: None,
         stop: None,
         cgroup: None,
+        wan: None,
     };
 
-    // 0. Pre-resolve node server hostnames while no TC hook exists yet
-    //    (aligns with silk's `resolve_server` loop before `create_silkns`).
+    // 0. Pre-resolve node server hostnames while no TC hook exists yet.
     //    The results are cached in the DNS module and reused by later dials,
     //    so startup does not depend on our own DNS path surviving capture.
     crate::dns::pre_resolve_servers(&outbounds.server_addrs()).await;
@@ -115,20 +128,29 @@ pub async fn run_ebpf(
     td.netns = true;
     datapath::setup_links()?;
 
-    // 2. Resolve capture interfaces.
+    // 2. Resolve capture interfaces. `wan: dynamic` (or `wan: auto` on
+    //    Android) switches to the dynamic watcher: no fixed attachment here,
+    //    wan_egress is (re-)attached by wan_watch to every interface that
+    //    currently holds a default route, and the Android control-socket rule
+    //    follows the primary network.
     let lan = datapath::resolve_interface(e.lan.as_deref().unwrap_or(""))?;
-    let wan = datapath::resolve_interface(e.wan.as_deref().unwrap_or(""))?;
-    // Android: route control-plane sockets (SO_MARK) via the WAN table so
-    // dials don't fall into netd's unreachable rule (no-op on desktop Linux).
-    datapath::setup_android_control_route(wan.as_ref().map(|(n, _)| n.as_str()));
+    let wan_spec = e.wan.as_deref().map(str::trim);
+    let dynamic_wan =
+        wan_spec == Some("dynamic") || (ns::is_android() && wan_spec == Some("auto"));
+    let wan = if dynamic_wan {
+        None
+    } else {
+        datapath::resolve_interface(wan_spec.unwrap_or(""))?
+    };
+    if !dynamic_wan {
+        // Android: route control-plane sockets (SO_MARK) via the WAN table so
+        // dials don't fall into netd's unreachable rule (no-op on desktop).
+        datapath::setup_android_control_route(wan.as_ref().map(|(n, _)| n.as_str()));
+    }
 
-    // 3. Ordered node list; index encodes the kernel verdict. The kernel's
-    //    default verdict is just "capture and let userspace decide": the relay
-    //    re-runs the full route (incl. proxy-group selection) per flow, so a
-    //    coarse VERDICT_PROXY is correct here. Using the MATCH outbound label
-    //    would fail because a proxy-group name (e.g. PROXY) is not a concrete
-    //    node and is therefore absent from `node_names()`.
-    let nodes = outbounds.node_names();
+    // 3. The kernel's default verdict is just "capture and let userspace
+    //    decide": the relay re-runs the full route (incl. proxy-group
+    //    selection) per flow, so a coarse VERDICT_PROXY is correct here.
     let default_verdict = rules::Verdict::Proxy;
 
     // 4. Load eBPF object + attach all hooks; take map handles. Hand the
@@ -140,7 +162,7 @@ pub async fn run_ebpf(
         !e.bypass_cgroup.is_empty(),
         true, // flow cache on
         e.udp_workers,
-        0,    // new-flow rate limit off (ant config has no field yet)
+        e.new_flow_limit.unwrap_or(0), // per-source new-flow rate limit (0 = off)
     )?;
     datapath::install_control_marker(&dp)?;
     td.dp = Some(dp);
@@ -179,7 +201,6 @@ pub async fn run_ebpf(
         router: router.clone(),
         outbounds: outbounds.clone(),
         maps: maps.clone(),
-        nodes,
     });
     let mut tcp_listeners = vec![listeners.tcp4];
     if let Some(tcp6) = listeners.tcp6 {
@@ -204,6 +225,19 @@ pub async fn run_ebpf(
     td.dp().set_ready(true)?;
     td.gate_open = true;
     tracing::info!("ant eBPF datapath ready");
+
+    // 9b. Dynamic WAN capture: listeners, maps and the gate are all up now.
+    //     Initial sync runs inline so the first default-route interface is
+    //     covered immediately; the spawned loop re-syncs every 2 seconds.
+    if dynamic_wan {
+        let w = Arc::new(std::sync::Mutex::new(wan_watch::WanWatcher::new(
+            td.dp().ebpf.clone(),
+        )));
+        w.lock().unwrap_or_else(|e| e.into_inner()).sync();
+        let handle = wan_watch::spawn(w.clone());
+        td.wan = Some((w, handle));
+        tracing::info!("dynamic wan capture active (auto_wan)");
+    }
 
     // Run until Ctrl-C, SIGTERM, or a relay loop fails. In every case the
     // guard's Drop reverses all of the above. This whole function compiles

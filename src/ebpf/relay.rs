@@ -40,57 +40,62 @@ pub struct RelayCtx {
     pub router: Arc<Router>,
     pub outbounds: Arc<OutboundManager>,
     pub maps: Arc<Mutex<StaticMaps>>,
-    /// Ordered node-name list; index encodes VERDICT_NODE_BASE + i in the kernel.
-    pub nodes: Vec<String>,
 }
 
-/// Map an ant `Outbound` decision to a kernel verdict (for DOMAIN_ROUTE
-/// publication). A named outbound is encoded as its index in `nodes`.
-fn outbound_verdict(ob: &Outbound, nodes: &[String]) -> Verdict {
-    match ob {
-        Outbound::Direct => Verdict::Direct,
-        Outbound::Block => Verdict::Block,
-        Outbound::Node(name) => match nodes.iter().position(|n| n == name) {
-            Some(i) => Verdict::Node(i as u8),
-            None => Verdict::Proxy,
-        },
-    }
-}
-
-/// Answer a single DNS query (already assembled bytes) and publish a verdict
-/// for every A/AAAA address in the answer into DOMAIN_ROUTE. The verdict is
-/// derived from ant's Router on the queried domain, so subsequent data flows
-/// to those IPs route by domain without userspace string matching in the TC.
+/// Answer a single DNS query (already assembled bytes) and publish kernel
+/// verdicts for the answered addresses.
+///
+/// Publication policy (deliberately narrow): only DIRECT/BLOCK verdicts are
+/// written into the kernel DOMAIN_ROUTE map. Proxy/node verdicts are NEVER
+/// published — proxy routing always happens in userspace, where the Router
+/// re-evaluates every flow against fresh rules and live proxy-group state.
+///
+/// Why per-IP full-route evaluation for the direct side: DOMAIN_ROUTE is
+/// consulted before the CIDR tries in the kernel, so a published verdict must
+/// be the Router's final answer for that (domain, ip) pair — evaluating only
+/// domain rules would shadow route: IP rules (GEOIP / IP-CIDR / RULE-SET).
+///
+/// Fake-IP answers are skipped entirely: a fake address must never receive a
+/// kernel DIRECT short-circuit (the client would dial the bogus address
+/// straight out the WAN), and proxy-intended fake addresses gain nothing from
+/// a Proxy publication anyway.
 async fn answer_and_publish(
     query: &[u8],
-    client: SocketAddr,
+    _client: SocketAddr,
     ctx: &RelayCtx,
 ) -> Result<Vec<u8>> {
     let response = answer_query(query, &ctx.router).await?;
 
-    // Extract qname + answered IPs from the response and publish verdicts.
-    let domain = dns::extract_qname(query);
-    if let Some(ref name) = domain {
-        let ips = dns::answer_addresses(&response);
-        if ips.is_empty() {
-            return Ok(response);
+    let Some(name) = dns::extract_qname(query) else {
+        return Ok(response);
+    };
+    let ips = dns::answer_addresses(&response);
+    if ips.is_empty() {
+        return Ok(response);
+    }
+    let mut maps = ctx.maps.lock().await;
+    for ip in ips {
+        // Fake addresses never enter the kernel routing maps (see doc above).
+        if ctx.router.domain_for_fakeip(ip).is_some() {
+            continue;
         }
-        let mut maps = ctx.maps.lock().await;
-        for ip in ips {
-            // Evaluate the rules per answered IP: DOMAIN_ROUTE is consulted
-            // before the CIDR tries in the kernel, so a domain-only verdict
-            // (usually the MATCH/PROXY fallback) would otherwise override
-            // `bypass-ip` / IP-CIDR / RULE-SET ip rules for CN addresses.
-            let verdict = outbound_verdict(
-                &ctx.router.match_outbound(Some(name), Some(ip)),
-                &ctx.nodes,
-            );
-            if let Err(e) = maps.publish_domain_ip(ip, verdict) {
-                tracing::debug!(error = %e, "publish DOMAIN_ROUTE");
+        match ctx.router.match_outbound(Some(&name), Some(ip)) {
+            Outbound::Direct => {
+                if let Err(e) = maps.publish_domain_ip(ip, Verdict::Direct) {
+                    tracing::debug!(error = %e, "publish DOMAIN_ROUTE direct");
+                }
             }
+            Outbound::Block => {
+                if let Err(e) = maps.publish_domain_ip(ip, Verdict::Block) {
+                    tracing::debug!(error = %e, "publish DOMAIN_ROUTE block");
+                }
+            }
+            // Proxy / named node: userspace-only. Not published, so the kernel
+            // falls through to the static CIDR surfaces (bypass-ip, private,
+            // local) and otherwise captures the flow with the default verdict.
+            _ => {}
         }
     }
-    let _ = client;
     Ok(response)
 }
 
@@ -226,7 +231,13 @@ async fn handle_tcp_dns(
             anyhow::bail!("dns/tcp invalid message length {len}");
         }
         let mut query = vec![0u8; len];
-        conn.read_exact(&mut query).await.context("dns/tcp read message")?;
+        match conn.read_exact(&mut query).await {
+            Ok(_) => {}
+            // Half-frame at EOF: a client disconnecting mid-query. Close
+            // cleanly instead of surfacing a spurious error.
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(()),
+            Err(e) => return Err(e).context("dns/tcp read message"),
+        }
 
         let response = match answer_and_publish(&query, client, ctx).await {
             Ok(r) => r,

@@ -243,6 +243,10 @@ pub struct EbpfConfig {
     /// loaded from its configured path/URL; only its IP-CIDR entries are used.
     #[serde(default, rename = "bypass-ip")]
     pub bypass_ip: Vec<String>,
+    /// Per-source new-flow rate limit (flows per second, kernel-side
+    /// NewFlowWindow). 0 or absent = off.
+    #[serde(default, rename = "new-flow-limit")]
+    pub new_flow_limit: Option<u32>,
 }
 
 fn default_udp_workers() -> u8 {
@@ -259,6 +263,7 @@ impl Default for EbpfConfig {
             bypass_private: true,
             bypass_cgroup: Vec::new(),
             bypass_ip: Vec::new(),
+            new_flow_limit: None,
         }
     }
 }
