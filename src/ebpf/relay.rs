@@ -131,6 +131,7 @@ async fn accept_loop(listener: TcpListener, ctx: Arc<RelayCtx>) -> Result<()> {
 async fn handle_tcp(mut conn: TcpStream, client: SocketAddr, ctx: Arc<RelayCtx>) -> Result<()> {
     let orig = orig_dst_tcp(&conn)?;
     if orig.port() == DNS_PORT {
+        // DNS is answered in-place and is never tracked as a connection.
         return handle_tcp_dns(&mut conn, client, orig, &ctx).await;
     }
 
@@ -144,16 +145,32 @@ async fn handle_tcp(mut conn: TcpStream, client: SocketAddr, ctx: Arc<RelayCtx>)
         domain = sniffed;
     }
 
-    // Re-run ant's route rules on the recovered name.
-    let route_ob = ctx.router.match_outbound(domain.as_deref(), Some(orig.ip()));
+    // Re-run ant's route rules on the recovered name; keep the rule label for
+    // the connection panel (match_route is the same decision as match_outbound,
+    // just without discarding `rule`).
+    let matched = ctx.router.match_route(domain.as_deref(), Some(orig.ip()), &[]);
+    let route_ob = matched.outbound;
     if matches!(route_ob, Outbound::Block) {
         tracing::debug!(%orig, domain = ?domain, "tcp blocked by route");
         return Ok(());
     }
+
+    // Register the transparent flow under a single "ebpf" inbound label.
+    // `while_alive` below ties the panel's close button to this relay loop.
+    let guard = crate::app::stats::global().register(crate::app::stats::ConnectionInfo {
+        peer: client,
+        dest: orig,
+        dest_host: domain.clone(),
+        network: "tcp",
+        inbound: "ebpf",
+        rule: matched.rule,
+        outbound: route_ob.label(),
+    });
+
     if matches!(route_ob, Outbound::Direct) {
         let up = dial_direct(orig).await?;
         let up: BoxedStream = Box::new(up);
-        return relay(conn, up, early).await;
+        return guard.while_alive(relay(conn, up, early)).await;
     }
 
     // Named outbound (or default). A fake address must be dialled by name.
@@ -170,7 +187,7 @@ async fn handle_tcp(mut conn: TcpStream, client: SocketAddr, ctx: Arc<RelayCtx>)
         .dial_tcp(orig, dial_name.as_deref())
         .await
         .with_context(|| format!("dial tcp {orig}"))?;
-    relay(conn, upstream, early).await
+    guard.while_alive(relay(conn, upstream, early)).await
 }
 
 /// DNS over TCP: length-prefixed queries answered in-place on the accepted
@@ -265,6 +282,8 @@ struct UdpFlow {
     reply: tokio::net::UdpSocket,
     client: SocketAddr,
     domain: Option<String>,
+    /// Connection-tracking guard; dropped (= Leave) when the flow is removed.
+    guard: crate::app::stats::ConnGuard,
 }
 
 pub async fn run_udp(
@@ -376,10 +395,12 @@ async fn create_udp_flow(
         tracing::debug!(%orig, domain = %d, "udp flow domain");
     }
 
-    let route_ob = ctx.router.match_outbound(domain.as_deref(), Some(orig.ip()));
+    let matched = ctx.router.match_route(domain.as_deref(), Some(orig.ip()), &[]);
+    let route_ob = matched.outbound;
     if matches!(route_ob, Outbound::Block) {
         return Ok(None);
     }
+    let outbound_label = route_ob.label();
     let dial_name = if fake || ctx.router.sniff() {
         domain.clone()
     } else {
@@ -396,11 +417,25 @@ async fn create_udp_flow(
         (dialer.dial_udp(None).await?, dial_name)
     };
 
+    // UDP is long-lived: the guard lives inside UdpFlow, so dropping the flow
+    // (idle timeout or panel close) leaves the tracked connection. DNS never
+    // reaches here (handled by handle_udp_dns in the worker loop).
+    let guard = crate::app::stats::global().register(crate::app::stats::ConnectionInfo {
+        peer: client,
+        dest: orig,
+        dest_host: domain.clone(),
+        network: "udp",
+        inbound: "ebpf",
+        rule: matched.rule,
+        outbound: outbound_label,
+    });
+
     Ok(Some(UdpFlow {
         upstream,
         reply: create_reply_socket(orig)?,
         client,
         domain: flow_domain,
+        guard,
     }))
 }
 
@@ -443,9 +478,15 @@ async fn direct_udp_session(dst: SocketAddr) -> Result<Box<dyn UdpSession>> {
 
 async fn pump_udp_replies(flow: Arc<UdpFlow>) -> Result<()> {
     loop {
-        let (data, _) = tokio::time::timeout(Duration::from_secs(300), flow.upstream.recv_from())
-            .await??;
-        flow.reply.send_to(&data, flow.client).await?;
+        tokio::select! {
+            // "关闭此连接" cancels the guard -> stop pumping; the worker then
+            // removes the flow from the table, dropping the guard (Leave).
+            _ = flow.guard.cancelled() => return Ok(()),
+            resp = tokio::time::timeout(Duration::from_secs(300), flow.upstream.recv_from()) => {
+                let (data, _) = resp??;
+                flow.reply.send_to(&data, flow.client).await?;
+            }
+        }
     }
 }
 

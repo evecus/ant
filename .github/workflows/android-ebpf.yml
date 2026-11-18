@@ -86,4 +86,5 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ebpf-test
+          prerelease: true
           files: dist/ant-android-arm64-ebpf
