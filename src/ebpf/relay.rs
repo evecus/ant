@@ -123,7 +123,15 @@ async fn accept_loop(listener: TcpListener, ctx: Arc<RelayCtx>) -> Result<()> {
         let ctx = ctx.clone();
         tokio::spawn(async move {
             if let Err(e) = handle_tcp(conn, client, ctx).await {
-                tracing::debug!(error = %e, "tcp flow ended");
+                // Dial failures (node / direct) are the actionable ones: show
+                // the full cause chain at warn so they are visible without
+                // debug logging. Ordinary resets / EOFs stay at debug.
+                let chain = format!("{e:#}");
+                if chain.contains("dial") {
+                    tracing::warn!(error = %chain, "tcp dial failed");
+                } else {
+                    tracing::debug!(error = %chain, "tcp flow ended");
+                }
             }
         });
     }
