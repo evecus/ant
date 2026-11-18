@@ -77,10 +77,10 @@ impl WanWatcher {
 
     fn detach_link(&self, id: SchedClassifierLinkId) {
         let mut ebpf = self.ebpf.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(prog) = ebpf.program_mut("wan_egress")
-            && let Ok(p) = TryInto::<&mut SchedClassifier>::try_into(prog)
-        {
-            let _ = p.detach(id);
+        if let Some(prog) = ebpf.program_mut("wan_egress") {
+            if let Ok(p) = TryInto::<&mut SchedClassifier>::try_into(prog) {
+                let _ = p.detach(id);
+            }
         }
     }
 
@@ -121,19 +121,19 @@ fn active_interfaces() -> Vec<(String, u32)> {
             continue;
         }
         let w: Vec<&str> = line.split_whitespace().collect();
-        if let Some(i) = w.iter().position(|x| *x == "dev")
-            && let Some(n) = w.get(i + 1)
-        {
-            let n = n.to_string();
-            if n == "lo"
-                || ["ant0", "tun", "dummy", "docker", "veth", "br-", "virbr"]
-                    .iter()
-                    .any(|p| n.starts_with(p))
-            {
-                continue;
-            }
-            if !names.contains(&n) {
-                names.push(n);
+        if let Some(i) = w.iter().position(|x| *x == "dev") {
+            if let Some(n) = w.get(i + 1) {
+                let n = n.to_string();
+                if n == "lo"
+                    || ["ant0", "tun", "dummy", "docker", "veth", "br-", "virbr"]
+                        .iter()
+                        .any(|p| n.starts_with(p))
+                {
+                    continue;
+                }
+                if !names.contains(&n) {
+                    names.push(n);
+                }
             }
         }
     }
