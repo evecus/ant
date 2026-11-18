@@ -229,6 +229,12 @@ pub struct EbpfConfig {
     /// Parallel UDP transparent listener sockets per family (1..=4).
     #[serde(default = "default_udp_workers", rename = "udp-workers")]
     pub udp_workers: u8,
+    /// Install the built-in private/reserved ranges (RFC1918, loopback,
+    /// link-local, CGNAT, multicast) into the kernel as DIRECT so they bypass
+    /// capture entirely. Default true; set false to send everything through
+    /// the route table (e.g. when upstream rules must also match private IPs).
+    #[serde(default = "default_true", rename = "bypass-private")]
+    pub bypass_private: bool,
     /// Cgroups whose traffic is never captured (path or short unit name).
     #[serde(default, rename = "bypass-cgroup")]
     pub bypass_cgroup: Vec<String>,
@@ -250,6 +256,7 @@ impl Default for EbpfConfig {
             wan: None,
             lan: None,
             udp_workers: default_udp_workers(),
+            bypass_private: true,
             bypass_cgroup: Vec::new(),
             bypass_ip: Vec::new(),
         }

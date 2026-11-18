@@ -681,6 +681,8 @@ route:
 #   wan: auto          # host-originated capture (TC egress); device name | auto | none
 #   lan: eth0          # gateway capture (TC ingress); device name | auto | none/omit
 #   udp-workers: 4     # parallel transparent UDP sockets per family (1..4)
+#   bypass-private: true # install built-in private/reserved ranges as DIRECT in kernel (default true)
+#                        #   false: leave them to the route table (rules can then match private IPs)
 #   bypass-cgroup:     # never captured (cgroup v2); short names expand to system.slice/<n>.service
 #     - frpc           #   → system.slice/frpc.service
 #     - system.slice/frps.service

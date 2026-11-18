@@ -147,9 +147,14 @@ pub async fn run_ebpf(
 
     let mut maps = td.dp().take_maps();
 
-    // 5. Static kernel tables: private/link-local ranges, this host's own
-    //    addresses, fake-IP range (forced PROXY) and any bypass rulesets (DIRECT).
-    maps.add_private_direct()?;
+    // 5. Static kernel tables: private/link-local ranges (unless bypass-private
+    //    is off), this host's own addresses, fake-IP range (forced PROXY) and
+    //    any bypass rulesets (DIRECT).
+    if e.bypass_private {
+        maps.add_private_direct()?;
+    } else {
+        tracing::info!("bypass-private=false: reserved ranges left to route table");
+    }
     let local = maps.add_local_direct().unwrap_or(0);
     tracing::info!(local, "local-direct CIDRs installed");
     if cfg.dns.mode.eq_ignore_ascii_case("fakeip") {
