@@ -33,22 +33,6 @@ pub enum Verdict {
 }
 
 impl Verdict {
-    /// Parse "direct" | "block" | a node name (`nodes` = configured names in
-    /// order). Reserved names follow ant's `Outbound::from_str` semantics.
-    pub fn parse(s: &str, nodes: &[String]) -> Result<Verdict> {
-        let s = s.trim();
-        if s.eq_ignore_ascii_case("direct") {
-            return Ok(Verdict::Direct);
-        }
-        if s.eq_ignore_ascii_case("block") || s.eq_ignore_ascii_case("reject") {
-            return Ok(Verdict::Block);
-        }
-        match nodes.iter().position(|n| n == s) {
-            Some(i) => Ok(Verdict::Node(i as u8)),
-            None => anyhow::bail!("unknown verdict or node: {s}"),
-        }
-    }
-
     pub fn to_u8(self) -> u8 {
         match self {
             Verdict::Direct => VERDICT_DIRECT,

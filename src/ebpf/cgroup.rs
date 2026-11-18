@@ -120,15 +120,15 @@ impl CgroupWatcher {
     }
 }
 
-/// Initial sync, then keep refreshing in the background.
-pub fn start(specs: &[String], maps: Arc<Mutex<StaticMaps>>) -> Result<()> {
+/// Initial sync, then keep refreshing in the background. Returns the task
+/// handle so the caller can abort the watcher during teardown.
+pub fn start(specs: &[String], maps: Arc<Mutex<StaticMaps>>) -> Result<tokio::task::JoinHandle<()>> {
     let mut w = CgroupWatcher::new(specs).context("bypass-cgroup rules")?;
-    tokio::spawn(async move {
+    Ok(tokio::spawn(async move {
         // Do the first sync inside the task to avoid blocking the caller.
         loop {
             w.sync(&maps).await;
             tokio::time::sleep(REFRESH).await;
         }
-    });
-    Ok(())
+    }))
 }

@@ -39,11 +39,74 @@ pub async fn run_ebpf(
 ) -> Result<()> {
     use std::sync::Arc;
     use tokio::sync::Mutex as AsyncMutex;
+    use tokio::task::JoinHandle;
+
+    /// Owns every piece of kernel state created during bring-up and tears it
+    /// down in reverse order on `Drop`. Fields are filled in as each step
+    /// succeeds, so a `?` failure partway through startup cleans up exactly
+    /// the same resources as a normal Ctrl-C/SIGTERM exit — no partial state.
+    struct Teardown {
+        /// netns / veth / policy routing created (step 1).
+        netns: bool,
+        /// BPF object loaded and hooks attached (step 4). Dropping the loader
+        /// detaches the TC / sk_lookup programs.
+        dp: Option<datapath::Datapath>,
+        /// Admission gate was opened (step 9); must close before hooks drop.
+        gate_open: bool,
+        /// Flow-table janitor + its stop notifier (step 8).
+        janitor: Option<JoinHandle<()>>,
+        stop: Option<Arc<tokio::sync::Notify>>,
+        /// cgroup bypass watcher (step 8).
+        cgroup: Option<JoinHandle<()>>,
+    }
+
+    impl Teardown {
+        fn dp(&mut self) -> &mut datapath::Datapath {
+            self.dp.as_mut().expect("datapath not created")
+        }
+    }
+
+    impl Drop for Teardown {
+        fn drop(&mut self) {
+            // Reverse of bring-up: gate → background tasks → hooks → netns.
+            if self.gate_open {
+                if let Err(e) = self.dp().set_ready(false) {
+                    tracing::warn!(error = %e, "teardown: close datapath gate");
+                }
+            }
+            if let Some(stop) = &self.stop {
+                stop.notify_one();
+            }
+            if let Some(j) = self.janitor.take() {
+                j.abort();
+            }
+            if let Some(j) = self.cgroup.take() {
+                j.abort();
+            }
+            // Detach TC / sk_lookup programs by dropping the aya loader.
+            self.dp.take();
+            if self.netns {
+                ns::cleanup(None, None, datapath::ANT0_HOST);
+            }
+        }
+    }
 
     let e = &cfg.ebpf;
+    // One guard for the whole lifecycle; normal exit and early `?` failures
+    // both unwind through its Drop, so teardown lives in exactly one place.
+    let mut td = Teardown {
+        netns: false,
+        dp: None,
+        gate_open: false,
+        janitor: None,
+        stop: None,
+        cgroup: None,
+    };
 
-    // 1. netns + veth + policy routing.
+    // 1. netns + veth + policy routing. Set `netns` only after success so a
+    //    failure here does not try to clean up a namespace we never made.
     ns::create_antns()?;
+    td.netns = true;
     datapath::setup_links()?;
 
     // 2. Resolve capture interfaces.
@@ -53,16 +116,18 @@ pub async fn run_ebpf(
     // dials don't fall into netd's unreachable rule (no-op on desktop Linux).
     datapath::setup_android_control_route(wan.as_ref().map(|(n, _)| n.as_str()));
 
-    // 3. Ordered node list; index encodes the kernel verdict. Default is the
-    //    final MATCH outbound of ant's route table.
+    // 3. Ordered node list; index encodes the kernel verdict. The kernel's
+    //    default verdict is just "capture and let userspace decide": the relay
+    //    re-runs the full route (incl. proxy-group selection) per flow, so a
+    //    coarse VERDICT_PROXY is correct here. Using the MATCH outbound label
+    //    would fail because a proxy-group name (e.g. PROXY) is not a concrete
+    //    node and is therefore absent from `node_names()`.
     let nodes = outbounds.node_names();
-    let default_verdict = {
-        let final_ob = router.match_outbound(None, None);
-        rules::Verdict::parse(&final_ob.label(), &nodes)?
-    };
+    let default_verdict = rules::Verdict::Proxy;
 
-    // 4. Load eBPF object + attach all hooks; take map handles.
-    let mut dp = datapath::load_and_attach(
+    // 4. Load eBPF object + attach all hooks; take map handles. Hand the
+    //    loader to the guard right away so a later `?` still detaches hooks.
+    let dp = datapath::load_and_attach(
         lan,
         wan,
         default_verdict,
@@ -72,8 +137,9 @@ pub async fn run_ebpf(
         0,    // new-flow rate limit off (ant config has no field yet)
     )?;
     datapath::install_control_marker(&dp)?;
+    td.dp = Some(dp);
 
-    let mut maps = dp.take_maps();
+    let mut maps = td.dp().take_maps();
 
     // 5. Static kernel tables: private/link-local ranges, this host's own
     //    addresses, fake-IP range (forced PROXY) and any bypass rulesets (DIRECT).
@@ -95,7 +161,7 @@ pub async fn run_ebpf(
     // 6. Transparent listeners inside antns → publish fds into the sockmap.
     let has_v6 = cfg.global.ipv6;
     let workers = e.udp_workers.clamp(1, 4) as usize;
-    let listeners = listener::create(&mut dp, has_v6, workers)?;
+    let listeners = listener::create(td.dp(), has_v6, workers)?;
 
     // 7. Relay context + control-socket marker used by outbound dials.
     let ctx = Arc::new(relay::RelayCtx {
@@ -116,29 +182,34 @@ pub async fn run_ebpf(
         Some(relay::run_udp(listeners.udp6, ctx.clone()))
     };
 
-    // 8. Background cgroup watcher + flow-table janitor.
-    cgroup::start(&e.bypass_cgroup, maps.clone())?;
+    // 8. Background cgroup watcher + flow-table janitor. Keep their handles
+    //    in the guard so they are stopped during teardown.
+    td.cgroup = Some(cgroup::start(&e.bypass_cgroup, maps.clone())?);
     let stop = Arc::new(tokio::sync::Notify::new());
-    let janitor = maintenance::spawn(maps, stop.clone());
+    td.janitor = Some(maintenance::spawn(maps, stop.clone()));
+    td.stop = Some(stop);
 
     // 9. Open the datapath gate only now that listeners + maps are live.
-    dp.set_ready(true)?;
+    td.dp().set_ready(true)?;
+    td.gate_open = true;
     tracing::info!("ant eBPF datapath ready");
 
-    // Run until ctrl-c or a relay loop fails.
+    // Run until Ctrl-C, SIGTERM, or a relay loop fails. In every case the
+    // guard's Drop reverses all of the above. This whole function compiles
+    // only on Linux/Android (both unix), so tokio's unix signals are safe.
+    let mut sigterm =
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .context("install SIGTERM handler")?;
     let result = tokio::select! {
         r = tcp_task => r.context("tcp relay"),
         r = udp_task => r.context("udp relay"),
         r = async { match udp6_task { Some(t) => t.await, None => std::future::pending().await } } => r.context("udp6 relay"),
         _ = tokio::signal::ctrl_c() => Ok(()),
+        _ = sigterm.recv() => Ok(()),
     };
-
-    // Teardown: close gate first, then stop janitor, drop dp (detaches hooks).
-    dp.set_ready(false)?;
-    stop.notify_one();
-    janitor.abort();
-    drop(dp);
-    ns::cleanup(None, None, datapath::ANT0_HOST);
+    // Explicit drop makes the teardown point obvious; `result` is returned
+    // afterwards. The guard also covers every early `?` above.
+    drop(td);
     result
 }
 
