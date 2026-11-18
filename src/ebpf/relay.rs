@@ -239,6 +239,28 @@ async fn handle_tcp_dns(
     }
 }
 
+/// True while a TCP prefix may still grow into a sniffable one (partial TLS
+/// record, HTTP request whose headers have not ended yet).
+fn tcp_needs_more(buf: &[u8]) -> bool {
+    if buf.is_empty() {
+        return true;
+    }
+    if buf[0] == 0x16 {
+        if buf.len() < 5 {
+            return true;
+        }
+        let rec = u16::from_be_bytes([buf[3], buf[4]]) as usize;
+        return buf.len() < 5 + rec;
+    }
+    const METHODS: [&[u8]; 7] = [
+        b"GET ", b"POST ", b"HEAD ", b"PUT ", b"CONNECT ", b"OPTIONS ", b"DELETE ",
+    ];
+    if METHODS.iter().any(|m| buf.starts_with(m)) {
+        return !buf.windows(4).any(|w| w == b"\r\n\r\n");
+    }
+    buf.len() < 8 && METHODS.iter().any(|m| m.starts_with(buf))
+}
+
 async fn sniff_client(conn: &mut TcpStream) -> Result<(Vec<u8>, Option<String>)> {
     let mut buf = vec![0u8; SNIFF_MAX];
     let mut n = 0usize;
@@ -254,6 +276,11 @@ async fn sniff_client(conn: &mut TcpStream) -> Result<(Vec<u8>, Option<String>)>
                 let r = sniffer::sniff_tcp_ex(&buf[..n], true, false);
                 if let Some(d) = r.domain {
                     domain = Some(d);
+                    break;
+                }
+                // Not TLS / HTTP (e.g. Telegram MTProto, SSH, custom TCP):
+                // nothing more to learn, do not sit out the whole window.
+                if !tcp_needs_more(&buf[..n]) {
                     break;
                 }
             }
@@ -272,11 +299,20 @@ async fn dial_direct(dst: SocketAddr) -> Result<TcpStream> {
         .with_context(|| format!("direct dial {dst}"))
 }
 
-async fn relay(conn: TcpStream, upstream: BoxedStream, early: Vec<u8>) -> Result<()> {
+async fn relay(conn: TcpStream, mut upstream: BoxedStream, early: Vec<u8>) -> Result<()> {
+    // The sniff window consumed the client's first bytes from the accepted
+    // connection. They MUST be replayed to the upstream before copying starts,
+    // otherwise every sniffed flow loses its first segment (TLS ClientHello,
+    // MTProto handshake, ...) and the handshake breaks.
+    if !early.is_empty() {
+        upstream
+            .write_all(&early)
+            .await
+            .context("replay sniffed prefix to upstream")?;
+        upstream.flush().await.ok();
+    }
     let client: BoxedStream = Box::new(conn);
     crate::outbound::relay(client, upstream).await?;
-    let _ = early; // early bytes are normally folded into the dial by the dialer;
-                   // see the note in dial_tcp callers. Kept for signature symmetry.
     Ok(())
 }
 
