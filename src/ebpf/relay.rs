@@ -71,7 +71,12 @@ async fn answer_and_publish(
     // Extract qname + answered IPs from the response and publish verdicts.
     let domain = dns::extract_qname(query);
     if let Some(ref name) = domain {
-        for ip in dns::answer_addresses(&response) {
+        let ips = dns::answer_addresses(&response);
+        if ips.is_empty() {
+            return Ok(response);
+        }
+        let mut maps = ctx.maps.lock().await;
+        for ip in ips {
             // Evaluate the rules per answered IP: DOMAIN_ROUTE is consulted
             // before the CIDR tries in the kernel, so a domain-only verdict
             // (usually the MATCH/PROXY fallback) would otherwise override
@@ -80,7 +85,6 @@ async fn answer_and_publish(
                 &ctx.router.match_outbound(Some(name), Some(ip)),
                 &ctx.nodes,
             );
-            let mut maps = ctx.maps.lock().await;
             if let Err(e) = maps.publish_domain_ip(ip, verdict) {
                 tracing::debug!(error = %e, "publish DOMAIN_ROUTE");
             }
@@ -352,16 +356,29 @@ pub async fn run_udp(
 async fn run_udp_worker(id: usize, sock: std::net::UdpSocket, ctx: Arc<RelayCtx>) -> Result<()> {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<UdpEvent>();
     std::thread::Builder::new().name(format!("ant-udp-recv-{id}")).spawn({
-        move || loop {
+        move || {
+            // One buffer for the thread's lifetime: allocating + zeroing 64 KiB
+            // per datagram dominated CPU on UDP-heavy traffic (QUIC, calls).
             let mut buf = vec![0u8; 65535];
-            match unsafe { recv_orig_dst_blocking(sock.as_raw_fd(), &mut buf) } {
-                Ok((n, client, orig)) => {
-                    let payload = buf[..n].to_vec();
-                    if tx.send(UdpEvent { payload, client, orig }).is_err() {
-                        break;
+            let mut errs = 0u32;
+            loop {
+                match unsafe { recv_orig_dst_blocking(sock.as_raw_fd(), &mut buf) } {
+                    Ok((n, client, orig)) => {
+                        errs = 0;
+                        let payload = buf[..n].to_vec();
+                        if tx.send(UdpEvent { payload, client, orig }).is_err() {
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        errs = errs.saturating_add(1);
+                        if errs <= 3 {
+                            tracing::warn!(error = %e, "udp recvmsg");
+                        }
+                        // A persistent error must not turn this into a busy loop.
+                        std::thread::sleep(Duration::from_millis(if errs > 3 { 200 } else { 10 }));
                     }
                 }
-                Err(e) => tracing::warn!(error = %e, "udp recvmsg"),
             }
         }
     })?;
@@ -496,6 +513,8 @@ async fn create_udp_flow(
 struct DirectUdpSession {
     sock: tokio::net::UdpSocket,
     dst: SocketAddr,
+    /// Scratch receive buffer, reused across datagrams (only the pump task reads).
+    rx_buf: tokio::sync::Mutex<Vec<u8>>,
 }
 #[async_trait::async_trait]
 impl UdpSession for DirectUdpSession {
@@ -505,10 +524,9 @@ impl UdpSession for DirectUdpSession {
         Ok(())
     }
     async fn recv_from(&self) -> Result<(Vec<u8>, SocketAddr)> {
-        let mut buf = vec![0u8; 65535];
-        let (n, from) = self.sock.recv_from(&mut buf).await?;
-        buf.truncate(n);
-        Ok((buf, from))
+        let mut buf = self.rx_buf.lock().await;
+        let (n, from) = self.sock.recv_from(&mut buf[..]).await?;
+        Ok((buf[..n].to_vec(), from))
     }
 }
 
@@ -526,7 +544,11 @@ async fn direct_udp_session(dst: SocketAddr) -> Result<Box<dyn UdpSession>> {
     let sock = crate::app::sockopt::bind_udp(bind)
         .await
         .context("direct udp socket")?;
-    Ok(Box::new(DirectUdpSession { sock, dst }))
+    Ok(Box::new(DirectUdpSession {
+        sock,
+        dst,
+        rx_buf: tokio::sync::Mutex::new(vec![0u8; 65535]),
+    }))
 }
 
 async fn pump_udp_replies(flow: Arc<UdpFlow>) -> Result<()> {
