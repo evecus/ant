@@ -83,7 +83,8 @@ pub fn install_control_marker(dp: &Datapath) -> Result<()> {
 }
 
 /// Whether the control marker is installed (the hooks are attached).
-/// Only the non-test `dnsup::mark` asks.
+/// Queried by sockopt's outbound control mark before tagging each dial socket;
+/// no-op before attach so startup lookups keep the plain socket behaviour.
 #[allow(dead_code)]
 pub fn control_installed() -> bool {
     CONTROL.get().is_some()

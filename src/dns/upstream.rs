@@ -225,6 +225,8 @@ pub async fn exchange_via(upstream: &DnsUpstream, query: &[u8], via: Via) -> Res
 async fn connect_stream(addr: SocketAddr, host: Option<&str>, via: &Via, what: &str) -> Result<BoxedStream> {
     match via {
         None => {
+            // Direct DNS TCP must carry the eBPF control-plane mark, otherwise
+            // our own query gets re-captured by the TC egress hook and loops.
             let s = tokio::time::timeout(TIMEOUT, crate::app::sockopt::connect_tcp(addr))
                 .await
                 .with_context(|| format!("dns {what} connect timeout"))??;
@@ -269,13 +271,43 @@ async fn resolve_upstream_addr(host: &str, port: u16) -> Result<SocketAddr> {
 }
 
 fn invalidate_upstream_addr(host: &str, port: u16) {
-    RESOLVED_CACHE
-        .lock()
-        .unwrap()
-        .remove(&format!("{host}:{port}"));
+    let key = format!("{host}:{port}");
+    RESOLVED_CACHE.lock().unwrap().remove(&key);
+    // resolve_upstream_addr goes through resolve_host_via_bootstrap, which
+    // also populates SERVER_CACHE; clear it too or the stale snapshot would
+    // be reused on the next resolution and defeat invalidation.
+    SERVER_CACHE.lock().unwrap().remove(&key);
 }
 
-/// 解析任意主机名：IP 直过 → default-nameserver（bootstrap）优先 → 系统解析回落。
+/// 节点 server 域名在 eBPF hook attach 之前预解析好的地址（key = `host:port`）。
+/// 由 [`pre_resolve_servers`] 在启动时填充；datapath 起来之后，一次新的 DNS
+/// 查询可能被自己的 TC hook 再次劫持，复用这份启动期快照即可避免依赖该回环
+/// 被打破。地址失效时与 RESOLVED_CACHE 一并清除。
+static SERVER_CACHE: Lazy<Mutex<HashMap<String, SocketAddr>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+
+/// 在 eBPF datapath attach 之前，逐个解析所有非字面量节点 `server`（对齐 silk
+/// `main` 里的 `resolve_server` 循环）。此时没有 hook 能劫持查询，得到的是干净的
+/// bootstrap/系统解析结果，供后续拨号复用。单个失败仅告警不致命，运行期会经
+/// 已打控制面标记的 DNS 路径按需重试。
+#[cfg(all(feature = "ebpf", any(target_os = "linux", target_os = "android")))]
+pub async fn pre_resolve_servers(servers: &[(String, u16)]) {
+    for (host, port) in servers {
+        let host = host.trim();
+        if host.is_empty() || host.parse::<std::net::IpAddr>().is_ok() {
+            continue;
+        }
+        match resolve_host_via_bootstrap(host, *port).await {
+            Ok(a) => tracing::info!(%host, port, %a, "pre-resolved node server"),
+            Err(e) => tracing::warn!(
+                %host, port, error = %e,
+                "pre-resolve node server failed; will retry on dial"
+            ),
+        }
+    }
+}
+
+/// 解析任意主机名：IP 直过 → 预解析快照 → default-nameserver（bootstrap）优先 → 系统解析回落。
 ///
 /// 供 outbound 节点 `server` 域名拨号时使用。bootstrap 优先可避免系统 DNS
 /// 指回 ant 自身时的解析回环；bootstrap 失败仅影响当次解析，由调用方决定
@@ -285,22 +317,34 @@ pub async fn resolve_host_via_bootstrap(host: &str, port: u16) -> Result<SocketA
     if let Ok(ip) = host.parse::<std::net::IpAddr>() {
         return Ok(SocketAddr::new(ip, port));
     }
-    if let Some(boot) = BOOTSTRAP.get() {
+    let key = format!("{host}:{port}");
+    if let Some(a) = SERVER_CACHE.lock().unwrap().get(&key) {
+        return Ok(*a);
+    }
+    let addr = if let Some(boot) = BOOTSTRAP.get() {
         match lookup_via(boot, host, port).await {
-            Ok(a) => return Ok(a),
+            Ok(a) => a,
             Err(e) => {
                 // Per-query; the queried name is user traffic — debug only.
                 tracing::debug!(
                     "resolve {host} via default-nameserver failed: {e:#}; falling back to system resolver"
                 );
+                let mut it = tokio::net::lookup_host((host, port))
+                    .await
+                    .with_context(|| format!("resolve {host} via system resolver"))?;
+                it.next()
+                    .with_context(|| format!("no address for {host}"))?
             }
         }
-    }
-    let mut it = tokio::net::lookup_host((host, port))
-        .await
-        .with_context(|| format!("resolve {host} via system resolver"))?;
-    it.next()
-        .with_context(|| format!("no address for {host}"))
+    } else {
+        let mut it = tokio::net::lookup_host((host, port))
+            .await
+            .with_context(|| format!("resolve {host} via system resolver"))?;
+        it.next()
+            .with_context(|| format!("no address for {host}"))?
+    };
+    SERVER_CACHE.lock().unwrap().insert(key, addr);
+    Ok(addr)
 }
 
 async fn exchange_udp(addr: SocketAddr, query: &[u8]) -> Result<Vec<u8>> {
@@ -309,6 +353,8 @@ async fn exchange_udp(addr: SocketAddr, query: &[u8]) -> Result<Vec<u8>> {
     } else {
         SocketAddr::from(([0u16; 8], 0))
     };
+    // Control-plane mark prevents this query from being re-captured by our own
+    // TC egress hook (the dns udp timeout / memory-blowup loop).
     let sock = crate::app::sockopt::bind_udp(bind).await?;
     sock.connect(addr).await?;
     sock.send(query).await?;

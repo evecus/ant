@@ -40,6 +40,24 @@ fn apply_mark(sock: &Socket) {
     let _ = sock;
 }
 
+/// eBPF datapath loop prevention: mark an outbound socket as control-plane so
+/// the TC hooks never re-capture ant's own dials — proxy-node connections,
+/// DNS upstream queries and direct dials alike. Without this mark, a node dial
+/// whose destination matches a PROXY rule loops back into antns forever.
+/// Mirrors silk's socket `mark`: no-op before the hooks attach (startup lookups
+/// have no datapath to loop through) and on builds without the eBPF feature.
+#[cfg(all(feature = "ebpf", any(target_os = "linux", target_os = "android")))]
+fn apply_control_mark(sock: &Socket) {
+    use std::os::fd::AsRawFd;
+    if crate::ebpf::datapath::control_installed() {
+        if let Err(e) = crate::ebpf::datapath::mark_global_control(sock.as_raw_fd()) {
+            tracing::warn!(error = %e, "ebpf control mark on outbound socket");
+        }
+    }
+}
+#[cfg(not(all(feature = "ebpf", any(target_os = "linux", target_os = "android"))))]
+fn apply_control_mark(_sock: &Socket) {}
+
 /// Android: ask the host app to `VpnService.protect()` this socket so it
 /// bypasses the VPN (an unprivileged app cannot use SO_MARK). Returns
 /// `Ok(true)` if protection is active and applied, in which case the
@@ -329,6 +347,9 @@ pub fn bind_udp_listener(addr: SocketAddr) -> std::io::Result<(UdpSocket, Socket
     }
 }
 
+/// Open an outbound TCP socket. In eBPF mode every socket is control-plane
+/// marked once the datapath is up, so the TC hooks never re-capture ant's own
+/// dials (proxy nodes, DNS upstreams, direct dials). No-op before attach.
 pub async fn connect_tcp(addr: SocketAddr) -> Result<TcpStream> {
     let domain = if addr.is_ipv4() { Domain::IPV4 } else { Domain::IPV6 };
     let sock = Socket::new(domain, Type::STREAM, None).context("tcp socket")?;
@@ -336,6 +357,7 @@ pub async fn connect_tcp(addr: SocketAddr) -> Result<TcpStream> {
         apply_mark(&sock);
         apply_bind_iface(&sock);
     }
+    apply_control_mark(&sock);
     #[cfg(target_os = "windows")]
     // mihomo bindControl skips non-global-unicast destinations (loopback,
     // unspecified, multicast) so local traffic stays local.
@@ -364,6 +386,8 @@ pub async fn connect_tcp(addr: SocketAddr) -> Result<TcpStream> {
     Ok(stream)
 }
 
+/// Bind an outbound UDP socket. In eBPF mode every socket is control-plane
+/// marked once the datapath is up (see [`connect_tcp`]); no-op before attach.
 pub async fn bind_udp(bind: SocketAddr) -> Result<UdpSocket> {
     let domain = if bind.is_ipv4() { Domain::IPV4 } else { Domain::IPV6 };
     let sock = Socket::new(domain, Type::DGRAM, None).context("udp socket")?;
@@ -371,6 +395,7 @@ pub async fn bind_udp(bind: SocketAddr) -> Result<UdpSocket> {
         apply_mark(&sock);
         apply_bind_iface(&sock);
     }
+    apply_control_mark(&sock);
     #[cfg(target_os = "windows")]
     // mihomo bindIfaceToListenConfig: relay/listen UDP sockets are bound to
     // the interface unconditionally (destination may be any).

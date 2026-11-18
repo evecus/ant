@@ -10,7 +10,7 @@ mod bpf_raw;
 #[cfg(all(feature = "ebpf", any(target_os = "linux", target_os = "android")))]
 mod cgroup;
 #[cfg(all(feature = "ebpf", any(target_os = "linux", target_os = "android")))]
-mod datapath;
+pub(crate) mod datapath;
 #[cfg(all(feature = "ebpf", any(target_os = "linux", target_os = "android")))]
 mod dns;
 #[cfg(all(feature = "ebpf", any(target_os = "linux", target_os = "android")))]
@@ -102,6 +102,12 @@ pub async fn run_ebpf(
         stop: None,
         cgroup: None,
     };
+
+    // 0. Pre-resolve node server hostnames while no TC hook exists yet
+    //    (aligns with silk's `resolve_server` loop before `create_silkns`).
+    //    The results are cached in the DNS module and reused by later dials,
+    //    so startup does not depend on our own DNS path surviving capture.
+    crate::dns::pre_resolve_servers(&outbounds.server_addrs()).await;
 
     // 1. netns + veth + policy routing. Set `netns` only after success so a
     //    failure here does not try to clean up a namespace we never made.

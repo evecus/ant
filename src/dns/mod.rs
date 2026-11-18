@@ -10,6 +10,8 @@ pub use upstream::{
     exchange, parse_nameserver, resolve_a_via, resolve_host_via_bootstrap, set_bootstrap,
     DnsUpstream,
 };
+#[cfg(all(feature = "ebpf", any(target_os = "linux", target_os = "android")))]
+pub use upstream::pre_resolve_servers;
 
 use crate::config::Config;
 use crate::app::router::{DnsAction, Router};

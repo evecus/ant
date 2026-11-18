@@ -343,6 +343,16 @@ impl OutboundManager {
         self.node_names.read().map(|g| g.clone()).unwrap_or_default()
     }
 
+    /// All configured node `(server, port)` pairs (static + provider nodes).
+    /// Used to pre-resolve server hostnames before the eBPF hooks attach.
+    #[cfg(all(feature = "ebpf", any(target_os = "linux", target_os = "android")))]
+    pub fn server_addrs(&self) -> Vec<(String, u16)> {
+        self.addrs
+            .read()
+            .map(|m| m.values().cloned().collect())
+            .unwrap_or_default()
+    }
+
     /// Switch a `select` group to `member`.
     pub fn set_group(&self, group: &str, member: &str) -> Result<()> {
         for h in &self.selects {
