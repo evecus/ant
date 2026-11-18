@@ -356,13 +356,21 @@ async fn exchange_udp(addr: SocketAddr, query: &[u8]) -> Result<Vec<u8>> {
     // Control-plane mark prevents this query from being re-captured by our own
     // TC egress hook (the dns udp timeout / memory-blowup loop).
     let sock = crate::app::sockopt::bind_udp(bind).await?;
-    sock.connect(addr).await?;
-    sock.send(query).await?;
+    // Unconnected send_to/recv_from: no connect(2) at all. On Android bionic
+    // routes connect() through netd's fwmarkd, which breaks control-marked
+    // sockets (ENETUNREACH); sendto() is not hooked that way.
+    sock.send_to(query, addr).await?;
     let mut buf = vec![0u8; 4096];
-    let n = tokio::time::timeout(TIMEOUT, sock.recv(&mut buf))
-        .await
-        .context("dns udp timeout")??;
-    Ok(buf[..n].to_vec())
+    let deadline = tokio::time::Instant::now() + TIMEOUT;
+    loop {
+        let (n, from) = tokio::time::timeout_at(deadline, sock.recv_from(&mut buf))
+            .await
+            .context("dns udp timeout")??;
+        // Connected sockets filter by peer; do the same by hand.
+        if from.ip() == addr.ip() && from.port() == addr.port() {
+            return Ok(buf[..n].to_vec());
+        }
+    }
 }
 
 async fn exchange_tcp(addr: SocketAddr, query: &[u8], via: &Via) -> Result<Vec<u8>> {

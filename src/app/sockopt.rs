@@ -347,6 +347,63 @@ pub fn bind_udp_listener(addr: SocketAddr) -> std::io::Result<(UdpSocket, Socket
     }
 }
 
+/// `connect(2)` for outbound dial sockets.
+///
+/// On Android, bionic's `connect()` is routed through libnetd_client (fwmarkd),
+/// which can fail with ENETUNREACH or rewrite the socket mark for sockets that
+/// carry our control-plane SO_MARK. The eBPF datapath depends on that mark
+/// reaching the kernel route lookup untouched, so control-marked sockets issue
+/// the raw `connect` syscall and bypass the libc hook. Elsewhere this is a
+/// plain `Socket::connect`.
+#[cfg(all(feature = "ebpf", target_os = "android"))]
+fn connect_raw(sock: &Socket, addr: &socket2::SockAddr) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
+    if !crate::ebpf::datapath::control_installed() {
+        return sock.connect(addr);
+    }
+    let rc = unsafe {
+        libc::syscall(
+            libc::SYS_connect,
+            sock.as_raw_fd() as libc::c_long,
+            addr.as_ptr() as libc::c_long,
+            addr.len() as libc::c_long,
+        )
+    };
+    if rc < 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+#[cfg(not(all(feature = "ebpf", target_os = "android")))]
+fn connect_raw(sock: &Socket, addr: &socket2::SockAddr) -> std::io::Result<()> {
+    sock.connect(addr)
+}
+
+/// SO_MARK read-back for diagnostics (Linux/Android only).
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn sock_mark_dbg_fd<S: std::os::fd::AsRawFd>(s: &S) -> String {
+    let mut v: u32 = 0;
+    let mut len = std::mem::size_of::<u32>() as libc::socklen_t;
+    let rc = unsafe {
+        libc::getsockopt(
+            s.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_MARK,
+            &mut v as *mut u32 as *mut libc::c_void,
+            &mut len,
+        )
+    };
+    if rc == 0 { format!("{v:#x}") } else { "?".into() }
+}
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
+fn sock_mark_dbg_fd<S>(_s: &S) -> String {
+    "n/a".into()
+}
+fn sock_mark_dbg(s: &Socket) -> String {
+    sock_mark_dbg_fd(s)
+}
+
 /// Open an outbound TCP socket. In eBPF mode every socket is control-plane
 /// marked once the datapath is up, so the TC hooks never re-capture ant's own
 /// dials (proxy nodes, DNS upstreams, direct dials). No-op before attach.
@@ -365,7 +422,7 @@ pub async fn connect_tcp(addr: SocketAddr) -> Result<TcpStream> {
         apply_unicast_if(&sock, addr.is_ipv4());
     }
     sock.set_nonblocking(true)?;
-    match sock.connect(&addr.into()) {
+    match connect_raw(&sock, &addr.into()) {
         Ok(()) => {}
         // Non-blocking connect is expected to report "in progress": EINPROGRESS
         // on Unix, WSAEWOULDBLOCK on Windows. Completion is awaited via
@@ -375,13 +432,20 @@ pub async fn connect_tcp(addr: SocketAddr) -> Result<TcpStream> {
         Err(e) if e.raw_os_error() == Some(libc::EINPROGRESS) => {}
         #[cfg(windows)]
         Err(e) if e.raw_os_error() == Some(windows_sys::Win32::Networking::WinSock::WSAEWOULDBLOCK) => {}
-        Err(e) => return Err(e).context("tcp connect"),
+        Err(e) => {
+            let m = sock_mark_dbg(&sock);
+            return Err(e).context(format!("tcp connect(2) to {addr} [SO_MARK={m}]"));
+        }
     }
     let std: StdTcp = sock.into();
     let stream = TcpStream::from_std(std)?;
     stream.writable().await?;
     if let Some(e) = stream.take_error()? {
-        return Err(e).context("tcp connect");
+        // Asynchronous failure (SO_ERROR after EINPROGRESS): the SYN left the
+        // host and an ICMP / route error came back, as opposed to connect(2)
+        // failing locally above.
+        let m = sock_mark_dbg_fd(&stream);
+        return Err(e).context(format!("tcp connect async SO_ERROR to {addr} [SO_MARK={m}]"));
     }
     Ok(stream)
 }
