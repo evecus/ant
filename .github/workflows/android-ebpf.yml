@@ -1,4 +1,4 @@
-name: Build eBPF Andriod arm64 
+name: eBPF Andriod ci
 
 on:
   workflow_dispatch:

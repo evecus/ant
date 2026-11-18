@@ -1,0 +1,105 @@
+name: Clippy eBPF
+
+on:
+ # push:
+  #  branches: [main, master]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -Dwarnings
+  # Lint against musl, the same libc the release binaries are built with,
+  # so field types (e.g. libc::cmsghdr::cmsg_len) match the build jobs.
+  CLIPPY_TARGET: x86_64-unknown-linux-musl
+
+jobs:
+  clippy-userspace:
+    name: Clippy (userspace)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+          targets: x86_64-unknown-linux-musl
+
+      - name: Install musl tools
+        # Needed by build scripts that compile C for the musl target
+        # (e.g. ring). Clippy itself never links.
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            .
+            ant
+
+      - name: Clippy workspace (no ebpf feature)
+        run: cargo clippy --workspace --all-targets --target "$CLIPPY_TARGET" -- -D warnings
+
+      - name: Stub eBPF object (include_bytes! target)
+        # The ebpf feature compiles include_bytes! of the object built by
+        # ant-ebpf; clippy never runs it, so an empty stub is enough.
+        run: |
+          mkdir -p ant-ebpf/target/bpfel-unknown-none/release
+          touch ant-ebpf/target/bpfel-unknown-none/release/ant-ebpf
+
+      - name: Clippy with ebpf feature (compile-check only, no object)
+        # Feature ebpf only gates include_bytes!; without the object the
+        # binary still type-checks and Clippy runs over the cfg(feature="ebpf")
+        # code paths.
+        run: cargo clippy -p ant --features ebpf --all-targets --target "$CLIPPY_TARGET" -- -D warnings
+
+  clippy-ebpf:
+    name: Clippy (eBPF)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install nightly + rust-src (for eBPF)
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          # clippy is required: `cargo clippy` refuses to run without the
+          # component installed for the active toolchain.
+          components: rust-src, llvm-tools, clippy
+          # Do NOT list bpfel-unknown-none here.
+          # That target has no prebuilt rust-std on aarch64 host;
+          # we use -Zbuild-std=core instead.
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            .
+            ant-ebpf
+            ant
+
+      # Official recommendation: use prebuilt binary instead of cargo install.
+      # https://github.com/aya-rs/bpf-linker#installation
+      - name: Install bpf-linker (prebuilt)
+        run: |
+          set -eux
+          # ubuntu-latest is x86_64; pick the matching prebuilt. (Not needed
+          # for clippy itself — it never links — but keeps the job ready for
+          # a later build step.)
+          curl -fsSL -o bpf-linker.tar.zst \
+            https://github.com/aya-rs/bpf-linker/releases/latest/download/bpf-linker-x86_64-unknown-linux-musl.tar.zst
+          mkdir -p "$HOME/.local/bin"
+          tar -xpf bpf-linker.tar.zst -C "$HOME/.local/bin"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          bpf-linker --version || true
+
+      # Clippy over the bpf target: -Zbuild-std=core builds the core library
+      # from source, so no prebuilt rust-std for the target is needed.
+      - name: Clippy ant-ebpf (bpf target)
+        working-directory: ant-ebpf
+        run: |
+          cargo +nightly clippy \
+            -Zbuild-std=core \
+            --target bpfel-unknown-none
