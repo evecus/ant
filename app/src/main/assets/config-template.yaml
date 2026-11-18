@@ -1,0 +1,31 @@
+# AFA 内置配置模板
+# 启动时由 ConfigManager 生成最终 config.yaml，全部内容由 App 结构化数据注入：
+#   1. 设置页（AppSettings）→ 顶层 ipv6 / api 与整个 dns 段
+#   2. 节点页（NodeStore）→ proxies 段（只写选中的 1 个节点，name 固定为 PROXY；不生成 proxy-groups）
+#   3. 路由页（RouteStore）→ rule-providers 段（路径为应用私有目录绝对路径）
+#   4. 路由页（RouteStore）→ route 段（最后一条固定为 MATCH 兜底；「代理」动作即引用 proxies 里 name 为 PROXY 的节点）
+# 模板里不写死任何 api / dns / 规则，设置页与路由页所见即生效配置。
+# 注意：注释中不要出现下面的注入标记，否则字符串替换会污染 YAML。
+
+log-level: info
+# @GLOBAL@
+sniff: true
+
+# @DNS@
+
+# @PROXIES@
+
+# @RULE_PROVIDERS@
+
+# @ROUTE@
+
+tun:
+  enable: true
+  close-fd-on-drop: false
+  address:
+    - 172.19.0.1/30
+  mtu: 1500
+  dns-hijack:
+    - any:53
+  auto-route: false
+  auto-detect-interface: true

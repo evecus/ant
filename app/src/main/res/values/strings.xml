@@ -1,0 +1,181 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">AFA</string>
+    <string name="vpn_session">ant</string>
+    <string name="notification_channel">VPN 服务</string>
+    <string name="notification_title">AFA 代理</string>
+    <string name="notification_running">VPN 运行中</string>
+    <string name="btn_start">启动 VPN</string>
+    <string name="btn_stop">停止 VPN</string>
+
+    <!-- 首页工具栏 / 抽屉 -->
+    <string name="drawer_subtitle">ant · VpnService</string>
+    <string name="drawer_open">打开侧边栏</string>
+    <string name="drawer_config">配置</string>
+    <string name="drawer_settings">设置</string>
+    <string name="drawer_logs">日志</string>
+    <string name="drawer_about">关于</string>
+    <string name="action_search">搜索</string>
+    <string name="action_more">更多</string>
+    <string name="action_edit">编辑</string>
+    <string name="action_share">分享</string>
+    <string name="action_delete">删除</string>
+    <string name="action_back">返回</string>
+    <string name="search_hint">搜索名称 / 地址 / 协议</string>
+    <string name="menu_new_node">新建节点</string>
+    <string name="menu_export_all">导出全部节点</string>
+    <string name="menu_clear_all">清空全部节点</string>
+    <string name="no_nodes">暂无节点</string>
+    <string name="empty_nodes">还没有节点\n点右上角导入链接，或在「更多」里新建</string>
+    <string name="empty_search">没有匹配的节点</string>
+    <string name="share_title">分享节点</string>
+
+    <!-- 节点导入 / 编辑 -->
+    <string name="btn_import">导入节点</string>
+    <string name="node_import_btn">导入</string>
+    <string name="btn_paste">从剪贴板粘贴</string>
+    <string name="import_hint">支持分享链接（每行一条）或整段 Base64 订阅。App 会自己解析成可编辑的节点，不再交给 ant 转换。</string>
+    <string name="hint_node_links">vless://、vmess://、ss://、trojan://、hysteria2://、tuic://、anytls://、socks5:// …</string>
+    <string name="node_import_ok">已导入 %1$d 个节点，跳过 %2$d 行无效内容</string>
+    <string name="node_import_none">未找到有效的节点链接</string>
+    <string name="node_required">请先添加并选择一个节点</string>
+    <string name="node_switched">已切换节点，重启 VPN 后生效</string>
+    <string name="node_saved">节点已保存</string>
+    <string name="title_new_node">新建节点</string>
+    <string name="title_edit_node">编辑节点</string>
+    <string name="label_protocol">协议类型</string>
+    <string name="protocol_hint">切换协议会重置该协议专属字段，名称 / 地址 / 认证等通用字段保留。</string>
+    <string name="btn_delete">删除</string>
+    <string name="delete_title">删除节点</string>
+    <string name="delete_message">确定删除「%1$s」吗？</string>
+    <string name="clear_all_title">清空全部节点</string>
+    <string name="clear_all_message">将删除所有已保存的节点，此操作不可撤销。</string>
+
+    <!-- 设置 / 日志 -->
+    <string name="btn_logs">日志</string>
+    <string name="btn_settings">设置</string>
+    <string name="title_logs">运行日志</string>
+    <string name="btn_clear">清空</string>
+    <string name="title_settings">设置</string>
+    <string name="btn_save">保存</string>
+    <string name="settings_mtu_label">MTU</string>
+    <string name="settings_dns_hijack">DNS 劫持（any:53）</string>
+    <string name="settings_loglevel_label">核心日志级别</string>
+    <string name="settings_note">TUN 地址固定为 172.19.0.1/30（开启 IPv6 时另配 fdfe:dcba:9876::1/126）。全部设置在启动 VPN 时写入 config.yaml；修改后需重启 VPN 生效。</string>
+    <string name="settings_saved">已保存，重启 VPN 后生效</string>
+    <string name="settings_mtu_invalid">MTU 需在 576 – 10000 之间</string>
+    <string name="logs_empty">暂无日志，启动 VPN 后这里会显示核心输出</string>
+
+    <!-- 设置：网络 / DNS / API -->
+    <string name="settings_section_basic">基础</string>
+    <string name="settings_section_network">网络</string>
+    <string name="settings_section_dns">DNS</string>
+    <string name="settings_section_api">API</string>
+    <string name="settings_ipv6">IPv6</string>
+    <string name="settings_ipv6_note">开启后 TUN 增加 IPv6 地址与 ::/0 路由，内核同时启用双栈与 AAAA 解析；关闭则仅 IPv4。默认关闭，需重启 VPN 生效。</string>
+    <string name="settings_dns_mode_label">DNS 模式</string>
+    <string name="settings_dns_mode_note">redir-host 返回真实 IP；fakeip 返回虚拟 IP（自动配置 198.18.0.0/15），可减少 DNS 泄露。选择 fakeip 后可配置过滤模式与引用规则集。两种模式都按路由规则选择直连 / 代理上游。</string>
+    <string name="settings_direct_dns_label">直连 DNS</string>
+    <string name="settings_proxy_dns_label">代理 DNS</string>
+    <string name="settings_dns_hint">支持裸 IP:端口（按 UDP）或 udp:// / tcp:// / tls:// / https:// 前缀。命中直连规则的域名走直连 DNS，命中节点出站走代理 DNS。</string>
+    <string name="settings_api_enabled">启用 API 面板</string>
+    <string name="settings_api_note">面板与规则集热更新接口。关闭后规则集「刷新」无法热更新，将退回下次启动 VPN 时重新下载。</string>
+
+    <!-- 设置：fakeip 过滤（仅 fakeip 模式显示） -->
+    <string name="settings_fakeip_filter_mode_label">fakeip 过滤模式</string>
+    <string name="settings_fakeip_blacklist">黑名单</string>
+    <string name="settings_fakeip_whitelist">白名单</string>
+    <string name="settings_fakeip_filter_mode_note">黑名单：命中规则集的域名返回真实 IP，其余返回虚拟 IP；白名单：仅命中规则集的域名返回虚拟 IP。白名单必须至少勾选一个规则集，否则 ant 会拒绝启动。</string>
+    <string name="settings_fakeip_filter_label">引用规则集</string>
+    <string name="settings_fakeip_ip_disabled">IP 类规则集不可用于 fakeip 过滤</string>
+    <string name="settings_fakeip_filter_note">仅可勾选域名 / 混合（classical）类规则集，ant 要求 fakeip-filter 引用的规则集必须是 domain 或 classical。默认勾选「中国域名规则集」：国内域名走真实 IP，其余走虚拟 IP。</string>
+
+    <!-- 路由 / 规则集 -->
+    <string name="drawer_route">路由</string>
+    <string name="title_route">路由</string>
+    <string name="title_rulesets">规则集</string>
+    <string name="route_note">规则自上而下匹配，命中即停止。改动在重启 VPN 后生效。</string>
+    <string name="route_final_fixed">兜底 · 固定</string>
+    <string name="route_restart_hint">已保存，重启 VPN 后生效</string>
+    <string name="route_add">新增规则</string>
+    <string name="route_ruleset_entry">规则集管理</string>
+    <string name="route_reset">恢复默认规则</string>
+    <string name="route_reset_title">恢复默认规则</string>
+    <string name="route_reset_message">将恢复为「国内域名 / 国内 IP 直连 + 兜底代理」，自定义规则会被清除。已添加的规则集不会删除。</string>
+    <string name="route_delete_title">删除规则</string>
+    <string name="route_delete_message">确定删除「%1$s」吗？</string>
+    <string name="route_no_resolve_tag">no-resolve</string>
+    <string name="btn_confirm">确定</string>
+    <string name="btn_cancel">取消</string>
+
+    <!-- 规则编辑 -->
+    <string name="title_new_route">新建规则</string>
+    <string name="title_edit_route">编辑规则</string>
+    <string name="route_name_label">规则名称</string>
+    <string name="route_name_hint">例如 屏蔽广告</string>
+    <string name="route_match_type">匹配方式</string>
+    <string name="route_value_label">匹配值</string>
+    <string name="route_ruleset_label">选择规则集</string>
+    <string name="route_action_title">动作</string>
+    <string name="route_no_resolve">跳过域名解析（no-resolve）</string>
+    <string name="route_no_resolve_note">仅 IP 类规则有效：匹配该规则时不提前把域名解析成 IP。</string>
+    <string name="route_final_note">兜底规则匹配所有未命中的流量，不可删除、不可关闭、不可调整顺序；只能改名称与动作。</string>
+    <string name="route_err_name">请填写规则名称</string>
+    <string name="route_err_value">请填写匹配值</string>
+    <string name="route_err_comma">匹配值不能包含逗号或换行</string>
+    <string name="route_err_ruleset">请选择一个规则集</string>
+    <string name="route_saved">规则已保存</string>
+
+    <!-- 规则集管理 -->
+    <string name="ruleset_note">内置规则集不可删除；被路由规则或 fakeip 过滤引用的规则集需先解除引用。URL 订阅由 ant 在启动 VPN 时下载；运行中刷新会尝试热更新，否则下次启动重新下载。</string>
+    <string name="ruleset_builtin_tag">内置</string>
+    <string name="ruleset_add_url">URL 订阅</string>
+    <string name="ruleset_import_file">导入文件</string>
+    <string name="ruleset_dialog_url_title">添加 URL 订阅</string>
+    <string name="ruleset_dialog_file_title">导入规则集文件</string>
+    <string name="ruleset_name_label">显示名称</string>
+    <string name="ruleset_url_label">订阅地址</string>
+    <string name="ruleset_behavior">规则类型</string>
+    <string name="ruleset_format">文件格式（留空自动识别）</string>
+    <string name="ruleset_interval">自动更新间隔（小时，0 = 不自动）</string>
+    <string name="ruleset_delete_title">删除规则集</string>
+    <string name="ruleset_delete_message">确定删除「%1$s」吗？本地文件也会一并删除。</string>
+    <string name="ruleset_delete_blocked">「%1$s」被 %2$d 条路由规则引用，请先删除或修改这些规则</string>
+    <string name="ruleset_delete_blocked_filter">「%1$s」被 fakeip 过滤引用，请先到设置页取消勾选</string>
+    <string name="ruleset_err_name">请填写名称</string>
+    <string name="ruleset_err_url">订阅地址需以 http:// 或 https:// 开头</string>
+    <string name="ruleset_err_interval">更新间隔需为 0 或正整数</string>
+    <string name="ruleset_import_ok">已导入「%1$s」</string>
+    <string name="ruleset_added">规则集已添加</string>
+    <string name="ruleset_refresh">刷新</string>
+    <string name="ruleset_refreshing">正在刷新…</string>
+
+    <!-- 状态 -->
+    <string name="status_stopped">已停止</string>
+    <string name="status_starting">正在启动…</string>
+    <string name="status_running">运行中</string>
+    <string name="status_error">错误</string>
+    <string name="vpn_permission_denied">未授予 VPN 权限</string>
+    <string name="about_text">AFA · ant 代理客户端\n\n节点由 App 本地存储，启动时只把选中的节点写入 config.yaml。\n路由规则与规则集在「路由」页管理，默认是国内域名 / IP 直连、其余走代理。</string>
+
+    <!-- 分应用代理 -->
+    <string name="perapp_title">分应用代理</string>
+    <string name="perapp_mode_off">关闭（所有应用）</string>
+    <string name="perapp_mode_allow">只代理选中的应用</string>
+    <string name="perapp_mode_disallow">选中的应用不代理</string>
+    <string name="perapp_note_off">所有应用都走代理。</string>
+    <string name="perapp_note_allow">只有勾选的应用走代理，其余应用直连。AFA 自身会自动保留在 VPN 内，用于核心的回包。</string>
+    <string name="perapp_note_disallow">勾选的应用直连，其余应用走代理。AFA 自身始终走 VPN，不能被排除。</string>
+    <string name="perapp_search_hint">搜索应用名 / 包名</string>
+    <string name="perapp_show_system">显示系统应用</string>
+    <string name="perapp_selected_count">已选 %1$d 个</string>
+    <string name="perapp_clear">清空</string>
+    <string name="perapp_loading">正在读取应用列表…</string>
+    <string name="perapp_restart_hint">VPN 正在运行：修改后需重启 VPN 才生效</string>
+    <string name="perapp_empty">没有匹配的应用</string>
+    <string name="perapp_summary_off">关闭</string>
+    <string name="perapp_summary_allow">只代理选中 · %1$d 个应用</string>
+    <string name="perapp_summary_disallow">选中不代理 · %1$d 个应用</string>
+    <string name="settings_api_address_label">API 面板地址</string>
+    <string name="settings_api_address_note">格式：IPv4:端口（默认 127.0.0.1:9095）、[IPv6]:端口、:端口 或 端口（后两种等同 127.0.0.1）；不支持主机名。改成 0.0.0.0 会让局域网内任何设备都能访问面板，请谨慎。修改后需重启 VPN 生效。</string>
+</resources>

@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 蚂蚁前景（白色剪影）。自适应图标安全区为以 (54,54) 为圆心、直径 66 的圆。 -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- 触角 -->
+    <path
+        android:pathData="M51,31.5 C49,27 46.5,25 43.5,24 M57,31.5 C59,27 61.5,25 64.5,24"
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="2.4"
+        android:strokeLineCap="round" />
+    <!-- 六条腿：前、中、后各一对 -->
+    <path
+        android:pathData="M48.4,47.5 C43,45 39.5,42 37.5,37.5 M59.6,47.5 C65,45 68.5,42 70.5,37.5 M47.6,52.5 C41.5,53 36.5,52 32.5,49.5 M60.4,52.5 C66.5,53 71.5,52 75.5,49.5 M48.4,57.5 C43,61 39.5,65.5 37,71 M59.6,57.5 C65,61 68.5,65.5 71,71"
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="2.6"
+        android:strokeLineCap="round" />
+    <!-- 头 -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M54,29.7 a7.8,7.8 0 1,0 0,15.6 a7.8,7.8 0 1,0 0,-15.6 z" />
+    <!-- 胸 -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M54,43 a8,9 0 1,0 0,18 a8,9 0 1,0 0,-18 z" />
+    <!-- 腹 -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M54,58 a10,12 0 1,0 0,24 a10,12 0 1,0 0,-24 z" />
+</vector>
