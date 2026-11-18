@@ -1,4 +1,4 @@
-name: Build eBPF Linux arm64 
+name: eBPF Linux arm64 ci
 
 on:
   workflow_dispatch:
