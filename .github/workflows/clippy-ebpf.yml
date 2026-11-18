@@ -26,8 +26,6 @@ jobs:
           targets: x86_64-unknown-linux-musl
 
       - name: Install musl tools
-        # Needed by build scripts that compile C for the musl target
-        # (e.g. ring). Clippy itself never links.
         run: sudo apt-get update && sudo apt-get install -y musl-tools
 
       - name: Cache cargo
@@ -51,7 +49,7 @@ jobs:
         # Feature ebpf only gates include_bytes!; without the object the
         # binary still type-checks and Clippy runs over the cfg(feature="ebpf")
         # code paths.
-        run: cargo clippy -p ant --features ebpf --all-targets --target "$CLIPPY_TARGET" -- -D warnings
+        run: cargo clippy --features ebpf --all-targets --target "$CLIPPY_TARGET" -- -D warnings
 
   clippy-ebpf:
     name: Clippy (eBPF)
