@@ -3,6 +3,8 @@ library;
 // models
 export 'src/models/group.dart' show Group, defaultGroupID, defaultGroupName;
 export 'src/models/node.dart';
+export 'src/models/node_schema.dart'
+    show FieldKind, FieldSpec, NodeSchema, gBasic, gAuth, gTransport, gTls, gAdv;
 // parsing
 export 'src/parsing/clash_yaml.dart' show parseClashYaml;
 export 'src/parsing/common.dart'
