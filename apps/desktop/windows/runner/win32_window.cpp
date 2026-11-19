@@ -144,6 +144,28 @@ bool Win32Window::Create(const std::wstring& title,
     return false;
   }
 
+  // 显式设置窗口图标：从 exe 资源按指定尺寸加载 IDI_APP_ICON 并分别设置
+  // 大图标（Alt+Tab / 任务栏）与小图标（标题栏）。仅靠窗口类的 hIcon 在
+  // 部分 Windows 版本上会回退到系统默认图标或使用图标缓存中的旧图案；
+  // 显式 WM_SETICON 可确保标题栏、任务栏、Alt+Tab 一律使用当前新图标。
+  {
+    HINSTANCE instance = GetModuleHandle(nullptr);
+    HICON icon_big = static_cast<HICON>(LoadImage(
+        instance, MAKEINTRESOURCE(IDI_APP_ICON), IMAGE_ICON, 256, 256,
+        LR_DEFAULTCOLOR));
+    HICON icon_small = static_cast<HICON>(LoadImage(
+        instance, MAKEINTRESOURCE(IDI_APP_ICON), IMAGE_ICON, 16, 16,
+        LR_DEFAULTCOLOR));
+    if (icon_big) {
+      SendMessage(window, WM_SETICON, ICON_BIG,
+                  reinterpret_cast<LPARAM>(icon_big));
+    }
+    if (icon_small) {
+      SendMessage(window, WM_SETICON, ICON_SMALL,
+                  reinterpret_cast<LPARAM>(icon_small));
+    }
+  }
+
   UpdateTheme(window);
 
   return OnCreate();
