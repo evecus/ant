@@ -123,7 +123,6 @@ List<Node> parseSingBoxJson(String content) {
           alpn: _tlsAlpn(tls),
           insecure: _tlsInsecure(tls),
           congestionControl: orDefault(_str(raw['congestion_control']), 'cubic'),
-          udpRelayMode: _str(raw['udp_relay_mode']),
         );
       case 'socks':
         n.protocol = 'socks';

@@ -31,7 +31,7 @@ void main() {
       // hysteria2 with up/down/obfs
       'hysteria2://pass%3Aword@example.com:443?sni=example.com&insecure=1&obfs=salamander&obfs-password=obfspass&upmbps=100&downmbps=500#HY2',
       // tuic
-      'tuic://uuid-9900:password@example.com:443?sni=example.com&congestion_control=bbr&udp_relay_mode=quic&allow_insecure=1&TUIC-Node',
+      'tuic://uuid-9900:password@example.com:443?sni=example.com&congestion_control=bbr&allow_insecure=1&TUIC-Node',
       // socks
       'socks://user:pass@1.2.3.4:1080#SOCKS-Node',
       // anytls
@@ -117,7 +117,7 @@ void main() {
       'trojan://pass123@example.com:443?sni=example.com&fp=safari&allowInsecure=1&type=ws&path=%2Ftrojan#Trojan',
       'ss://YWVzLTI1Ni1nY206cGFzcw==@1.2.3.4:8388?plugin=obfs-local%3Bobfs%3Dhttp%3Bobfs-host%3Dexample.com#SS',
       'hysteria2://pass%3Aword@example.com:443?sni=example.com&insecure=1&obfs=salamander&obfs-password=obfspass&upmbps=100&downmbps=500#HY2',
-      'tuic://uuid-9900:password@example.com:443?sni=example.com&congestion_control=bbr&udp_relay_mode=quic&allow_insecure=1#TUIC',
+      'tuic://uuid-9900:password@example.com:443?sni=example.com&congestion_control=bbr&allow_insecure=1#TUIC',
       'anytls://password123@example.com:8443?sni=example.com&insecure=1&fp=chrome#AnyTLS',
       'naive://user:pass@example.com:443?sni=example.com&insecure=1&fp=chrome#Naive',
       'shadowquic://user:pass@example.com:443?sni=example.com&alpn=h3&over-stream=1&disable-zero-rtt=1#SQ',

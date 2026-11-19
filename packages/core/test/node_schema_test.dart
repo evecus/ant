@@ -91,13 +91,62 @@ void main() {
       expect(byKey(kXhttpPath).showIf(n), isTrue);
     });
 
-    test('vless REALITY 字段仅 TLS 开启时可见', () {
+    test('vless REALITY 字段仅 reality 模式可见', () {
+      final n = _fresh('vless'); // 默认 security-mode=tls
+      final fields = NodeSchema.fieldsFor('vless');
+      FieldSpec byKey(String k) => fields.firstWhere((f) => f.key == k);
+      expect(byKey(kRealityPbk).showIf(n), isFalse);
+      expect(byKey(kAlpn).showIf(n), isTrue); // tls 模式显示 ALPN
+
+      // 切到 reality：reality 字段出现，tls 专属字段（ALPN/ECH）隐藏
+      byKey(kSecurityMode).set(n, 'reality');
+      expect(byKey(kRealityPbk).showIf(n), isTrue);
+      expect(byKey(kAlpn).showIf(n), isFalse);
+      expect(n.vless!.tls, isTrue); // reality 隐含 tls=true
+
+      // 切到不加密：tls / reality 字段全部隐藏
+      byKey(kSecurityMode).set(n, 'none');
+      expect(byKey(kRealityPbk).showIf(n), isFalse);
+      expect(byKey(kAlpn).showIf(n), isFalse);
+      expect(byKey(kSni).showIf(n), isFalse);
+      expect(n.vless!.tls, isFalse);
+    });
+
+    test('vmess 无 reality 选项，仅 none/tls', () {
+      final sm = NodeSchema.fieldsFor('vmess')
+          .firstWhere((f) => f.key == kSecurityMode);
+      expect(sm.options, ['none', 'tls']);
+      expect(sm.options, isNot(contains('reality')));
+    });
+
+    test('vless flow 仅 TCP + 加密模式可见', () {
       final n = _fresh('vless');
-      final pbk = NodeSchema.fieldsFor('vless')
-          .firstWhere((f) => f.key == kRealityPbk);
-      expect(pbk.showIf(n), isTrue); // 默认 tls=true
-      n.vless!.tls = false;
-      expect(pbk.showIf(n), isFalse);
+      final flow = NodeSchema.fieldsFor('vless').firstWhere((f) => f.key == kFlow);
+      expect(flow.showIf(n), isTrue); // tcp + tls
+      n.vless!.transport!.type = 'ws';
+      expect(flow.showIf(n), isFalse); // ws 下隐藏
+      n.vless!.transport!.type = 'tcp';
+      NodeSchema.fieldsFor('vless')
+          .firstWhere((f) => f.key == kSecurityMode)
+          .set(n, 'none');
+      expect(flow.showIf(n), isFalse); // 不加密下隐藏
+    });
+
+    test('network 仅 tcp/ws/xhttp', () {
+      final net = NodeSchema.fieldsFor('vless')
+          .firstWhere((f) => f.key == kNetwork);
+      expect(net.options, containsAll(['tcp', 'ws', 'xhttp']));
+      expect(net.options, isNot(contains('grpc')));
+      expect(net.options, isNot(contains('httpupgrade')));
+    });
+
+    test('hy2 混淆密码仅在选 obfs 后可见', () {
+      final n = _fresh('hysteria2');
+      final obfsPwd = NodeSchema.fieldsFor('hysteria2')
+          .firstWhere((f) => f.key == kObfsPassword);
+      expect(obfsPwd.showIf(n), isFalse);
+      n.hysteria2!.obfs = 'salamander';
+      expect(obfsPwd.showIf(n), isTrue);
     });
   });
 

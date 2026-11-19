@@ -22,7 +22,6 @@ const kPassword = 'password';
 const kUsername = 'username';
 const kCipher = 'cipher';
 const kAlterId = 'alter-id';
-const kTls = 'tls';
 const kSni = 'sni';
 const kAlpn = 'alpn';
 const kSkipCert = 'skip-cert-verify';
@@ -34,9 +33,6 @@ const kWsHost = 'ws-host';
 const kXhttpPath = 'xhttp-path';
 const kXhttpHost = 'xhttp-host';
 const kXhttpMode = 'xhttp-mode';
-const kMaxEarly = 'max-early-data';
-const kEarlyHeader = 'early-data-header-name';
-const kServiceName = 'service-name';
 const kFlow = 'flow';
 const kRealityPbk = 'reality-public-key';
 const kRealitySid = 'reality-short-id';
@@ -51,8 +47,8 @@ const kZeroRtt = 'zero-rtt';
 const kInitialMtu = 'initial-mtu';
 const kMinMtu = 'min-mtu';
 const kEch = 'ech';
+const kSecurityMode = 'security-mode'; // UI 态：none | tls | reality，不写入内核配置
 const kVersion = 'version';
-const kUdpMode = 'udp-relay-mode';
 const kPrivateKey = 'private-key';
 const kPeerKey = 'peer-public-key';
 const kPresharedKey = 'pre-shared-key';
@@ -121,7 +117,11 @@ class ProtocolDef {
 }
 
 // ── 下拉选项 ────────────────────────────────────────────────────────────────
-const _networks = ['', 'tcp', 'ws', 'http', 'grpc', 'httpupgrade', 'xhttp'];
+/// ant 内核只实现 tcp / ws / xhttp 三种传输（config.rs::network）。
+const _networks = ['', 'tcp', 'ws', 'xhttp'];
+/// 安全模式三选一：仅 vless 有 reality（内核 reality 为 vless 专属）。
+const _securityModesVless = ['none', 'tls', 'reality'];
+const _securityModesPlain = ['none', 'tls'];
 const _ssCiphers = [
   'aes-128-gcm', 'aes-256-gcm', 'chacha20-ietf-poly1305',
   '2022-blake3-aes-128-gcm', '2022-blake3-aes-256-gcm',
@@ -171,6 +171,56 @@ bool _tlsOn(Node n) => switch (n.protocol) {
       'vless' => n.vless?.tls ?? false,
       _ => true,
     };
+
+/// 当前安全模式（none / tls / reality）。
+/// 优先读 UI 态字段；老节点（链接/订阅导入，securityMode 为空）按
+/// tls + publicKey 派生——与 afa 的 securityMode() 一致。
+String _securityModeOf(Node n) {
+  final sm = n.securityMode;
+  if (sm == 'none' || sm == 'tls' || sm == 'reality') return sm;
+  if (!_tlsOn(n)) return 'none';
+  if (n.protocol == 'vless' && (n.vless?.publicKey.isNotEmpty ?? false)) {
+    return 'reality';
+  }
+  return 'tls';
+}
+
+/// 设置安全模式：写 UI 态 + 联动各 Config.tls / publicKey / shortId。
+/// 选 none → 关 tls、清 reality；选 tls → 开 tls、清 reality；
+/// 选 reality → 开 tls（publicKey 留给下面的 REALITY 字段填写）。
+void _applySecurityMode(Node n, String mode) {
+  n.securityMode = mode;
+  switch (n.protocol) {
+    case 'vmess':
+      final c = _vm(n);
+      c.tls = mode != 'none';
+      if (mode != 'reality') { c.echConfig = ''; }
+      break;
+    case 'vless':
+      final c = _vl(n);
+      c.tls = mode != 'none';
+      if (mode == 'none' || mode == 'tls') {
+        c.publicKey = '';
+        c.shortId = '';
+      }
+      // reality 与 ECH 互斥：切到 reality 清掉 ECH（uTLS 由内核忽略，字段隐藏即可）
+      if (mode == 'reality') c.echConfig = '';
+      // 不加密时 flow 无意义，清掉避免残留非法组合
+      if (mode == 'none') c.flow = '';
+      break;
+  }
+}
+
+/// 有安全模式三选一的协议（其余协议内核强制 TLS，无选择）。
+const _securityModeTypes = {'vless', 'vmess'};
+
+/// showIf 片段：当前安全模式 == [mode]。
+bool Function(Node) _modeIs(String mode) => (n) => _securityModeOf(n) == mode;
+/// showIf 片段：已启用加密（tls 或 reality）。
+bool _modeSecured(Node n) => _securityModeOf(n) != 'none';
+/// showIf 片段：TCP + 已加密（vless flow 的内核约束）。
+bool _flowAvailable(Node n) =>
+    (_networkOf(n).isEmpty || _networkOf(n) == 'tcp') && _modeSecured(n);
 
 TransportConfig? _transportPeek(Node n) => switch (n.protocol) {
       'vmess' => n.vMess?.transport,
@@ -356,32 +406,6 @@ List<FieldSpec> _transport() => [
           get: (n) => _transportPeek(n)?.host ?? '',
           set: (n, v) => _transportOf(n).host = v),
       FieldSpec(
-          key: kMaxEarly, label: '早期数据上限', kind: FieldKind.number,
-          group: gTransport, showIf: (n) => _networkOf(n) == 'ws',
-          get: (n) => (_transportPeek(n)?.maxEarlyData ?? 0).toString(),
-          set: (n, v) => _transportOf(n).maxEarlyData = int.tryParse(v) ?? 0),
-      FieldSpec(
-          key: kEarlyHeader, label: '早期数据头', group: gTransport,
-          hint: 'Sec-WebSocket-Protocol', showIf: (n) => _networkOf(n) == 'ws',
-          get: (n) => _transportPeek(n)?.earlyDataHeaderName ?? '',
-          set: (n, v) => _transportOf(n).earlyDataHeaderName = v),
-      FieldSpec(
-          key: 'http-path', label: 'HTTP 路径 (path)', group: gTransport,
-          hint: '/path',
-          showIf: (n) => ['http', 'httpupgrade'].contains(_networkOf(n)),
-          get: (n) => _transportPeek(n)?.path ?? '',
-          set: (n, v) => _transportOf(n).path = v),
-      FieldSpec(
-          key: 'http-host', label: 'HTTP Host', group: gTransport,
-          showIf: (n) => ['http', 'httpupgrade'].contains(_networkOf(n)),
-          get: (n) => _transportPeek(n)?.host ?? '',
-          set: (n, v) => _transportOf(n).host = v),
-      FieldSpec(
-          key: kServiceName, label: '服务名称 (service_name)', group: gTransport,
-          showIf: (n) => _networkOf(n) == 'grpc',
-          get: (n) => _transportPeek(n)?.serviceName ?? '',
-          set: (n, v) => _transportOf(n).serviceName = v),
-      FieldSpec(
           key: kXhttpPath, label: 'XHTTP 路径', group: gTransport, hint: '/xhttp',
           showIf: (n) => _networkOf(n) == 'xhttp',
           get: (n) => _transportPeek(n)?.path ?? '',
@@ -410,18 +434,6 @@ List<FieldSpec> _tlsStandard(String type) {
   String Function(Node) fingerprint;
   void Function(Node, String) setFingerprint;
   switch (type) {
-    case 'vmess':
-      sni = (n) => _vm(n).sni; setSni = (n, v) => _vm(n).sni = v;
-      alpn = (n) => _listGet(_vm(n).alpn); setAlpn = (n, v) => _vm(n).alpn = _listSet(v);
-      insecure = (n) => _vm(n).insecure.toString(); setInsecure = (n, v) => _vm(n).insecure = v == 'true';
-      fingerprint = (n) => _vm(n).fingerprint; setFingerprint = (n, v) => _vm(n).fingerprint = v;
-      break;
-    case 'vless':
-      sni = (n) => _vl(n).sni; setSni = (n, v) => _vl(n).sni = v;
-      alpn = (n) => _listGet(_vl(n).alpn); setAlpn = (n, v) => _vl(n).alpn = _listSet(v);
-      insecure = (n) => _vl(n).insecure.toString(); setInsecure = (n, v) => _vl(n).insecure = v == 'true';
-      fingerprint = (n) => _vl(n).fingerprint; setFingerprint = (n, v) => _vl(n).fingerprint = v;
-      break;
     case 'trojan':
       sni = (n) => _trj(n).sni; setSni = (n, v) => _trj(n).sni = v;
       alpn = (n) => _listGet(_trj(n).alpn); setAlpn = (n, v) => _trj(n).alpn = _listSet(v);
@@ -460,12 +472,11 @@ List<FieldSpec> _tlsStandard(String type) {
         hint: 'chrome / firefox / safari / ios …',
         get: fingerprint, set: setFingerprint));
   }
-  if (['vmess', 'vless', 'trojan', 'hysteria2', 'anytls'].contains(type)) {
+  // vmess/vless 的 ECH 已在安全配置区（_tlsWithSecurityMode）提供，此处仅强制 TLS 协议。
+  if (['trojan', 'hysteria2', 'anytls'].contains(type)) {
     String Function(Node) ech;
     void Function(Node, String) setEch;
     switch (type) {
-      case 'vmess': ech = (n) => _vm(n).echConfig; setEch = (n, v) => _vm(n).echConfig = v; break;
-      case 'vless': ech = (n) => _vl(n).echConfig; setEch = (n, v) => _vl(n).echConfig = v; break;
       case 'trojan': ech = (n) => _trj(n).echConfig; setEch = (n, v) => _trj(n).echConfig = v; break;
       case 'hysteria2': ech = (n) => _hy2(n).echConfig; setEch = (n, v) => _hy2(n).echConfig = v; break;
       default: ech = (n) => _any(n).echConfig; setEch = (n, v) => _any(n).echConfig = v;
@@ -475,19 +486,118 @@ List<FieldSpec> _tlsStandard(String type) {
   return list;
 }
 
-List<FieldSpec> _tlsVmess() => [
-      FieldSpec(
-          key: kTls, label: '启用 TLS', kind: FieldKind.toggle, group: gTls,
-          get: (n) => _vm(n).tls.toString(), set: (n, v) => _vm(n).tls = v == 'true'),
-      ..._tlsStandard('vmess'),
-    ];
+/// security-mode 三选一驱动的安全配置区（仅 vless / vmess）。
+/// 选中模式时联动写 tls / publicKey / shortId / echConfig；字段按模式显隐。
+List<FieldSpec> _tlsWithSecurityMode(String type) {
+  final vless = type == 'vless';
+  final list = <FieldSpec>[
+    FieldSpec(
+        key: kSecurityMode,
+        label: '安全配置',
+        kind: FieldKind.select,
+        group: gTls,
+        hint: '不加密 / TLS 加密 / REALITY（仅 VLESS）',
+        options: vless ? _securityModesVless : _securityModesPlain,
+        get: _securityModeOf,
+        set: _applySecurityMode),
+    // SNI：tls 与 reality 都需要（reality 作 server-name）
+    FieldSpec(
+        key: kSni,
+        label: 'SNI / 服务器名',
+        group: gTls,
+        showIf: _modeSecured,
+        get: vless ? (n) => _vl(n).sni : (n) => _vm(n).sni,
+        set: vless ? (n, v) => _vl(n).sni = v : (n, v) => _vm(n).sni = v),
+  ];
 
-List<FieldSpec> _tlsVless() => [
-      FieldSpec(
-          key: kTls, label: '启用 TLS', kind: FieldKind.toggle, group: gTls,
-          get: (n) => _vl(n).tls.toString(), set: (n, v) => _vl(n).tls = v == 'true'),
-      ..._tlsStandard('vless'),
-    ];
+  // 仅普通 TLS：ALPN / 跳过证书验证 / uTLS 指纹 / ECH（与 reality 互斥）
+  void tlsField({
+    required String key,
+    required String label,
+    FieldKind kind = FieldKind.text,
+    String hint = '',
+    required String Function(Node) get,
+    required void Function(Node, String) set,
+  }) {
+    list.add(FieldSpec(
+        key: key,
+        label: label,
+        kind: kind,
+        group: gTls,
+        hint: hint,
+        showIf: _modeIs('tls'),
+        get: get,
+        set: set));
+  }
+
+  tlsField(
+      key: kAlpn,
+      label: 'ALPN',
+      hint: '逗号分隔，如 h2,h3',
+      get: vless ? (n) => _listGet(_vl(n).alpn) : (n) => _listGet(_vm(n).alpn),
+      set: vless ? (n, v) => _vl(n).alpn = _listSet(v) : (n, v) => _vm(n).alpn = _listSet(v));
+  tlsField(
+      key: kSkipCert,
+      label: '跳过证书验证',
+      kind: FieldKind.toggle,
+      get: vless
+          ? (n) => _vl(n).insecure.toString()
+          : (n) => _vm(n).insecure.toString(),
+      set: vless
+          ? (n, v) => _vl(n).insecure = v == 'true'
+          : (n, v) => _vm(n).insecure = v == 'true');
+  tlsField(
+      key: kFingerprint,
+      label: 'uTLS 指纹 (fingerprint)',
+      hint: 'chrome / firefox / safari / ios …',
+      get: vless ? (n) => _vl(n).fingerprint : (n) => _vm(n).fingerprint,
+      set: vless
+          ? (n, v) => _vl(n).fingerprint = v
+          : (n, v) => _vm(n).fingerprint = v);
+  tlsField(
+      key: kEch,
+      label: 'ECH 配置 (ech.config)',
+      hint: 'REALITY 下不可用',
+      get: vless ? (n) => _vl(n).echConfig : (n) => _vm(n).echConfig,
+      set: vless
+          ? (n, v) => _vl(n).echConfig = v
+          : (n, v) => _vm(n).echConfig = v);
+
+  // REALITY 专有：仅 vless，仅 reality 模式显示，pbk 必填
+  if (vless) {
+    list.add(FieldSpec(
+        key: kRealityPbk,
+        label: 'REALITY 公钥 pbk',
+        group: gTls,
+        required: true,
+        showIf: _modeIs('reality'),
+        get: (n) => _vl(n).publicKey,
+        set: (n, v) => _vl(n).publicKey = v));
+    list.add(FieldSpec(
+        key: kRealitySid,
+        label: 'REALITY shortId',
+        group: gTls,
+        hint: '可选',
+        showIf: _modeIs('reality'),
+        get: (n) => _vl(n).shortId,
+        set: (n, v) => _vl(n).shortId = v));
+    // flow：仅 TCP + tls/reality 可用（内核 vless.rs::apply_flow 校验）
+    list.add(FieldSpec(
+        key: kFlow,
+        label: 'Flow',
+        kind: FieldKind.select,
+        group: gTls,
+        hint: '仅 TCP + TLS/REALITY 可用',
+        options: const ['', 'xtls-rprx-vision'],
+        showIf: _flowAvailable,
+        get: (n) => _vl(n).flow,
+        set: (n, v) => _vl(n).flow = v));
+  }
+  return list;
+}
+
+List<FieldSpec> _tlsVmess() => _tlsWithSecurityMode('vmess');
+List<FieldSpec> _tlsVless() => _tlsWithSecurityMode('vless');
 
 List<FieldSpec> _tlsFor(String type) => _tlsStandard(type);
 
@@ -525,22 +635,16 @@ List<FieldSpec> _tlsSpectre() => [
     ];
 
 List<FieldSpec> _advanced(String type) => switch (type) {
-      'vless' => [
-          FieldSpec(key: kFlow, label: 'Flow', kind: FieldKind.select, group: gAdv,
-              options: const ['', 'xtls-rprx-vision'],
-              get: (n) => _vl(n).flow, set: (n, v) => _vl(n).flow = v),
-          FieldSpec(key: kRealityPbk, label: 'REALITY 公钥 pbk', group: gAdv,
-              showIf: _tlsOn,
-              get: (n) => _vl(n).publicKey, set: (n, v) => _vl(n).publicKey = v),
-          FieldSpec(key: kRealitySid, label: 'REALITY shortId', group: gAdv,
-              showIf: _tlsOn,
-              get: (n) => _vl(n).shortId, set: (n, v) => _vl(n).shortId = v),
-        ],
+      // vless 的 flow / reality 字段已移入安全配置区（_tlsWithSecurityMode），
+      // 由 security-mode 联动显隐；高级区不再重复。
+      'vless' => const <FieldSpec>[],
       'hysteria2' => [
           FieldSpec(key: kObfs, label: '混淆类型', kind: FieldKind.select, group: gAdv,
               options: const ['', 'salamander'],
               get: (n) => _hy2(n).obfs, set: (n, v) => _hy2(n).obfs = v),
           FieldSpec(key: kObfsPassword, label: '混淆密码', kind: FieldKind.secret, group: gAdv,
+              hint: '内核暂未启用混淆，仅供兼容',
+              showIf: (n) => _hy2(n).obfs.isNotEmpty,
               get: (n) => _hy2(n).obfsPassword, set: (n, v) => _hy2(n).obfsPassword = v),
           FieldSpec(key: kUp, label: '上行带宽 up (Mbps)', group: gAdv, hint: '如 100 Mbps',
               get: (n) => _hy2(n).upMbps.toString(),
@@ -554,10 +658,6 @@ List<FieldSpec> _advanced(String type) => switch (type) {
               options: _ccModes,
               get: (n) => _tuic(n).congestionControl,
               set: (n, v) => _tuic(n).congestionControl = v),
-          FieldSpec(key: kUdpMode, label: 'UDP 中继模式', kind: FieldKind.select, group: gAdv,
-              options: const ['native', 'quic'],
-              get: (n) => _tuic(n).udpRelayMode,
-              set: (n, v) => _tuic(n).udpRelayMode = v),
         ],
       'shadowquic' => [
           FieldSpec(key: kCongestion, label: '拥塞控制', kind: FieldKind.select, group: gAdv,
@@ -610,13 +710,15 @@ List<FieldSpec> _advanced(String type) => switch (type) {
 // ── 初始化器（内核默认值）────────────────────────────────────────────────────
 void _initVmess(Node n) {
   final c = _vm(n);
-  c.tls = true;
+  if (n.securityMode.isEmpty) n.securityMode = 'tls';
+  c.tls = n.securityMode != 'none';
   if (c.security.isEmpty) c.security = 'auto';
   c.transport = TransportConfig(type: 'tcp');
 }
 void _initVless(Node n) {
   final c = _vl(n);
-  c.tls = true;
+  if (n.securityMode.isEmpty) n.securityMode = 'tls';
+  c.tls = n.securityMode != 'none';
   c.transport = TransportConfig(type: 'tcp');
 }
 void _initSs(Node n) {
@@ -630,7 +732,6 @@ void _initHy2(Node n) { _hy2(n); }
 void _initTuic(Node n) {
   final c = _tuic(n);
   if (c.congestionControl.isEmpty) c.congestionControl = 'cubic';
-  if (c.udpRelayMode.isEmpty) c.udpRelayMode = 'native';
 }
 void _initAny(Node n) { _any(n); }
 void _initSocks(Node n) {
@@ -657,6 +758,7 @@ const _keepOnTypeChange = {
   kName, kServer, kPort, kUuid, kPassword, kUsername, kCipher, kAlterId,
   kSni, kAlpn, kSkipCert, kFingerprint, kClientFp, kNetwork, kWsPath, kWsHost,
   kXhttpPath, kXhttpHost, kXhttpMode, kFlow, kRealityPbk, kRealitySid, kEch,
+  kSecurityMode,
 };
 
 /// 协议 schema 注册表 —— 新增/删减协议只改这里。
@@ -737,6 +839,11 @@ class NodeSchema {
     }
     _clearConfigs(draft);
     init(draft, to);
+    // 目标协议不支持 reality 时降级：vmess / 强制 TLS 协议无 reality。
+    final keptMode = kept[kSecurityMode];
+    if (keptMode == 'reality' && to != 'vless') {
+      kept[kSecurityMode] = 'tls';
+    }
     for (final spec in fieldsFor(to)) {
       final v = kept[spec.key];
       if (v != null) spec.set(draft, v);
@@ -768,6 +875,29 @@ class NodeSchema {
     for (final spec in fieldsFor(type)) {
       if (spec.required && spec.showIf(node) && spec.get(node).trim().isEmpty) {
         return '请填写「${spec.label}」';
+      }
+    }
+    // ── 互斥关系校验（fail-fast，对齐内核 config.rs）──────────────────────
+    if (_securityModeTypes.contains(type)) {
+      final mode = _securityModeOf(node);
+      final network = _networkOf(node);
+      if (mode == 'reality' && type != 'vless') {
+        return '仅 VLESS 支持 REALITY';
+      }
+      // REALITY 仅 TCP（xhttp 下仅 auto/stream-one）
+      if (mode == 'reality' && network == 'ws') {
+        return 'REALITY 不支持 WebSocket 传输，请改用 TCP';
+      }
+      if (mode == 'reality' && network == 'xhttp') {
+        final xm = node.vless?.transport?.mode ?? '';
+        if (xm.isNotEmpty && xm != 'auto' && xm != 'stream-one') {
+          return 'REALITY 下 XHTTP 模式仅支持 auto / stream-one';
+        }
+      }
+      // flow 仅在 TCP + tls/reality 下可用
+      final flow = type == 'vless' ? node.vless?.flow ?? '' : '';
+      if (flow.isNotEmpty && !_flowAvailable(node)) {
+        return 'Flow 仅在 TCP + TLS/REALITY 下可用';
       }
     }
     return null;

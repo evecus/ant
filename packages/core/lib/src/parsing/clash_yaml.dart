@@ -150,7 +150,6 @@ Node _clashProxyToNode(Map<String, dynamic> p) {
         sni: _str(p['sni']),
         alpn: _clashStrSlice(p['alpn']),
         congestionControl: orDefault(_str(p['congestion-controller']), 'cubic'),
-        udpRelayMode: _str(p['udp-relay-mode']),
         insecure: p['skip-cert-verify'] == true,
       );
 

@@ -344,7 +344,7 @@ class TUICConfig {
   List<String>? alpn;
   bool insecure;
   String congestionControl; // default "cubic"
-  String udpRelayMode; // default "native"
+  // 注：ant 内核 TUIC 无 udp-relay-mode 字段（sing-box 遗留），不暴露/不写出。
 
   TUICConfig({
     this.uuid = '',
@@ -353,7 +353,6 @@ class TUICConfig {
     this.alpn,
     this.insecure = false,
     this.congestionControl = '',
-    this.udpRelayMode = '',
   });
 
   Map<String, dynamic> toJson() => {
@@ -363,7 +362,6 @@ class TUICConfig {
         if (alpn != null && alpn!.isNotEmpty) 'alpn': alpn,
         if (insecure) 'insecure': insecure,
         if (congestionControl.isNotEmpty) 'congestion_control': congestionControl,
-        if (udpRelayMode.isNotEmpty) 'udp_relay_mode': udpRelayMode,
       };
 
   static TUICConfig fromJson(Map<String, dynamic> j) => TUICConfig(
@@ -373,7 +371,6 @@ class TUICConfig {
         alpn: (j['alpn'] as List?)?.cast<String>(),
         insecure: j['insecure'] as bool? ?? false,
         congestionControl: j['congestion_control'] as String? ?? '',
-        udpRelayMode: j['udp_relay_mode'] as String? ?? '',
       );
 }
 
@@ -587,6 +584,11 @@ class Node {
   String subUrl;
   String groupId; // 所属分组 ID, 空 = 默认分组
 
+  /// UI 态：安全模式（none | tls | reality），仅用于表单互斥显隐。
+  /// 不写入内核配置——写出链路（clash_write / ant_write）读各 Config.tls /
+  /// publicKey 字段，不读本字段；它只参与本地持久化以便重开编辑时还原选择。
+  String securityMode;
+
   /// 原始 sing-box outbound JSON 对象（无损保留）。
   /// 参照 v2rayN 做法：任意 sing-box outbound 协议（ssh/shadowtls/
   /// shadowsocksr/mieru/tor/未来协议…）无损往返——所有 TLS 类型
@@ -618,6 +620,7 @@ class Node {
     this.port = 0,
     this.subUrl = '',
     this.groupId = '',
+    this.securityMode = '',
     this.rawOutbound,
     this.rawClashProxy,
     this.vMess,
@@ -642,6 +645,7 @@ class Node {
         'port': port,
         if (subUrl.isNotEmpty) 'sub_url': subUrl,
         if (groupId.isNotEmpty) 'group_id': groupId,
+        if (securityMode.isNotEmpty) 'security_mode': securityMode,
         if (rawOutbound != null) 'raw_outbound': rawOutbound,
         if (rawClashProxy != null) 'raw_clash_proxy': rawClashProxy,
         if (vMess != null) 'vmess': vMess!.toJson(),
@@ -666,6 +670,7 @@ class Node {
         port: (j['port'] as num?)?.toInt() ?? 0,
         subUrl: j['sub_url'] as String? ?? '',
         groupId: j['group_id'] as String? ?? '',
+        securityMode: j['security_mode'] as String? ?? '',
         rawOutbound: (j['raw_outbound'] as Map?)?.cast<String, dynamic>(),
         rawClashProxy: (j['raw_clash_proxy'] as Map?)?.cast<String, dynamic>(),
         vMess: j['vmess'] == null

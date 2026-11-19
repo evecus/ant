@@ -112,7 +112,6 @@ Map<String, dynamic> nodeToClashProxy(Node n) {
       if (t.sni.isNotEmpty) p['sni'] = t.sni;
       if ((t.alpn ?? []).isNotEmpty) p['alpn'] = t.alpn;
       p['congestion-controller'] = orDefault(t.congestionControl, 'cubic');
-      if (t.udpRelayMode.isNotEmpty) p['udp-relay-mode'] = t.udpRelayMode;
       if (t.insecure) p['skip-cert-verify'] = true;
 
     case 'socks':

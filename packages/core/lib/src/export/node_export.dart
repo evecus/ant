@@ -229,7 +229,6 @@ String _tuicToUri(Node n) {
   if (t.sni.isNotEmpty) q['sni'] = t.sni;
   if ((t.alpn ?? []).isNotEmpty) q['alpn'] = t.alpn!.join(',');
   q['congestion_control'] = orDefault(t.congestionControl, 'cubic');
-  if (t.udpRelayMode.isNotEmpty) q['udp_relay_mode'] = t.udpRelayMode;
   if (t.insecure) q['allow_insecure'] = '1';
   final user =
       '${Uri.encodeComponent(t.uuid)}:${Uri.encodeComponent(t.password)}';

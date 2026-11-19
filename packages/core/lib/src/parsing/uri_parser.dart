@@ -470,7 +470,6 @@ Node _parseTUIC(String uri) {
       alpn: parseAlpn(q['alpn'] ?? ''),
       insecure: insecure,
       congestionControl: orDefault(q['congestion_control'] ?? '', 'cubic'),
-      udpRelayMode: q['udp_relay_mode'] ?? '',
     ),
   );
   if (n.name.isEmpty) {
