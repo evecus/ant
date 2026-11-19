@@ -136,7 +136,7 @@ class CoreSwitchNotifier extends Notifier<bool> {
   StreamSubscription<ProcessStatus>? _statusSub;
   StreamSubscription<bool>? _restartSub;
 
-  bool _current(App app) => app.coreRunning || app.coreRestarting;
+  bool _current(AntApp app) => app.coreRunning || app.coreRestarting;
 
   @override
   bool build() {
