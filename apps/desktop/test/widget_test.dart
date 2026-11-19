@@ -1,4 +1,4 @@
-// ant GUI 桌面端冒烟测试：构造临时目录 AntApp，pump 主界面验证基本渲染。
+// Ant 桌面端冒烟测试：构造临时目录 AntApp，pump 主界面验证基本渲染。
 import 'dart:io';
 
 import 'package:flutter/material.dart';

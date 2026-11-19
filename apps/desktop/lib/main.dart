@@ -1,4 +1,4 @@
-// ant GUI 桌面端入口：初始化 AntApp（对齐 Go 版 portable 目录布局 + DesktopEngine），
+// Ant 桌面端入口：初始化 AntApp（对齐 Go 版 portable 目录布局 + DesktopEngine），
 // 接入窗口管理（window_manager）与系统托盘（tray_manager），
 // 解析 `--silent`（自启动静默：不显示主窗口，仅托盘），注入 Riverpod 后启动主界面。
 import 'dart:io';
@@ -49,7 +49,7 @@ Future<void> main(List<String> args) async {
     }
   });
 
-  // 窗口（1100x750 / ant GUI / 关闭隐藏到托盘）与系统托盘
+  // 窗口（1100x750 / Ant / 关闭隐藏到托盘）与系统托盘
   final navigatorKey = GlobalKey<NavigatorState>();
   final shell = DesktopShell(app: app, navigatorKey: navigatorKey);
   await shell.init(silent: silent);
@@ -72,7 +72,7 @@ class AntDesktopApplication extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'ant GUI',
+      title: 'Ant',
       navigatorKey: navigatorKey,
       debugShowCheckedModeBanner: false,
       theme: buildAntTheme(),

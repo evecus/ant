@@ -1,5 +1,5 @@
 name: ui_desktop
-description: ant GUI 桌面端 UI（Flutter）：ConfigBar/NodeList/BottomBar/LogPanel 与各弹窗。
+description: Ant 桌面端 UI（Flutter）：ConfigBar/NodeList/BottomBar/LogPanel 与各弹窗。
 version: 0.1.0
 publish_to: none
 resolution: workspace

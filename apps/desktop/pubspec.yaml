@@ -1,5 +1,5 @@
-name: ant_desktop
-description: ant GUI 桌面端（Flutter / Windows），单内核 ant。
+name: ant
+description: Ant 桌面端（Flutter / Windows），单内核 ant。
 publish_to: 'none'
 resolution: workspace
 version: 0.1.0

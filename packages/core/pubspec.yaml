@@ -1,6 +1,6 @@
 name: ant_core
 description: >-
-  ant GUI 共享核心包（纯 Dart）：节点模型与协议解析、订阅格式解析、
+  Ant 共享核心包（纯 Dart）：节点模型与协议解析、订阅格式解析、
   ant 配置合成与增量编辑、领域服务。不依赖 Flutter，可在 VM 测试。
 version: 0.1.0
 publish_to: none

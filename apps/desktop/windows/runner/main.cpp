@@ -39,7 +39,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
   window.SetShowOnStart(!silent_start);
   Win32Window::Point origin(10, 10);
   Win32Window::Size size(1100, 750);
-  if (!window.Create(L"ant GUI", origin, size)) {
+  if (!window.Create(L"Ant", origin, size)) {
     return EXIT_FAILURE;
   }
   window.SetQuitOnClose(true);

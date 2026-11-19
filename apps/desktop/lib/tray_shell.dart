@@ -1,6 +1,6 @@
 /// 桌面外壳 — 窗口管理（window_manager）+ 系统托盘（tray_manager）。
 ///
-/// 窗口：1100x750、标题 "ant GUI"（native 侧同步设置）；关闭按钮不退出，
+/// 窗口：1100x750、标题 "Ant"（native 侧同步设置）；关闭按钮不退出，
 /// 改为隐藏到托盘（首次 Toast 提示），托盘菜单「退出」才真正退出。
 /// 退出流程：停核心 →（settings.exitDisableProxy 且系统代理开启时）关闭系统
 /// 代理 → 销毁托盘与窗口 → 结束进程。
@@ -64,7 +64,7 @@ class DesktopShell with WindowListener, TrayListener {
     await windowManager.ensureInitialized();
     const options = WindowOptions(
       size: kDesktopWindowSize,
-      title: 'ant GUI',
+      title: 'Ant',
       center: true,
     );
     await windowManager.waitUntilReadyToShow(options, () async {

@@ -1,4 +1,4 @@
-/// ant GUI 引擎层（桌面端）。
+/// Ant 引擎层（桌面端）。
 library;
 
 export 'src/core_process.dart';

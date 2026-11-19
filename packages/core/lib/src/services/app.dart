@@ -31,7 +31,7 @@ class AppException implements Exception {
   String toString() => message;
 }
 
-/// ant GUI 应用门面：节点/分组/订阅/配置/内核进程 的统一入口。
+/// Ant 应用门面：节点/分组/订阅/配置/内核进程 的统一入口。
 class AntApp {
   final String dataDir;
 

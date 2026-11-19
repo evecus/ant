@@ -1,4 +1,4 @@
-/// ui_desktop — ant GUI 桌面端页面（对齐原 React 前端）。
+/// ui_desktop — Ant 桌面端页面（对齐原 React 前端）。
 library;
 
 export 'src/actions.dart';

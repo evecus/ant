@@ -4,7 +4,7 @@ library;
 
 import 'package:flutter/material.dart';
 
-/// ant GUI 浅色调色板（对应 Go 版 index.css 的 :root）。
+/// Ant 浅色调色板（对应 Go 版 index.css 的 :root）。
 abstract final class AntPalette {
   /// 主背景（--bg-0，窗口底色）。
   static const bg = Color(0xFFf7f8fc);

@@ -68,7 +68,7 @@ List<int> utf16LeBytes(String s) {
 
 const String _runKeyPath =
     r'HKCU\Software\Microsoft\Windows\CurrentVersion\Run';
-const String _taskName = 'ant GUI';
+const String _taskName = 'Ant';
 const String _silentArg = '--silent';
 
 String _silentSuffix(bool silent) => silent ? ' $_silentArg' : '';

@@ -1,4 +1,4 @@
-/// ui_kit — ant GUI 通用组件库。
+/// ui_kit — Ant 通用组件库。
 library;
 
 export 'src/theme.dart';

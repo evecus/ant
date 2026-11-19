@@ -6,7 +6,7 @@ import 'package:flutter/material.dart';
 
 import 'palette.dart';
 
-/// 构建 ant GUI 桌面浅色主题。
+/// 构建 Ant 桌面浅色主题。
 ThemeData buildAntTheme() {
   const scheme = ColorScheme.light(
     primary: AntPalette.accent,

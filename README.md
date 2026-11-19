@@ -1,4 +1,4 @@
-# ant GUI（Windows 桌面端）
+# Ant（Windows 桌面端）
 
 由 **上游 GUI 工程** 的桌面端代码整体抽离而来，**单内核 ant**，只做 Windows 桌面，
 不支持 sing-box / mihomo。上游工程的运行方式与全部流程逻辑完整保留，仅把
@@ -15,7 +15,7 @@
 
 ## 内核相关改动（相对上游工程）
 
-| 项目 | 上游工程 | ant GUI |
+| 项目 | 上游工程 | Ant |
 | --- | --- | --- |
 | 内核 | sing-box(`.json`) / mihomo(`.yaml`) 双内核可切换 | 固定 `ant`，仅 `.yaml` |
 | 二进制 | `sing-box.exe` / `mihomo.exe` | `bin/ant.exe`（+ 可选 `wintun.dll`） |
@@ -85,7 +85,7 @@ packages/
 `flutter test`。交付前已做全量静态自检：内部包/相对路径 import 与
 `export ... show` 符号均可解析、9 个外部依赖全部在 pubspec 声明、Dart
 文件括号与字符串（含 raw、`${}` 插值）平衡、旧双内核 API 清零、窗口标题
-与自启动项名统一为 ant GUI。14 个 `.ars` 全部通过 `ARST` 结构解析，并用
+与自启动项名统一为 Ant。14 个 `.ars` 全部通过 `ARST` 结构解析，并用
 ant 自带的 `check -c` 实际加载验证通过。
 **最终编译与测试结果以 GitHub Actions 为准。**
 
