@@ -6,6 +6,8 @@ name: Windows Gui ci
 
 on:
   workflow_dispatch:
+  push:
+    branches: gui
 
 jobs:
   build:
