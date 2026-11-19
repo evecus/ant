@@ -23,6 +23,7 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.ant.proxy.applyFieldChange
 import com.ant.proxy.FieldKind
 import com.ant.proxy.FieldSpec
 import com.ant.proxy.G_ADV
@@ -32,6 +33,7 @@ import com.ant.proxy.G_TLS
 import com.ant.proxy.G_TRANSPORT
 import com.ant.proxy.K_NAME
 import com.ant.proxy.K_PORT
+import com.ant.proxy.K_SECURITY_MODE
 import com.ant.proxy.K_SERVER
 import com.ant.proxy.K_TYPE
 import com.ant.proxy.NodeSchema
@@ -40,6 +42,7 @@ import com.ant.proxy.PROTOCOLS
 import com.ant.proxy.ProxyNode
 import com.ant.proxy.R
 import com.ant.proxy.protocolDisplay
+import com.ant.proxy.securityMode
 
 private val AccentBlue = Color(0xFF0E9CE6)
 private val HintGrey = Color(0xFF9AA0A6)
@@ -50,7 +53,8 @@ private val KEEP_ON_TYPE_CHANGE = setOf(
     "uuid", "password", "sni", "alpn", "skip-cert-verify",
     "fingerprint", "client-fingerprint", "network",
     "ws-path", "ws-host", "xhttp-path", "xhttp-host", "xhttp-mode",
-    "flow", "reality-public-key", "reality-short-id"
+    "flow", "reality-public-key", "reality-short-id", "ech-config",
+    K_SECURITY_MODE
 )
 
 /**
@@ -70,12 +74,18 @@ fun NodeEditScreen(
         nodeId?.let { id -> NodeStore.load(context).nodes.firstOrNull { it.id == id } }
     }
     var fields by remember {
-        mutableStateOf(existing?.fields ?: NodeSchema.defaults("vless"))
+        val initial = (existing?.fields ?: NodeSchema.defaults("vless")).toMutableMap()
+        // 老节点（链接/订阅导入）无 security-mode：按 tls/reality key 推断补齐，
+        // 让「安全配置」下拉正确显示当前模式并参与互斥显隐。
+        if (!initial.containsKey(K_SECURITY_MODE)) {
+            initial[K_SECURITY_MODE] = securityMode(initial)
+        }
+        mutableStateOf(initial.toMap())
     }
     val type = fields[K_TYPE].orEmpty().ifBlank { "vless" }
 
     fun update(key: String, value: String) {
-        fields = fields + (key to value)
+        fields = applyFieldChange(fields, key, value)
     }
 
     fun changeType(newType: String) {
