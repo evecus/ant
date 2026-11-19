@@ -122,8 +122,10 @@ void main() {
               e.toString().contains('run/rules/ant/geosite-private.ars') &&
               e.toString().contains('run/rules/ant/geoip-private.ars'))),
           reason: '空目录应报缺失，且路径指向 run/rules/ant/*.ars');
-      // fake-ip：额外要求 fakeipfilter
-      expect(() => checkRuleFiles(modeGlobal, dnsModeFakeIP, dir.path),
+      // fake-ip：额外要求 fakeip 过滤规则集（由配置驱动，不再硬编码）
+      expect(
+          () => checkRuleFiles(modeGlobal, dnsModeFakeIP, dir.path,
+              extraRuleFiles: const ['geosite-fakeipfilter']),
           throwsA(predicate<ParseException>(
               (e) => e.toString().contains('geosite-fakeipfilter'))));
 

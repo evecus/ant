@@ -47,7 +47,10 @@ Future<void> main(List<String> args) async {
     } catch (_) {
       return null;
     }
-  });
+  }, extraTags: [
+    // fakeip 过滤规则集由用户配置驱动，启动时一并兜底释放其 .ars 文件
+    ...?app.settings.builtin.fakeipFilter,
+  ]);
 
   // 窗口（1100x750 / Ant / 关闭隐藏到托盘）与系统托盘
   final navigatorKey = GlobalKey<NavigatorState>();

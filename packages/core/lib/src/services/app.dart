@@ -62,12 +62,16 @@ class AntApp {
   /// 该文件会被跳过（不阻塞其余文件的写入）。
   /// 已存在且非空的文件不会被覆盖，避免每次启动都重复写盘。
   Future<void> ensureRuleFiles(
-    Future<List<int>?> Function(String assetPath) loadAsset,
-  ) async {
+    Future<List<int>?> Function(String assetPath) loadAsset, {
+    List<String> extraTags = const [],
+  }) async {
     final allTags = <String>{
       for (final mode in [modeBypass, modeBlacklist, modeGlobal])
         for (final dnsMode in [dnsModeFakeIP, dnsModeRedirHost])
           ...builtinRuleFilesAll(mode, dnsMode),
+      // fakeip 过滤规则集由用户配置驱动，一并纳入释放（缺失时 loadAsset
+      // 返回 null 会跳过，不阻塞）。默认 geosite-fakeipfilter 也在其中。
+      ...extraTags.map((t) => t.trim()).where((t) => t.isNotEmpty),
     };
     final dir = Directory(_join(rulesDir, antRuleDirName));
     await dir.create(recursive: true);

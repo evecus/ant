@@ -124,13 +124,38 @@ final coreRestartingProvider = StreamProvider<bool>((ref) async* {
 });
 
 /// "启动核心"开关的显示状态：核心在跑，或正处于内部重启编排中。
-/// 重启编排期间状态流会短暂经过 stopped，这里保持"运行中"外观，
-/// 避免开关在视觉上关闭再开启。
-final coreSwitchOnProvider = Provider<bool>((ref) {
-  final running = ref.watch(coreStatusProvider).valueOrNull?.running ?? false;
-  final restarting = ref.watch(coreRestartingProvider).valueOrNull ?? false;
-  return running || restarting;
-});
+///
+/// 关键：必须同步读取 app 的实时状态，不能组合两个 StreamProvider 的
+/// valueOrNull——那样在内部重启时，stop 的 stopped 事件与 restarting 的
+/// true 事件分属两个异步流，到达 UI 的顺序可能与发生顺序不同，导致某一帧
+/// 读到 running=false 且 restarting=false，开关视觉上"关一下再开"。
+/// 这里在同一个回调里收到任一事件时，直接读 app.coreRunning ||
+/// app.coreRestarting 的当前值：重启标志在 stopCore 之前已置位，故整个
+/// 停-启期间恒为 true，开关保持"运行中"，不闪烁。
+class CoreSwitchNotifier extends Notifier<bool> {
+  StreamSubscription<ProcessStatus>? _statusSub;
+  StreamSubscription<bool>? _restartSub;
+
+  bool _current(App app) => app.coreRunning || app.coreRestarting;
+
+  @override
+  bool build() {
+    final app = ref.watch(antAppProvider);
+    _statusSub?.cancel();
+    _restartSub?.cancel();
+    _statusSub = app.coreStatusChanges.listen((_) => state = _current(app));
+    _restartSub =
+        app.coreRestartingChanges.listen((_) => state = _current(app));
+    ref.onDispose(() {
+      _statusSub?.cancel();
+      _restartSub?.cancel();
+    });
+    return _current(app);
+  }
+}
+
+final coreSwitchOnProvider =
+    NotifierProvider<CoreSwitchNotifier, bool>(CoreSwitchNotifier.new);
 
 /// 日志列表：初始为快照，之后增量追加。
 class LogController extends Notifier<List<String>> {

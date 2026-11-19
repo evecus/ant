@@ -80,8 +80,8 @@ class _AntDesktopAppState extends ConsumerState<AntDesktopApp> {
               _ => const NodeList(),
             },
           ),
-          // ── 底部栏 ──
-          const BottomBar(),
+          // ── 底部栏（TUN/系统代理/启动核心仅节点列表页）──
+          if (_tab == 'nodes') const BottomBar(),
         ],
       ),
     );

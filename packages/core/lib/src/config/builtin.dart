@@ -75,7 +75,12 @@ List<String> builtinDisplayNames() =>
 
 /// antRuleFiles 各模式需要的规则集基础名（不含扩展名）。
 /// geosite-* → behavior=domain；geoip-* → behavior=ip。
-/// fake-ip 模式追加 geosite-fakeipfilter（fakeip 白名单域名走直连 DNS）。
+///
+/// 注意：fakeip 过滤规则集不在此硬编码。它完全由设置项
+/// BuiltinSettings.fakeipFilter（UI「fakeip 过滤规则集」输入框）驱动，
+/// checkRuleFiles / _appendAntRoute 均以该配置为准，避免把某个固定规则集
+/// 强行写入配置或强制校验其文件存在。默认值为 geosite-fakeipfilter，
+/// 来自 Settings.defaultBuiltin()，用户可自由增删。
 List<String> antRuleFiles(String mode, String dnsMode) {
   final Map<String, List<String>> files = {
     modeBypass: [
@@ -90,11 +95,7 @@ List<String> antRuleFiles(String mode, String dnsMode) {
     ],
     modeGlobal: ['geosite-private', 'geoip-private'],
   };
-  var result = files[mode] ?? const <String>[];
-  if (dnsMode == dnsModeFakeIP) {
-    result = [...result, 'geosite-fakeipfilter'];
-  }
-  return result;
+  return files[mode] ?? const <String>[];
 }
 
 /// builtinRuleFilesAll 全部内置模式规则文件的并集（供 ensureRuleFiles 释放，
