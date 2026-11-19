@@ -264,7 +264,7 @@ fun HomeScreen(
         modifier = modifier,
         topBar = {
                 TopAppBar(
-                    title = { Text(stringResource(R.string.app_name)) },
+                    title = { Text(stringResource(R.string.drawer_config)) },
                     navigationIcon = {
                         IconButton(onClick = onOpenDrawer) {
                             Icon(Icons.Filled.Menu, stringResource(R.string.drawer_open))
