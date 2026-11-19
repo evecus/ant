@@ -14,7 +14,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -88,6 +88,7 @@ private fun SettingNote(text: String) {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsScreen(
+    onOpenDrawer: () -> Unit,
     onBack: () -> Unit,
     modifier: Modifier = Modifier,
     onOpenPerApp: () -> Unit = {}
@@ -104,9 +105,6 @@ fun SettingsScreen(
         mutableStateOf(
             prefs.getInt(AntProcessManager.KEY_MTU, AntProcessManager.TUN_MTU).toString()
         )
-    }
-    var dnsHijack by remember {
-        mutableStateOf(prefs.getBoolean(AntProcessManager.KEY_DNS_HIJACK, true))
     }
     var logLevel by remember {
         mutableStateOf(prefs.getString(AntProcessManager.KEY_LOG_LEVEL, "info") ?: "info")
@@ -133,10 +131,10 @@ fun SettingsScreen(
             TopAppBar(
                 title = { Text(stringResource(R.string.title_settings)) },
                 navigationIcon = {
-                    IconButton(onClick = onBack) {
+                    IconButton(onClick = onOpenDrawer) {
                         Icon(
-                            Icons.AutoMirrored.Filled.ArrowBack,
-                            contentDescription = stringResource(R.string.action_back)
+                            Icons.Filled.Menu,
+                            contentDescription = stringResource(R.string.drawer_open)
                         )
                     }
                 }
@@ -173,13 +171,6 @@ fun SettingsScreen(
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth()
-            )
-
-            Spacer(Modifier.height(12.dp))
-            SwitchRow(
-                label = stringResource(R.string.settings_dns_hijack),
-                checked = dnsHijack,
-                onCheckedChange = { dnsHijack = it }
             )
 
             SectionTitle(stringResource(R.string.settings_loglevel_label))
@@ -354,7 +345,6 @@ fun SettingsScreen(
                         else -> {
                             prefs.edit()
                                 .putInt(AntProcessManager.KEY_MTU, value)
-                                .putBoolean(AntProcessManager.KEY_DNS_HIJACK, dnsHijack)
                                 .putString(AntProcessManager.KEY_LOG_LEVEL, logLevel)
                                 .apply()
                             SettingsStore.save(context, candidate)

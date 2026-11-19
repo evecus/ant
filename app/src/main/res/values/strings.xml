@@ -59,7 +59,6 @@
     <string name="title_settings">设置</string>
     <string name="btn_save">保存</string>
     <string name="settings_mtu_label">MTU</string>
-    <string name="settings_dns_hijack">DNS 劫持（any:53）</string>
     <string name="settings_loglevel_label">核心日志级别</string>
     <string name="settings_note">TUN 地址固定为 172.19.0.1/30（开启 IPv6 时另配 fdfe:dcba:9876::1/126）。全部设置在启动 VPN 时写入 config.yaml；修改后需重启 VPN 生效。</string>
     <string name="settings_saved">已保存，重启 VPN 后生效</string>

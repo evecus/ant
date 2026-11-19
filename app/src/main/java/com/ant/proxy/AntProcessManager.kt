@@ -39,7 +39,6 @@ class AntProcessManager(private val context: Context) {
         // 托管设置（设置页写入，启动 VPN 时应用到配置文件）
         const val SETTINGS_NAME = "settings"
         const val KEY_MTU = "tun_mtu"
-        const val KEY_DNS_HIJACK = "tun_dns_hijack"
         const val KEY_LOG_LEVEL = "log_level"
 
         init {
@@ -120,7 +119,6 @@ class AntProcessManager(private val context: Context) {
 
         val prefs = context.getSharedPreferences(SETTINGS_NAME, Context.MODE_PRIVATE)
         val mtu = prefs.getInt(KEY_MTU, TUN_MTU)
-        val dnsHijack = prefs.getBoolean(KEY_DNS_HIJACK, true)
         val logLevel = prefs.getString(KEY_LOG_LEVEL, "info") ?: "info"
         val ipv6 = prefs.getBoolean(AppSettings.KEY_IPV6, AppSettings.DEFAULT_IPV6)
 
@@ -163,15 +161,14 @@ class AntProcessManager(private val context: Context) {
             out.append("    - ${AppSettings.TUN_V6_ADDRESS}/${AppSettings.TUN_V6_PREFIX}\n")
         }
         out.append("  mtu: $mtu\n")
-        if (dnsHijack) {
-            out.append("  dns-hijack:\n")
-            out.append("    - any:53\n")
-        }
+        // DNS 劫持由应用统一管理，始终开启 any:53（ant 的 fakeip / redir-host 都依赖它接管本机 DNS）
+        out.append("  dns-hijack:\n")
+        out.append("    - any:53\n")
         out.append("  auto-route: false\n")
         out.append("  auto-detect-interface: true\n")
 
         cfg.writeText(out.toString())
-        onLog("已应用托管 TUN 配置：mtu=$mtu dns-hijack=$dnsHijack ipv6=$ipv6 log-level=$logLevel")
+        onLog("已应用托管 TUN 配置：mtu=$mtu dns-hijack=on ipv6=$ipv6 log-level=$logLevel")
     }
 
     /**

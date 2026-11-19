@@ -16,8 +16,8 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Folder
@@ -84,7 +84,7 @@ fun RouteScreen(
     onStateChanged: (RouteState) -> Unit,
     onOpenEdit: (String?) -> Unit,
     onOpenRuleSets: () -> Unit,
-    onBack: () -> Unit,
+    onOpenDrawer: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -115,10 +115,10 @@ fun RouteScreen(
             TopAppBar(
                 title = { Text(stringResource(R.string.title_route)) },
                 navigationIcon = {
-                    IconButton(onClick = onBack) {
+                    IconButton(onClick = onOpenDrawer) {
                         Icon(
-                            Icons.AutoMirrored.Filled.ArrowBack,
-                            stringResource(R.string.action_back)
+                            Icons.Filled.Menu,
+                            stringResource(R.string.drawer_open)
                         )
                     }
                 },

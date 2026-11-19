@@ -52,7 +52,6 @@ import androidx.compose.material.icons.filled.SwapHoriz
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -64,15 +63,14 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalDrawerSheet
-import androidx.compose.material3.ModalNavigationDrawer
 import androidx.compose.material3.NavigationDrawerItem
+import androidx.compose.material3.NavigationDrawerItemDefaults
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
-import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -102,6 +100,8 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 private val BrandBlue = Color(0xFF0E9CE6)
+private val BrandBlueContainer = Color(0xFFD3EDFB)
+private val DeepBlue = Color(0xFF0B2A5B)
 private val CardSelected = Color(0xFFF0F8FE)
 private val TextDark = Color(0xFF202124)
 private val TextGrey = Color(0xFF9AA0A6)
@@ -120,20 +120,15 @@ private val StartingOrange = Color(0xFFEF8C1A)
 fun HomeScreen(
     nodeState: NodeStore.State,
     onNodesChanged: (NodeStore.State) -> Unit,
-    onOpenLogs: () -> Unit,
-    onOpenSettings: () -> Unit,
-    onOpenRoute: () -> Unit,
+    onOpenDrawer: () -> Unit,
     onOpenEdit: (String?) -> Unit,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
-    val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
-    val scope = androidx.compose.runtime.rememberCoroutineScope()
 
     var running by remember { mutableStateOf(AntVpnService.isRunning) }
     var starting by remember { mutableStateOf(false) }
     var showImport by remember { mutableStateOf(false) }
-    var showAbout by remember { mutableStateOf(false) }
     var showMenu by remember { mutableStateOf(false) }
     var searchActive by remember { mutableStateOf(false) }
     var query by remember { mutableStateOf("") }
@@ -192,10 +187,6 @@ fun HomeScreen(
         ) {
             notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
-    }
-
-    fun closeDrawer() {
-        scope.launch { drawerState.close() }
     }
 
     fun startVpn() {
@@ -269,71 +260,13 @@ fun HomeScreen(
         }
     }
 
-    ModalNavigationDrawer(
+    Scaffold(
         modifier = modifier,
-        drawerState = drawerState,
-        drawerContent = {
-            ModalDrawerSheet(modifier = Modifier.width(300.dp)) {
-                Column(Modifier.padding(vertical = 20.dp)) {
-                    Text(
-                        text = stringResource(R.string.app_name),
-                        fontSize = 24.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = BrandBlue,
-                        modifier = Modifier.padding(horizontal = 28.dp)
-                    )
-                    Text(
-                        text = stringResource(R.string.drawer_subtitle),
-                        fontSize = 12.sp,
-                        color = TextGrey,
-                        modifier = Modifier.padding(horizontal = 28.dp)
-                    )
-                }
-                NavigationDrawerItem(
-                    label = { Text(stringResource(R.string.drawer_config)) },
-                    icon = { Icon(Icons.Filled.Description, null) },
-                    selected = true,
-                    onClick = { closeDrawer() },
-                    modifier = Modifier.padding(horizontal = 12.dp)
-                )
-                NavigationDrawerItem(
-                    label = { Text(stringResource(R.string.drawer_route)) },
-                    icon = { Icon(Icons.Filled.SwapHoriz, null) },
-                    selected = false,
-                    onClick = { closeDrawer(); onOpenRoute() },
-                    modifier = Modifier.padding(horizontal = 12.dp)
-                )
-                NavigationDrawerItem(
-                    label = { Text(stringResource(R.string.drawer_settings)) },
-                    icon = { Icon(Icons.Filled.Settings, null) },
-                    selected = false,
-                    onClick = { closeDrawer(); onOpenSettings() },
-                    modifier = Modifier.padding(horizontal = 12.dp)
-                )
-                NavigationDrawerItem(
-                    label = { Text(stringResource(R.string.drawer_logs)) },
-                    icon = { Icon(Icons.Filled.List, null) },
-                    selected = false,
-                    onClick = { closeDrawer(); onOpenLogs() },
-                    modifier = Modifier.padding(horizontal = 12.dp)
-                )
-                HorizontalDivider(modifier = Modifier.padding(vertical = 12.dp))
-                NavigationDrawerItem(
-                    label = { Text(stringResource(R.string.drawer_about)) },
-                    icon = { Icon(Icons.Filled.Info, null) },
-                    selected = false,
-                    onClick = { closeDrawer(); showAbout = true },
-                    modifier = Modifier.padding(horizontal = 12.dp)
-                )
-            }
-        }
-    ) {
-        Scaffold(
-            topBar = {
+        topBar = {
                 TopAppBar(
                     title = { Text(stringResource(R.string.app_name)) },
                     navigationIcon = {
-                        IconButton(onClick = { scope.launch { drawerState.open() } }) {
+                        IconButton(onClick = onOpenDrawer) {
                             Icon(Icons.Filled.Menu, stringResource(R.string.drawer_open))
                         }
                     },
@@ -479,7 +412,6 @@ fun HomeScreen(
                 }
             }
         }
-    }
 
     if (showImport) {
         ImportDialog(
@@ -527,16 +459,89 @@ fun HomeScreen(
         )
     }
 
-    if (showAbout) {
-        AlertDialog(
-            onDismissRequest = { showAbout = false },
-            title = { Text(stringResource(R.string.drawer_about)) },
-            text = { Text(stringResource(R.string.about_text)) },
-            confirmButton = {
-                TextButton(onClick = { showAbout = false }) {
-                    Text(stringResource(android.R.string.ok))
-                }
-            }
+}
+
+/**
+ * 全局左侧导航抽屉，由 AfaApp 提升到 NavHost 外层，四个主页面共用。
+ * 选中态颜色显式指定为蓝色系，不依赖 Material3 默认的淡紫 secondaryContainer。
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+internal fun AfaDrawerSheet(
+    configSelected: Boolean,
+    routeSelected: Boolean,
+    settingsSelected: Boolean,
+    logsSelected: Boolean,
+    onConfig: () -> Unit,
+    onRoute: () -> Unit,
+    onSettings: () -> Unit,
+    onLogs: () -> Unit,
+    onAbout: () -> Unit
+) {
+    val selectedColors = NavigationDrawerItemDefaults.colors(
+        selectedContainerColor = BrandBlueContainer,
+        selectedTextColor = DeepBlue,
+        selectedIconColor = BrandBlue,
+        unselectedContainerColor = Color.Transparent,
+        unselectedTextColor = TextDark,
+        unselectedIconColor = TextGrey
+    )
+    ModalDrawerSheet(modifier = Modifier.width(300.dp)) {
+        Column(Modifier.padding(vertical = 20.dp)) {
+            Text(
+                text = stringResource(R.string.app_name),
+                fontSize = 24.sp,
+                fontWeight = FontWeight.Bold,
+                color = BrandBlue,
+                modifier = Modifier.padding(horizontal = 28.dp)
+            )
+            Text(
+                text = stringResource(R.string.drawer_subtitle),
+                fontSize = 12.sp,
+                color = TextGrey,
+                modifier = Modifier.padding(horizontal = 28.dp)
+            )
+        }
+        NavigationDrawerItem(
+            label = { Text(stringResource(R.string.drawer_config)) },
+            icon = { Icon(Icons.Filled.Description, null) },
+            selected = configSelected,
+            onClick = onConfig,
+            colors = selectedColors,
+            modifier = Modifier.padding(horizontal = 12.dp)
+        )
+        NavigationDrawerItem(
+            label = { Text(stringResource(R.string.drawer_route)) },
+            icon = { Icon(Icons.Filled.SwapHoriz, null) },
+            selected = routeSelected,
+            onClick = onRoute,
+            colors = selectedColors,
+            modifier = Modifier.padding(horizontal = 12.dp)
+        )
+        NavigationDrawerItem(
+            label = { Text(stringResource(R.string.drawer_settings)) },
+            icon = { Icon(Icons.Filled.Settings, null) },
+            selected = settingsSelected,
+            onClick = onSettings,
+            colors = selectedColors,
+            modifier = Modifier.padding(horizontal = 12.dp)
+        )
+        NavigationDrawerItem(
+            label = { Text(stringResource(R.string.drawer_logs)) },
+            icon = { Icon(Icons.Filled.List, null) },
+            selected = logsSelected,
+            onClick = onLogs,
+            colors = selectedColors,
+            modifier = Modifier.padding(horizontal = 12.dp)
+        )
+        HorizontalDivider(modifier = Modifier.padding(vertical = 12.dp))
+        NavigationDrawerItem(
+            label = { Text(stringResource(R.string.drawer_about)) },
+            icon = { Icon(Icons.Filled.Info, null) },
+            selected = false,
+            onClick = onAbout,
+            colors = selectedColors,
+            modifier = Modifier.padding(horizontal = 12.dp)
         )
     }
 }
