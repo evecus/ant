@@ -1,0 +1,12 @@
+# ant GUI — ant 专用 Windows 桌面端（由上游 GUI 工程抽离）
+# 使用 Dart 原生 pub workspace 管理多包（替代 melos，零额外工具链）。
+name: ant_flutter
+publish_to: none
+environment:
+  sdk: ^3.6.0
+
+workspace:
+  - packages/core
+  - packages/ui_kit
+  - packages/ui_desktop
+  - apps/desktop

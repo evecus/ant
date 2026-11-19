@@ -1,0 +1,27 @@
+name: ui_desktop
+description: ant GUI 桌面端 UI（Flutter）：ConfigBar/NodeList/BottomBar/LogPanel 与各弹窗。
+version: 0.1.0
+publish_to: none
+resolution: workspace
+
+environment:
+  sdk: ^3.6.0
+
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_riverpod: ^2.6.1
+  ant_core:
+    path: ../core
+  ant_engine:
+    path: ../core_engine
+  ui_kit:
+    path: ../ui_kit
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^5.0.0
+
+flutter:
+  uses-material-design: true
