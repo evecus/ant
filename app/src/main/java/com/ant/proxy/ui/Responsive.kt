@@ -1,6 +1,7 @@
 package com.ant.proxy.ui
 
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.fillMaxSize
@@ -14,8 +15,6 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 
@@ -24,7 +23,7 @@ import androidx.compose.ui.unit.dp
  *
  * 设计要点：
  * - 依据「当前窗口宽度」而非设备类型区分档位：分屏、多窗口、折叠屏展开时
- *   LocalWindowInfo.containerSize 会随之变化，布局能实时响应。
+ *   BoxWithConstraints 的可用宽度会随之变化，布局能实时响应重组。
  * - 断点沿用 Material 3 规范：Compact < 600dp，Medium 600–840dp，Expanded ≥ 840dp。
  * - 通过 CompositionLocal 下发档位，各页面无需层层传参即可自适应。
  */
@@ -37,23 +36,24 @@ val LocalWindowClass = compositionLocalOf { WindowClass.COMPACT }
 /** 宽屏下抽屉常驻，顶部栏不再需要汉堡按钮。 */
 val LocalShowNavIcon = compositionLocalOf { true }
 
-@Composable
-fun rememberWindowClass(): WindowClass {
-    val density = LocalDensity.current
-    val widthPx = LocalWindowInfo.current.containerSize.width
-    val widthDp = with(density) { widthPx.toDp() }
-    return when {
-        widthDp >= 840.dp -> WindowClass.EXPANDED
-        widthDp >= 600.dp -> WindowClass.MEDIUM
-        else -> WindowClass.COMPACT
-    }
+/**
+ * 窗口档位判定。
+ * 用 BoxWithConstraints 提供的 maxWidth（Dp）判断，稳定 API 且随窗口尺寸变化重组，
+ * 手机横竖屏切换、分屏、折叠屏展开都能实时响应。
+ */
+fun windowClassForWidth(width: Dp): WindowClass = when {
+    width >= 840.dp -> WindowClass.EXPANDED
+    width >= 600.dp -> WindowClass.MEDIUM
+    else -> WindowClass.COMPACT
 }
 
 /** 在根 Composable 注入窗口档位，供整棵 UI 树读取。 */
 @Composable
 fun ProvideWindowClass(content: @Composable () -> Unit) {
-    val windowClass = rememberWindowClass()
-    CompositionLocalProvider(LocalWindowClass provides windowClass, content = content)
+    BoxWithConstraints {
+        val windowClass = windowClassForWidth(maxWidth)
+        CompositionLocalProvider(LocalWindowClass provides windowClass, content = content)
+    }
 }
 
 /** 列表网格列数：手机单列，平板 / 大屏双列，避免卡片被拉得过宽。 */
