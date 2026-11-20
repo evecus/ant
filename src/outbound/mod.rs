@@ -32,6 +32,7 @@ mod tailscale;
 mod ws;
 mod xhttp;
 mod xhttp_h2;
+mod xhttp_h3;
 
 pub use anytls::AnyTlsOutbound;
 pub use direct::DirectOutbound;

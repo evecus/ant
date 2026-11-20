@@ -141,6 +141,8 @@ impl TrojanOutbound {
         }
 
         // xhttp 运行模式解析（对齐 Xray dialer.go：auto → packet-up；无 REALITY）。
+        // `alpn` 含 `h3` → HTTP/3 (QUIC) 传输（Xray isH3 分支），恒走 stream-one。
+        let is_h3 = network == "xhttp" && alpn.iter().any(|a| a.eq_ignore_ascii_case("h3"));
         let (xhttp, xhttp_resolved) = if network == "xhttp" {
             let host = cfg
                 .xhttp_host
@@ -157,15 +159,25 @@ impl TrojanOutbound {
                 .map(|m| m.trim())
                 .filter(|m| !m.is_empty())
                 .unwrap_or("auto");
-            let resolved = match raw_mode {
-                "auto" | "packet-up" => XhttpResolved::PacketUp,
-                "stream-up" => XhttpResolved::StreamUp,
-                "stream-one" => XhttpResolved::StreamOne,
-                other => bail!(
-                    "trojan `{}`: unknown xhttp-mode {other:?} \
-                     (supported: auto/packet-up/stream-up/stream-one)",
-                    cfg.name
-                ),
+            let resolved = if is_h3 {
+                if !cfg.tls {
+                    bail!(
+                        "trojan `{}`: alpn h3 requires tls (QUIC carries its own TLS 1.3)",
+                        cfg.name
+                    );
+                }
+                XhttpResolved::H3
+            } else {
+                match raw_mode {
+                    "auto" | "packet-up" => XhttpResolved::PacketUp,
+                    "stream-up" => XhttpResolved::StreamUp,
+                    "stream-one" => XhttpResolved::StreamOne,
+                    other => bail!(
+                        "trojan `{}`: unknown xhttp-mode {other:?} \
+                         (supported: auto/packet-up/stream-up/stream-one)",
+                        cfg.name
+                    ),
+                }
             };
             (
                 Some(XhttpConfig {
@@ -210,6 +222,10 @@ impl TrojanOutbound {
                 || (opts.network == "xhttp" && opts.xhttp_resolved == XhttpResolved::StreamOne);
             let effective_alpn: Vec<String> = if force_http11 {
                 vec!["http/1.1".to_string()]
+            } else if opts.network == "xhttp" && opts.xhttp_resolved == XhttpResolved::H3 {
+                // HTTP/3 (QUIC)：ALPN 固定为 h3（对齐 Xray isH3 分支，
+                // quinn 握手只接受 h3 协商结果，混入 h2 会让匹配歧义）。
+                vec!["h3".to_string()]
             } else if !alpn.is_empty() {
                 alpn.clone()
             } else if opts.utls.is_some() {
@@ -226,8 +242,12 @@ impl TrojanOutbound {
 
             // xhttp packet-up / stream-up：独立的 h2 TLS 配置（ALPN 强制 h2，
             // 对齐 Xray downloadSettings.streamSettings 必须为 h2）。
+            // H3 模式复用主 tls_config（ALPN 已含 h3），由 quinn 包装。
             opts.xhttp_h2_tls = if opts.network == "xhttp"
-                && opts.xhttp_resolved != XhttpResolved::StreamOne
+                && matches!(
+                    opts.xhttp_resolved,
+                    XhttpResolved::PacketUp | XhttpResolved::StreamUp
+                )
             {
                 Some(Arc::new(build_tls_client_config(
                     cfg.skip_cert_verify,
@@ -342,11 +362,30 @@ impl TrojanOutbound {
                     let pipe = connect_over_stream(io, xcfg).await?;
                     return Ok(Box::new(TrojanStreamIo::with_header(pipe, header)));
                 }
+                XhttpResolved::H3 => {
+                    let tls = self
+                        .tls_config
+                        .clone()
+                        .context("trojan xhttp h3 requires tls")?;
+                    let pipe = super::xhttp_h3::connect(
+                        &self.opts.server,
+                        self.opts.port,
+                        &self.opts.sni,
+                        tls,
+                        &xcfg.host,
+                        &xcfg.path,
+                        &xcfg.headers,
+                    )
+                    .await?;
+                    return Ok(Box::new(TrojanStreamIo::with_header(pipe, header)));
+                }
                 XhttpResolved::PacketUp | XhttpResolved::StreamUp => {
                     let mode = match self.opts.xhttp_resolved {
                         XhttpResolved::PacketUp => "packet-up",
                         XhttpResolved::StreamUp => "stream-up",
-                        XhttpResolved::StreamOne => unreachable!("handled above"),
+                        XhttpResolved::StreamOne | XhttpResolved::H3 => {
+                            unreachable!("handled above")
+                        }
                     };
                     let tls = self.opts.xhttp_h2_tls.clone().map(|config| {
                         xhttp_h2::XhttpH2Tls {

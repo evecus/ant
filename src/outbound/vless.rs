@@ -61,6 +61,9 @@ pub(crate) enum XhttpResolved {
     PacketUp,
     /// hyper：GET 长轮询下行 + 单条流式 POST 上行。
     StreamUp,
+    /// HTTP/3 (QUIC)：手写 H3 帧的单 POST 双向流（`super::xhttp_h3`）。
+    /// 由 `alpn` 含 `h3` 触发（对齐 Xray dialer.go 的 isH3 分支）。
+    H3,
 }
 
 #[derive(Clone)]
@@ -153,6 +156,9 @@ impl VlessOutbound {
         });
 
         // uTLS 浏览器指纹（client-fingerprint），未知值 fail-fast。
+        // `alpn` 含 `h3` 且 network == xhttp → HTTP/3 (QUIC) 传输，
+        // 提前定义：uTLS / ECH 门控都要知道是否走了 H3。
+        let is_h3 = network == "xhttp" && alpn.iter().any(|a| a.eq_ignore_ascii_case("h3"));
         let utls = cfg
             .client_fingerprint
             .as_ref()
@@ -172,6 +178,12 @@ impl VlessOutbound {
             tracing::warn!(
                 "vless `{}`: client-fingerprint is ignored under REALITY \
                  (REALITY handshake is self-implemented TLS 1.3)",
+                cfg.name
+            );
+        } else if utls.is_some() && is_h3 {
+            tracing::warn!(
+                "vless `{}`: client-fingerprint is ignored under alpn h3 \
+                 (QUIC TLS handshake does not go through uTLS)",
                 cfg.name
             );
         } else if utls.is_some() && !cfg.tls {
@@ -201,6 +213,13 @@ impl VlessOutbound {
                 bail!(
                     "vless `{}`: ech cannot be combined with client-fingerprint \
                      (uTLS patches the ClientHello, rustls ECH constructs its own)",
+                    cfg.name
+                );
+            }
+            if is_h3 {
+                bail!(
+                    "vless `{}`: ech cannot be combined with alpn h3 \
+                     (HTTP/3 over QUIC does not carry the rustls ECH handshake)",
                     cfg.name
                 );
             }
@@ -240,6 +259,8 @@ impl VlessOutbound {
         //   auto / 空 → packet-up；REALITY 下 → stream-one（Xray REALITY 默认）。
         //   显式 packet-up / stream-up + REALITY → fail-fast（hyper 连接器无法
         //   承载自实现 REALITY TLS）。
+        //   `alpn` 含 `h3` → HTTP/3 (QUIC) 传输（Xray isH3 分支）：恒走
+        //   stream-one，且需要真实 TLS（REALITY / 关闭 TLS 均 fail-fast）。
         let xhttp = if network == "xhttp" {
             let host = cfg
                 .xhttp_host
@@ -256,27 +277,44 @@ impl VlessOutbound {
                 .map(|m| m.trim())
                 .filter(|m| !m.is_empty())
                 .unwrap_or("auto");
-            let resolved = match raw_mode {
-                "auto" => {
-                    if reality.is_some() {
-                        XhttpResolved::StreamOne
-                    } else {
-                        XhttpResolved::PacketUp
-                    }
+            let resolved = if is_h3 {
+                if reality.is_some() {
+                    bail!(
+                        "vless `{}`: alpn h3 cannot be combined with REALITY \
+                         (HTTP/3 requires a real TLS handshake)",
+                        cfg.name
+                    );
                 }
-                "stream-one" => XhttpResolved::StreamOne,
-                "packet-up" if reality.is_none() => XhttpResolved::PacketUp,
-                "stream-up" if reality.is_none() => XhttpResolved::StreamUp,
-                other @ ("packet-up" | "stream-up") => bail!(
-                    "vless `{}`: xhttp-mode {other:?} cannot run over REALITY \
-                     (REALITY only supports stream-one; use `auto` or `stream-one`)",
-                    cfg.name
-                ),
-                other => bail!(
-                    "vless `{}`: unknown xhttp-mode {other:?} \
-                     (supported: auto/packet-up/stream-up/stream-one)",
-                    cfg.name
-                ),
+                if !cfg.tls {
+                    bail!(
+                        "vless `{}`: alpn h3 requires tls (QUIC carries its own TLS 1.3)",
+                        cfg.name
+                    );
+                }
+                XhttpResolved::H3
+            } else {
+                match raw_mode {
+                    "auto" => {
+                        if reality.is_some() {
+                            XhttpResolved::StreamOne
+                        } else {
+                            XhttpResolved::PacketUp
+                        }
+                    }
+                    "stream-one" => XhttpResolved::StreamOne,
+                    "packet-up" if reality.is_none() => XhttpResolved::PacketUp,
+                    "stream-up" if reality.is_none() => XhttpResolved::StreamUp,
+                    other @ ("packet-up" | "stream-up") => bail!(
+                        "vless `{}`: xhttp-mode {other:?} cannot run over REALITY \
+                         (REALITY only supports stream-one; use `auto` or `stream-one`)",
+                        cfg.name
+                    ),
+                    other => bail!(
+                        "vless `{}`: unknown xhttp-mode {other:?} \
+                         (supported: auto/packet-up/stream-up/stream-one)",
+                        cfg.name
+                    ),
+                }
             };
             (
                 Some(XhttpConfig {
@@ -352,6 +390,12 @@ impl VlessOutbound {
                 || (opts.network == "xhttp" && opts.xhttp_resolved == XhttpResolved::StreamOne);
             let effective_alpn: Vec<String> = if force_http11 {
                 vec!["http/1.1".to_string()]
+            } else if opts.network == "xhttp"
+                && opts.xhttp_resolved == XhttpResolved::H3
+            {
+                // HTTP/3 (QUIC)：ALPN 固定为 h3（对齐 Xray dialer.go isH3 分支，
+                // quinn 握手只接受 h3 协商结果，混入 h2 反而会让匹配歧义）。
+                vec!["h3".to_string()]
             } else if !alpn.is_empty() {
                 alpn.clone()
             } else if opts.utls.is_some() {
@@ -368,8 +412,12 @@ impl VlessOutbound {
 
             // xhttp packet-up / stream-up：独立的 h2 TLS 配置（ALPN 强制 h2，
             // 对齐 Xray downloadSettings.streamSettings 必须为 h2）。
+            // H3 模式复用主 tls_config（ALPN 已含 h3），由 quinn 包装。
             let xhttp_h2_tls = if opts.network == "xhttp"
-                && opts.xhttp_resolved != XhttpResolved::StreamOne
+                && matches!(
+                    opts.xhttp_resolved,
+                    XhttpResolved::PacketUp | XhttpResolved::StreamUp
+                )
             {
                 Some(Arc::new(build_tls_client_config(
                     opts.skip_cert_verify,
@@ -482,11 +530,34 @@ impl VlessOutbound {
                         Bytes::from(header),
                     )));
                 }
+                XhttpResolved::H3 => {
+                    // HTTP/3 (QUIC)：ALPN h3 的 rustls 配置由 quinn 包装承载。
+                    let tls = self
+                        .tls_config
+                        .clone()
+                        .context("vless xhttp h3 requires tls")?;
+                    let pipe = super::xhttp_h3::connect(
+                        &self.opts.server,
+                        self.opts.port,
+                        &self.opts.sni,
+                        tls,
+                        &xcfg.host,
+                        &xcfg.path,
+                        &xcfg.headers,
+                    )
+                    .await?;
+                    return Ok(Box::new(VlessStreamIo::with_header(
+                        pipe,
+                        Bytes::from(header),
+                    )));
+                }
                 XhttpResolved::PacketUp | XhttpResolved::StreamUp => {
                     let mode = match self.opts.xhttp_resolved {
                         XhttpResolved::PacketUp => "packet-up",
                         XhttpResolved::StreamUp => "stream-up",
-                        XhttpResolved::StreamOne => unreachable!("handled above"),
+                        XhttpResolved::StreamOne | XhttpResolved::H3 => {
+                            unreachable!("handled above")
+                        }
                     };
                     let tls = self.opts.xhttp_h2_tls.clone().map(|config| {
                         xhttp_h2::XhttpH2Tls {

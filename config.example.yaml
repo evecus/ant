@@ -297,6 +297,23 @@ proxies:
     #   User-Agent: Mozilla/5.0
     skip-cert-verify: false
 
+  # VLESS + XHTTP over HTTP/3 (QUIC, UDP transport).
+  # `alpn` containing `h3` switches XHTTP stream-one onto HTTP/3, matching
+  # Xray share links with `type=xhttp&alpn=h3` (e.g. flux's xhttp + h3 nodes).
+  # Requires `tls: true`; incompatible with REALITY / ECH (fail-fast) and
+  # ignored under client-fingerprint (QUIC TLS is not uTLS-patched).
+  - name: vless-xhttp-h3
+    type: vless
+    server: 1.2.3.4
+    port: 443                                 # UDP port on the server
+    uuid: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+    network: xhttp
+    tls: true
+    sni: example.com
+    alpn: [h3]                                # <-- enables HTTP/3 (QUIC) transport
+    xhttp-path: /xhttp
+    xhttp-host: example.com
+
   # Trojan outbound. Transports: tcp / ws / xhttp; TLS with optional uTLS
   # browser fingerprint (`client-fingerprint`). Dial sockets carry the global
   # `mark` / bound interface like every other outbound (no TUN loop).

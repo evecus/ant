@@ -624,6 +624,11 @@ pub struct ProxyProviderConfig {
 /// optional `sni`, `skip-cert-verify`, `ws-path`, `ws-host`,
 /// `reality-public-key` / `reality-short-id`, `xhttp-path` / `xhttp-host` / `xhttp-mode`
 ///
+/// ### xhttp + HTTP/3 (QUIC)
+/// `alpn` 含 `h3`（如 `alpn: [h3]`）时，XHTTP stream-one 走 HTTP/3 (QUIC/UDP)，
+/// 对齐 Xray `type=xhttp&alpn=h3`。要求 `tls: true`；与 REALITY / ECH / uTLS
+/// 互斥（REALITY 与 ECH fail-fast，uTLS 忽略并告警）。`tls: false` fail-fast。
+///
 /// ## vmess
 /// `uuid` (or `password` as uuid), `cipher` = `auto`(default)|`aes-128-gcm`|
 /// `chacha20-poly1305`|`none`|`zero` (`auto` + tls → `zero`), `alter-id` = 0,
