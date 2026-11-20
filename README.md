@@ -1,6 +1,7 @@
 # AFA — ant 代理客户端（Kotlin Compose 版）
 
-基于 `VpnService` + 独立 `ant` 核心（Rust 二进制）的 Android 代理客户端。本版在保留核心逻辑的前提下，把 UI 层整体重写为 **Jetpack Compose (Material 3)**，并把节点管理从「交给 ant 解析」改为 **App 自己存储、自己生成配置**；路由规则与规则集同样由 App 结构化存储、启动时渲染进 `config.yaml`
+
+基于 `VpnService` +独立 `ant` 核心（Rust 二进制）的 Android 代理客户端。本版在保留核心逻辑的前提，把 UI 层整体重写为 **Jetpack Compose (Material 3)**，并把节点管理从「交给 ant 解析」改为 **App 自己存储、自己生成配置**；路由规则与规则集同样由 App 结构化存储、启动时渲染进 `config.yaml`
 
 ```
 APK (Kotlin / Compose)
