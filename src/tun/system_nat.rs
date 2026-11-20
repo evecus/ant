@@ -119,7 +119,9 @@ impl TcpNat {
         for _ in 0..total {
             let p = self
                 .port_index
-                .try_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
+                // fetch_update（stable）等价于 nightly 的 try_update：闭包恒返回
+                // Some，unwrap_or 分支仅满足类型（Result 由失败 CAS 产生）。
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
                     Some(if cur == NAT_PORT_END {
                         NAT_PORT_START
                     } else {

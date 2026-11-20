@@ -1259,6 +1259,8 @@ impl ShadowsocksOutbound {
                     .await?;
                     return wrap_ss(pipe, &self.m, first_payload).await;
                 }
+                // H3 只在 vless/trojan 的 alpn 解析中触发，shadowsocks 走不到这里。
+                XhttpResolved::H3 => bail!("shadowsocks: xhttp alpn h3 is not supported"),
             }
         }
 

@@ -1468,6 +1468,8 @@ impl VmessOutbound {
                         .await?,
                     ) as BoxedStream
                 }
+                // H3 只在 vless/trojan 的 alpn 解析中触发，vmess 走不到这里。
+                XhttpResolved::H3 => bail!("vmess: xhttp alpn h3 is not supported"),
             };
             return Ok(Box::new(VmessStream::new(
                 VmessStreamIo::with_header(pipe, handshake, chk),

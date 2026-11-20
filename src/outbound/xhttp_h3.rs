@@ -18,12 +18,12 @@ use std::collections::HashMap;
 use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::task::{Context as TaskCtx, Poll};
+use std::task::{ready, Context as TaskCtx, Poll};
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::sync::mpsc;
 
-use super::hy2_h3::{
+use super::hysteria2::hy2_h3::{
     open_h3_control_streams, parse_headers_from_qpack, put_literal_header, read_h3_frame,
     write_varint, H3_FRAME_DATA, H3_FRAME_HEADERS,
 };
@@ -100,6 +100,7 @@ pub async fn connect(
     // 客户端侧的 control(SETTINGS) / QPACK encoder / decoder uni 流
     // （RFC 9114 §6.2 + RFC 9204 §4.2；h3 服务端强制要求）。
     open_h3_control_streams(&conn)
+        .await
         .context("xhttp-h3 open h3 control streams")?;
 
     // 请求双向流 + HEADERS（QPACK：Required Insert Count = 0, Delta Base = 0）。
@@ -244,7 +245,7 @@ impl XhttpH3Pipe {
         while !self.write_buf.is_empty() {
             match Pin::new(&mut self.send).poll_write(cx, &self.write_buf) {
                 Poll::Pending => return Poll::Pending,
-                Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                Poll::Ready(Err(e)) => return Poll::Ready(Err(e.into())),
                 Poll::Ready(Ok(0)) => {
                     return Poll::Ready(Err(io::Error::new(
                         io::ErrorKind::WriteZero,
@@ -326,7 +327,7 @@ impl AsyncWrite for XhttpH3Pipe {
                 this.write_buf = frame;
                 Poll::Ready(Ok(buf.len()))
             }
-            Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
+            Poll::Ready(Err(e)) => Poll::Ready(Err(e.into())),
             Poll::Ready(Ok(n)) => {
                 if n < frame.len() {
                     this.write_buf = frame.split_off(n);

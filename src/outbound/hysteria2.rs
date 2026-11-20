@@ -9,7 +9,7 @@
 #[path = "hy2_codec.rs"]
 mod hy2_codec;
 #[path = "hy2_h3.rs"]
-mod hy2_h3;
+pub(crate) mod hy2_h3;
 
 use super::{BoxedStream, OutboundDialer, UdpSession};
 use crate::config::ProxyConfig;
