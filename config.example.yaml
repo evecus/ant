@@ -45,6 +45,12 @@ redir-port: 7892
 # sniff: true  # sniff TLS SNI / HTTP Host / QUIC for domain routing (default off);
 #              # DNS-query sniffing follows dns.route-hijack independently
 #
+# bypass-private-ip: false
+#   When true, destinations in private/reserved ranges (0.0.0.0/8, 10/8,
+#   100.64/10, 127/8, 169.254/16, 172.16/12, 192.168/16, 198.18/15, 224/3,
+#   fc00::/7, fe80::/10, ff00::/8 ...) skip `route:` matching and go direct.
+#   Fake-ip addresses are NOT affected (they are routed by their domain).
+#
 # route-resolve: false
 #   When true, domain hosts are DNS-resolved before matching IP rules / IP
 #   rule-providers. Default false. Per-rule opt-out: append `,no-resolve`.

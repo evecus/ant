@@ -39,6 +39,9 @@ pub struct Config {
     /// must be configured before it can be referenced.
     #[serde(default)]
     pub route: Vec<String>,
+    /// Removed legacy key (renamed to `route:`); kept only to reject it loudly.
+    #[serde(default, rename = "rules", skip_serializing)]
+    legacy_rules: Option<serde_yaml::Value>,
 }
 
 /// Flat `tun:` block. Creates a virtual NIC and runs the kernel NAT stack
@@ -372,6 +375,10 @@ pub struct GlobalConfig {
     /// IP rule-providers. Default false. Per-rule `no-resolve` skips this line.
     #[serde(default, rename = "route-resolve")]
     pub route_resolve: bool,
+    /// Destinations inside private / reserved ranges (see `PRIVATE_IP_CIDRS`)
+    /// skip `route:` matching and go direct. Default false.
+    #[serde(default, rename = "bypass-private-ip")]
+    pub bypass_private_ip: bool,
     /// Global persistent cache (redb). Default false.
     /// When true: DNS, Fake-IP, and select-group choices are stored in redb
     /// (`cache-file`). Rule-providers always use files (never redb).
@@ -1589,13 +1596,10 @@ impl Config {
     }
 
     fn validate(&mut self) -> Result<()> {
-        // Nodes may come from `proxies:` or entirely from `proxy-providers:`
-        // (e.g. a pure subscription setup) — at least one source is required.
-        if self.proxies.is_empty() && self.proxy_providers.is_empty() {
-            bail!(
-                "at least one proxy node under `proxies:` or one entry under `proxy-providers:` is required"
-            );
+        if self.legacy_rules.is_some() {
+            bail!("top-level `rules:` was renamed to `route:`");
         }
+        // `proxies:` / `proxy-providers:` are optional (no nodes = direct-only).
         for (i, p) in self.proxies.iter().enumerate() {
             let label = if p.name.is_empty() {
                 format!("proxies[{i}]")
@@ -2275,8 +2279,9 @@ impl Config {
             rulesets.iter().map(|r| r.name.as_str()).collect();
 
         // route（原 rules:，出站可为 direct/block/reject 别名或节点名）
+        // No `route:` configured → everything goes direct.
         if self.route.is_empty() {
-            bail!("route must not be empty; need a final MATCH rule");
+            self.route.push("MATCH,DIRECT".to_string());
         }
         let parsed = self.parsed_rules()?;
         let last = parsed.last().unwrap();

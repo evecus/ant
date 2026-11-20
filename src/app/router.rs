@@ -66,7 +66,31 @@ enum DnsRoute {
     Rules(Vec<(crate::config::RuleKind, DnsAction)>),
 }
 
+/// Ranges skipped by top-level `bypass-private-ip: true` (go direct, no `route:` matching).
+pub const PRIVATE_IP_CIDRS: &[&str] = &[
+    "0.0.0.0/8",
+    "10.0.0.0/8",
+    "100.64.0.0/10",
+    "127.0.0.0/8",
+    "169.254.0.0/16",
+    "172.16.0.0/12",
+    "192.0.0.0/24",
+    "192.0.2.0/24",
+    "192.88.99.0/24",
+    "192.168.0.0/16",
+    "198.18.0.0/15",
+    "198.51.100.0/24",
+    "203.0.113.0/24",
+    "224.0.0.0/3",
+    "::/127",
+    "fc00::/7",
+    "fe80::/10",
+    "ff00::/8",
+];
+
 pub struct Router {
+    /// Non-empty only when `bypass-private-ip: true`.
+    private_nets: Vec<ipnet::IpNet>,
     rulesets: RwLock<HashMap<String, RuleSet>>,
     routes: Vec<RouteEntry>,
     final_outbound: Outbound,
@@ -241,7 +265,13 @@ impl Router {
             DnsRoute::Rules(entries)
         };
 
+        let private_nets: Vec<ipnet::IpNet> = if cfg.global.bypass_private_ip {
+            PRIVATE_IP_CIDRS.iter().map(|c| c.parse().expect("valid builtin CIDR")).collect()
+        } else {
+            Vec::new()
+        };
         Ok(Arc::new(Router {
+            private_nets,
             rulesets: RwLock::new(rulesets),
             routes,
             final_outbound,
@@ -483,6 +513,20 @@ impl Router {
     ) -> RouteMatch {
         // Fake-ip addresses must not hit ip rulesets; route by the mapped domain.
         let dst_ip = dst_ip.filter(|addr| self.domain_for_fakeip(*addr).is_none());
+        // bypass-private-ip: private / reserved destinations skip `route:` entirely.
+        // (Unspecified = "no real address yet" placeholder, never a real target.)
+        if let Some(ip) = dst_ip {
+            if !self.private_nets.is_empty()
+                && !ip.is_unspecified()
+                && self.private_nets.iter().any(|n| n.contains(&ip))
+            {
+                tracing::debug!("bypass-private-ip {ip} -> direct");
+                return RouteMatch {
+                    outbound: Outbound::Direct,
+                    rule: "BYPASS-PRIVATE-IP".into(),
+                };
+            }
+        }
         for entry in &self.routes {
             if self.match_kind(
                 &entry.kind,
@@ -666,6 +710,39 @@ mod tests {
     use crate::dns::parse_nameserver;
     use std::net::IpAddr;
 
+    async fn router_from_yaml(tag: &str, yaml: &str) -> Arc<Router> {
+        let path = std::env::temp_dir().join(format!("ant-bypass-test-{tag}-{}.yaml", std::process::id()));
+        std::fs::write(&path, yaml).unwrap();
+        let cfg = Config::load(path.to_str().unwrap()).unwrap();
+        let _ = std::fs::remove_file(&path);
+        Router::from_config(&cfg, None, None).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn bypass_private_ip_skips_route() {
+        let base = "mixed-port: 7890\nroute:\n  - MATCH,block\n";
+        let on = router_from_yaml("on", &format!("bypass-private-ip: true\n{base}")).await;
+        let off = router_from_yaml("off", base).await;
+        let ip = |s: &str| Some(s.parse::<IpAddr>().unwrap());
+        for p in [
+            "0.0.0.1", "10.1.2.3", "100.64.0.1", "127.0.0.1", "169.254.1.1", "172.16.0.1",
+            "172.31.255.255", "192.0.0.5", "192.0.2.1", "192.88.99.1", "192.168.1.1",
+            "198.18.0.1", "198.19.255.255", "198.51.100.1", "203.0.113.1", "224.0.0.1",
+            "255.255.255.255", "::1", "fc00::1", "fd12::1", "fe80::1", "ff02::1",
+        ] {
+            let m = on.match_route(None, ip(p), &[]);
+            assert_eq!(m.outbound, Outbound::Direct, "{p} should bypass");
+            assert_eq!(m.rule, "BYPASS-PRIVATE-IP");
+            assert_eq!(off.match_route(None, ip(p), &[]).outbound, Outbound::Block, "{p} off");
+        }
+        for p in ["8.8.8.8", "172.32.0.1", "100.128.0.1", "198.20.0.1", "2001:4860::1", "::2"] {
+            assert_eq!(on.match_route(None, ip(p), &[]).outbound, Outbound::Block, "{p} must not bypass");
+        }
+        // Unspecified placeholder and domain-only lookups are not bypassed.
+        assert_eq!(on.match_route(Some("a.com"), ip("0.0.0.0"), &[]).outbound, Outbound::Block);
+        assert_eq!(on.match_route(Some("a.com"), None, &[]).outbound, Outbound::Block);
+    }
+
     fn domain_ruleset(name: &str, yaml: &str) -> RuleSet {
         let compiled = crate::ruleset::compile_mihomo_ruleset(
             yaml,
@@ -687,6 +764,7 @@ mod tests {
         let mut rulesets = HashMap::new();
         rulesets.insert("cn".to_string(), cn);
         Router {
+            private_nets: Vec::new(),
             rulesets: RwLock::new(rulesets),
             routes: vec![],
             final_outbound: Outbound::Node("main".into()),
@@ -745,6 +823,7 @@ mod tests {
         let mut rulesets = HashMap::new();
         rulesets.insert("cn".to_string(), cn);
         let r = Router {
+            private_nets: Vec::new(),
             rulesets: RwLock::new(rulesets),
             routes: vec![],
             final_outbound: Outbound::Node("main".into()),
@@ -783,6 +862,7 @@ mod tests {
         let mut rulesets = HashMap::new();
         rulesets.insert("cn".to_string(), cn);
         let r = Router {
+            private_nets: Vec::new(),
             rulesets: RwLock::new(rulesets),
             routes: vec![
                 RouteEntry {
