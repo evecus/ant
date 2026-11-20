@@ -1,21 +1,24 @@
 package com.ant.proxy.ui
 
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.ModalNavigationDrawer
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.unit.dp
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
@@ -55,6 +58,7 @@ fun AfaApp() {
     val navController = rememberNavController()
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
     val scope = rememberCoroutineScope()
+    val windowClass = LocalWindowClass.current
     var nodeState by remember(context) { mutableStateOf(NodeStore.load(context)) }
     var routeState by remember(context) { mutableStateOf(RouteStore.load(context)) }
     var showAbout by remember { mutableStateOf(false) }
@@ -90,7 +94,9 @@ fun AfaApp() {
         ConfigManager.ensureAssets(context) { }
     }
 
-    ModalNavigationDrawer(
+    // 宽屏抽屉常驻时隐藏各页面顶部栏的汉堡图标；窄屏保留。
+    CompositionLocalProvider(LocalShowNavIcon provides (windowClass != WindowClass.EXPANDED)) {
+    AdaptiveNavigationDrawer(
         drawerState = drawerState,
         drawerContent = {
             AfaDrawerSheet(
@@ -169,12 +175,18 @@ fun AfaApp() {
             }
         }
     }
+    } // CompositionLocalProvider(LocalShowNavIcon)
 
     if (showAbout) {
         AlertDialog(
             onDismissRequest = { showAbout = false },
             title = { Text(stringResource(R.string.drawer_about)) },
-            text = { Text(stringResource(R.string.about_text)) },
+            text = {
+                Text(
+                    stringResource(R.string.about_text),
+                    modifier = Modifier.widthIn(max = 420.dp)
+                )
+            },
             confirmButton = {
                 TextButton(onClick = { showAbout = false }) {
                     Text(stringResource(android.R.string.ok))

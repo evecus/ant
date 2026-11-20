@@ -18,6 +18,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -29,8 +30,10 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -66,6 +69,7 @@ import androidx.compose.material3.ModalDrawerSheet
 import androidx.compose.material3.NavigationDrawerItem
 import androidx.compose.material3.NavigationDrawerItemDefaults
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.PermanentDrawerSheet
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -266,8 +270,10 @@ fun HomeScreen(
                 TopAppBar(
                     title = { Text(stringResource(R.string.drawer_config)) },
                     navigationIcon = {
-                        IconButton(onClick = onOpenDrawer) {
-                            Icon(Icons.Filled.Menu, stringResource(R.string.drawer_open))
+                        if (LocalShowNavIcon.current) {
+                            IconButton(onClick = onOpenDrawer) {
+                                Icon(Icons.Filled.Menu, stringResource(R.string.drawer_open))
+                            }
                         }
                     },
                     actions = {
@@ -345,10 +351,9 @@ fun HomeScreen(
                 }
             }
         ) { innerPadding ->
-            Column(
-                modifier = Modifier
-                    .padding(innerPadding)
-                    .fillMaxSize()
+            AdaptiveContentBox(
+                modifier = Modifier.padding(innerPadding),
+                maxWidth = 960.dp
             ) {
                 if (searchActive) {
                     OutlinedTextField(
@@ -393,10 +398,13 @@ fun HomeScreen(
                         }
                     }
                 } else {
-                    LazyColumn(
+                    // 平板 / 大屏改为双列网格，手机保持单列
+                    LazyVerticalGrid(
+                        columns = GridCells.Fixed(gridColumns(LocalWindowClass.current)),
                         modifier = Modifier.weight(1f),
                         contentPadding = PaddingValues(start = 12.dp, end = 12.dp, top = 12.dp, bottom = 96.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         items(filtered, key = { it.id }) { node ->
                             NodeCard(
@@ -486,7 +494,9 @@ internal fun AfaDrawerSheet(
         unselectedTextColor = TextDark,
         unselectedIconColor = TextGrey
     )
-    ModalDrawerSheet(modifier = Modifier.width(300.dp)) {
+    // 宽屏抽屉常驻：用 PermanentDrawerSheet；窄屏弹出：用 ModalDrawerSheet。
+    // 两套 Sheet 的条目内容完全一致，提取为共享 lambda 避免重复。
+    val sheetContent: @Composable ColumnScope.() -> Unit = {
         Column(Modifier.padding(vertical = 20.dp)) {
             Text(
                 text = stringResource(R.string.app_name),
@@ -543,6 +553,12 @@ internal fun AfaDrawerSheet(
             colors = selectedColors,
             modifier = Modifier.padding(horizontal = 12.dp)
         )
+    }
+
+    if (LocalWindowClass.current == WindowClass.EXPANDED) {
+        PermanentDrawerSheet(modifier = Modifier.width(300.dp), content = sheetContent)
+    } else {
+        ModalDrawerSheet(modifier = Modifier.width(300.dp), content = sheetContent)
     }
 }
 
@@ -612,7 +628,7 @@ private fun ImportDialog(
         onDismissRequest = onDismiss,
         title = { Text(stringResource(R.string.btn_import)) },
         text = {
-            Column {
+            Column(Modifier.widthIn(max = 480.dp)) {
                 Text(
                     text = stringResource(R.string.import_hint),
                     fontSize = 12.sp,

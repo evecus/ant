@@ -15,8 +15,10 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
@@ -129,9 +131,9 @@ fun RuleSetScreen(
             )
         }
     ) { innerPadding ->
+        AdaptiveContentBox(modifier = Modifier.padding(innerPadding), maxWidth = 960.dp) {
         Column(
             modifier = Modifier
-                .padding(innerPadding)
                 .fillMaxSize()
         ) {
             Text(
@@ -165,12 +167,14 @@ fun RuleSetScreen(
             }
 
             Spacer(Modifier.height(12.dp))
-            LazyColumn(
+            LazyVerticalGrid(
+                columns = GridCells.Fixed(gridColumns(LocalWindowClass.current)),
                 modifier = Modifier.fillMaxSize(),
                 contentPadding = PaddingValues(
                     start = 12.dp, end = 12.dp, bottom = 24.dp
                 ),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 items(state.ruleSets, key = { it.id }) { item ->
                     RuleSetCard(
@@ -189,6 +193,7 @@ fun RuleSetScreen(
                     )
                 }
             }
+        }
         }
     }
 
@@ -378,6 +383,7 @@ private fun AddUrlDialog(
             Column(
                 Modifier
                     .fillMaxWidth()
+                    .widthIn(max = 520.dp)
                     .verticalScroll(rememberScrollState())
             ) {
                 OutlinedTextField(
@@ -468,7 +474,7 @@ private fun ImportFileDialog(
         onDismissRequest = onDismiss,
         title = { Text(stringResource(R.string.ruleset_dialog_file_title)) },
         text = {
-            Column(Modifier.fillMaxWidth()) {
+            Column(Modifier.fillMaxWidth().widthIn(max = 480.dp)) {
                 Text(defaultName, fontSize = 12.sp, color = SetGrey)
                 Spacer(Modifier.height(8.dp))
                 OutlinedTextField(

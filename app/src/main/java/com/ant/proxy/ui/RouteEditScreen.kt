@@ -155,9 +155,9 @@ fun RouteEditScreen(
             )
         }
     ) { innerPadding ->
+        AdaptiveContentBox(modifier = Modifier.padding(innerPadding), maxWidth = 680.dp) {
         Column(
             modifier = Modifier
-                .padding(innerPadding)
                 .fillMaxSize()
                 .verticalScroll(rememberScrollState())
                 .padding(horizontal = 14.dp, vertical = 12.dp)
@@ -313,5 +313,7 @@ fun RouteEditScreen(
                 )
             }
         }
+        }
     }
 }
+

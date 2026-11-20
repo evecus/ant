@@ -133,11 +133,13 @@ fun SettingsScreen(
             TopAppBar(
                 title = { Text(stringResource(R.string.title_settings)) },
                 navigationIcon = {
-                    IconButton(onClick = onOpenDrawer) {
-                        Icon(
-                            Icons.Filled.Menu,
-                            contentDescription = stringResource(R.string.drawer_open)
-                        )
+                    if (LocalShowNavIcon.current) {
+                        IconButton(onClick = onOpenDrawer) {
+                            Icon(
+                                Icons.Filled.Menu,
+                                contentDescription = stringResource(R.string.drawer_open)
+                            )
+                        }
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
@@ -149,9 +151,9 @@ fun SettingsScreen(
             )
         }
     ) { innerPadding ->
+        AdaptiveContentBox(modifier = Modifier.padding(innerPadding), maxWidth = 720.dp) {
         Column(
             modifier = Modifier
-                .padding(innerPadding)
                 .fillMaxSize()
                 .verticalScroll(rememberScrollState())
                 .padding(20.dp)
@@ -374,5 +376,7 @@ fun SettingsScreen(
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
         }
+        }
     }
 }
+

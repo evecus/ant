@@ -64,11 +64,13 @@ fun LogsScreen(onOpenDrawer: () -> Unit, modifier: Modifier = Modifier) {
             TopAppBar(
                 title = { Text(stringResource(R.string.title_logs)) },
                 navigationIcon = {
-                    IconButton(onClick = onOpenDrawer) {
-                        Icon(
-                            Icons.Filled.Menu,
-                            contentDescription = stringResource(R.string.drawer_open)
-                        )
+                    if (LocalShowNavIcon.current) {
+                        IconButton(onClick = onOpenDrawer) {
+                            Icon(
+                                Icons.Filled.Menu,
+                                contentDescription = stringResource(R.string.drawer_open)
+                            )
+                        }
                     }
                 },
                 actions = {
@@ -88,13 +90,13 @@ fun LogsScreen(onOpenDrawer: () -> Unit, modifier: Modifier = Modifier) {
             )
         }
     ) { innerPadding ->
-        Column(
-            modifier = Modifier
-                .padding(innerPadding)
-                .fillMaxSize()
-                .verticalScroll(scrollState)
-                .padding(horizontal = 12.dp, vertical = 8.dp)
-        ) {
+        AdaptiveContentBox(modifier = Modifier.padding(innerPadding), maxWidth = 1000.dp) {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .verticalScroll(scrollState)
+                    .padding(horizontal = 12.dp, vertical = 8.dp)
+            ) {
             if (logText.isEmpty()) {
                 Text(
                     text = stringResource(R.string.logs_empty),
@@ -113,4 +115,5 @@ fun LogsScreen(onOpenDrawer: () -> Unit, modifier: Modifier = Modifier) {
             }
         }
     }
+}
 }

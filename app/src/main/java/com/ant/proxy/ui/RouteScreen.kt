@@ -12,8 +12,10 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
@@ -115,11 +117,13 @@ fun RouteScreen(
             TopAppBar(
                 title = { Text(stringResource(R.string.title_route)) },
                 navigationIcon = {
-                    IconButton(onClick = onOpenDrawer) {
-                        Icon(
-                            Icons.Filled.Menu,
-                            stringResource(R.string.drawer_open)
-                        )
+                    if (LocalShowNavIcon.current) {
+                        IconButton(onClick = onOpenDrawer) {
+                            Icon(
+                                Icons.Filled.Menu,
+                                stringResource(R.string.drawer_open)
+                            )
+                        }
                     }
                 },
                 actions = {
@@ -157,9 +161,9 @@ fun RouteScreen(
             }
         }
     ) { innerPadding ->
+        AdaptiveContentBox(modifier = Modifier.padding(innerPadding), maxWidth = 960.dp) {
         Column(
             modifier = Modifier
-                .padding(innerPadding)
                 .fillMaxSize()
         ) {
             Text(
@@ -169,12 +173,14 @@ fun RouteScreen(
                 modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp)
             )
 
-            LazyColumn(
+            LazyVerticalGrid(
+                columns = GridCells.Fixed(gridColumns(LocalWindowClass.current)),
                 modifier = Modifier.fillMaxSize(),
                 contentPadding = PaddingValues(
                     start = 12.dp, end = 12.dp, bottom = 88.dp
                 ),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 itemsIndexed(state.rules, key = { _, r -> r.id }) { index, rule ->
                     RouteCard(
@@ -196,13 +202,19 @@ fun RouteScreen(
                 }
             }
         }
+        }
     }
 
     if (showReset) {
         AlertDialog(
             onDismissRequest = { showReset = false },
             title = { Text(stringResource(R.string.route_reset_title)) },
-            text = { Text(stringResource(R.string.route_reset_message)) },
+            text = {
+                Text(
+                    stringResource(R.string.route_reset_message),
+                    modifier = Modifier.widthIn(max = 440.dp)
+                )
+            },
             confirmButton = {
                 TextButton(onClick = {
                     onStateChanged(RouteStore.reset(context))

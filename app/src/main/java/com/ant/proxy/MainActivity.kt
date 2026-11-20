@@ -7,6 +7,7 @@ import androidx.activity.enableEdgeToEdge
 import androidx.core.view.WindowCompat
 import com.ant.proxy.ui.AfaApp
 import com.ant.proxy.ui.AfaTheme
+import com.ant.proxy.ui.ProvideWindowClass
 
 /**
  * Compose 版入口：单 Activity 承载全部界面（Home / Route / RuleSets / Logs / Settings）。
@@ -22,7 +23,10 @@ class MainActivity : ComponentActivity() {
             .isAppearanceLightStatusBars = false
         setContent {
             AfaTheme {
-                AfaApp()
+                // 注入窗口宽度档位，驱动全 App 的平板适配（抽屉常驻 / 内容限宽 / 列表双列）
+                ProvideWindowClass {
+                    AfaApp()
+                }
             }
         }
     }

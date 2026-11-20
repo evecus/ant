@@ -13,8 +13,9 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.Checkbox
@@ -134,9 +135,9 @@ fun PerAppScreen(onBack: () -> Unit, modifier: Modifier = Modifier) {
             )
         }
     ) { innerPadding ->
+        AdaptiveContentBox(modifier = Modifier.padding(innerPadding), maxWidth = 960.dp) {
         Column(
             modifier = Modifier
-                .padding(innerPadding)
                 .fillMaxSize()
                 .padding(horizontal = 16.dp)
         ) {
@@ -220,7 +221,12 @@ fun PerAppScreen(onBack: () -> Unit, modifier: Modifier = Modifier) {
                     modifier = Modifier.padding(24.dp),
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
-                else -> LazyColumn(modifier = Modifier.fillMaxSize()) {
+                else -> LazyVerticalGrid(
+                    columns = GridCells.Fixed(gridColumns(LocalWindowClass.current)),
+                    modifier = Modifier.fillMaxSize(),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                    horizontalArrangement = Arrangement.spacedBy(16.dp)
+                ) {
                     items(visible, key = { it.pkg }) { app ->
                         val checked = app.pkg in settings.packages
                         val toggle = {
@@ -262,6 +268,7 @@ fun PerAppScreen(onBack: () -> Unit, modifier: Modifier = Modifier) {
                     }
                 }
             }
+        }
         }
     }
 }
