@@ -1,0 +1,39 @@
+name: linux arm64 ci
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-arm64-musl:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-musl
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: linux-arm64
+
+      - name: Install musl tools
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Build (aarch64-unknown-linux-musl, release)
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+        run: cargo build --release --target aarch64-unknown-linux-musl
+
+      - name: Collect artifact
+        run: |
+          cp target/aarch64-unknown-linux-musl/release/ant ant-linux-arm64
+      
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ci
+          prerelease: true
+          files: ant-linux-arm64

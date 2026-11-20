@@ -1,0 +1,23 @@
+name: test
+
+on:
+  workflow_dispatch:
+
+
+jobs:
+  test:
+    name: cargo test
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: musl-x86_64-test
+
+      - name: Run tests
+        run: cargo test --locked

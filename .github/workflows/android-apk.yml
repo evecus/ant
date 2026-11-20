@@ -1,0 +1,62 @@
+name: Android APK ci
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-apk:
+    name: Build APK (arm64-v8a)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: afa
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Decode keystore
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+        run: |
+          # 缺 secret 就直接失败：未签名的 release APK 装不上，没必要白跑一轮构建
+          for v in KEYSTORE_BASE64 KEYSTORE_PASSWORD KEY_ALIAS; do
+            if [ -z "${!v}" ]; then
+              echo "::error::缺少 secret：ANDROID_${v}（见本文件顶部说明）"
+              exit 1
+            fi
+          done
+          echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.jks"
+          echo "ANT_KEYSTORE_FILE=$RUNNER_TEMP/release.jks" >> "$GITHUB_ENV"
+
+      - name: Build release APK
+        env:
+          ANT_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANT_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          # 密钥密码未单独配置时回落为 keystore 密码（build.gradle.kts 内处理）
+          ANT_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          if [ ! -f gradlew ]; then
+            gradle wrapper --gradle-version 8.9
+          fi
+          chmod +x gradlew
+          ./gradlew :app:assembleRelease --no-daemon --stacktrace
+
+      - run: mv app/build/outputs/apk/release/*.apk AFA-arm64.apk
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ci
+          prerelease: true
+          files: AFA-arm64.apk
