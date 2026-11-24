@@ -49,7 +49,7 @@ jobs:
       # Android kernel is Linux: tproxy/redir inbounds compile on
       # aarch64-linux-android (run via iptables TPROXY, e.g. with root).
       - name: Build release (aarch64-android)
-        run: cargo ndk --target aarch64-linux-android --platform 24 build --release --locked
+        run: cargo ndk --target aarch64-linux-android --platform 26 build --release --locked
         env:
           ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
 
