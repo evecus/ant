@@ -1060,15 +1060,42 @@ impl ShadowsocksOutbound {
                 .map(|m| m.trim())
                 .filter(|m| !m.is_empty())
                 .unwrap_or("auto");
-            let resolved = match raw_mode {
-                "auto" | "packet-up" => XhttpResolved::PacketUp,
-                "stream-up" => XhttpResolved::StreamUp,
-                "stream-one" => XhttpResolved::StreamOne,
-                other => bail!(
-                    "shadowsocks `{}`: unknown xhttp-mode {other:?} \
-                     (supported: auto/packet-up/stream-up/stream-one)",
-                    cfg.name
-                ),
+            // `alpn` 含 `h3` → HTTP/3 (QUIC) 传输（Xray isH3 分支）：
+            // mode 照常解析（auto → packet-up），需真实 TLS。
+            let is_h3 = cfg
+                .alpn
+                .clone()
+                .unwrap_or_default()
+                .iter()
+                .any(|a| a.eq_ignore_ascii_case("h3"));
+            let resolved = if is_h3 {
+                if !cfg.tls {
+                    bail!(
+                        "shadowsocks `{}`: alpn h3 requires tls (QUIC carries its own TLS 1.3)",
+                        cfg.name
+                    );
+                }
+                match raw_mode {
+                    "auto" | "packet-up" => XhttpResolved::H3PacketUp,
+                    "stream-up" => XhttpResolved::H3StreamUp,
+                    "stream-one" => XhttpResolved::H3,
+                    other => bail!(
+                        "shadowsocks `{}`: unknown xhttp-mode {other:?} \
+                         (supported: auto/packet-up/stream-up/stream-one)",
+                        cfg.name
+                    ),
+                }
+            } else {
+                match raw_mode {
+                    "auto" | "packet-up" => XhttpResolved::PacketUp,
+                    "stream-up" => XhttpResolved::StreamUp,
+                    "stream-one" => XhttpResolved::StreamOne,
+                    other => bail!(
+                        "shadowsocks `{}`: unknown xhttp-mode {other:?} \
+                         (supported: auto/packet-up/stream-up/stream-one)",
+                        cfg.name
+                    ),
+                }
             };
             (
                 Some(XhttpConfig {
@@ -1089,6 +1116,14 @@ impl ShadowsocksOutbound {
                 network == "ws" || (network == "xhttp" && xhttp_resolved == XhttpResolved::StreamOne);
             let effective_alpn: Vec<String> = if force_http11 {
                 vec!["http/1.1".to_string()]
+            } else if network == "xhttp"
+                && matches!(
+                    xhttp_resolved,
+                    XhttpResolved::H3 | XhttpResolved::H3PacketUp | XhttpResolved::H3StreamUp
+                )
+            {
+                // HTTP/3 (QUIC)：ALPN 固定 h3（quinn 握手只接受 h3 协商结果）。
+                vec!["h3".to_string()]
             } else if !alpn.is_empty() {
                 alpn.clone()
             } else if utls.is_some() {
@@ -1102,7 +1137,12 @@ impl ShadowsocksOutbound {
                 None,
             )?);
             // packet-up / stream-up 走 hyper，ALPN 强制 h2（同 vless）。
-            let h2_tls = if network == "xhttp" && xhttp_resolved != XhttpResolved::StreamOne {
+            let h2_tls = if network == "xhttp"
+                && matches!(
+                    xhttp_resolved,
+                    XhttpResolved::PacketUp | XhttpResolved::StreamUp
+                )
+            {
                 Some(Arc::new(build_tls_client_config(
                     cfg.skip_cert_verify,
                     &["h2".to_string()],
@@ -1259,8 +1299,31 @@ impl ShadowsocksOutbound {
                     .await?;
                     return wrap_ss(pipe, &self.m, first_payload).await;
                 }
-                // H3 只在 vless/trojan 的 alpn 解析中触发，shadowsocks 走不到这里。
-                XhttpResolved::H3 => bail!("shadowsocks: xhttp alpn h3 is not supported"),
+                XhttpResolved::H3 | XhttpResolved::H3PacketUp | XhttpResolved::H3StreamUp => {
+                    // HTTP/3 (QUIC)：全模式走手写 H3 客户端（对齐 Xray isH3 分支）。
+                    let mode = match self.opts.xhttp_resolved {
+                        XhttpResolved::H3 => "stream-one",
+                        XhttpResolved::H3PacketUp => "packet-up",
+                        XhttpResolved::H3StreamUp => "stream-up",
+                        _ => unreachable!("handled above"),
+                    };
+                    let tls = self
+                        .tls_config
+                        .clone()
+                        .context("ss xhttp h3 requires tls")?;
+                    let pipe = super::xhttp_h3::connect(
+                        &self.opts.server,
+                        self.opts.port,
+                        &self.opts.sni,
+                        tls,
+                        &xcfg.host,
+                        &xcfg.path,
+                        mode,
+                        &xcfg.headers,
+                    )
+                    .await?;
+                    return wrap_ss(pipe, &self.m, first_payload).await;
+                }
             }
         }
 

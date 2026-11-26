@@ -625,8 +625,10 @@ pub struct ProxyProviderConfig {
 /// `reality-public-key` / `reality-short-id`, `xhttp-path` / `xhttp-host` / `xhttp-mode`
 ///
 /// ### xhttp + HTTP/3 (QUIC)
-/// `alpn` 含 `h3`（如 `alpn: [h3]`）时，XHTTP stream-one 走 HTTP/3 (QUIC/UDP)，
-/// 对齐 Xray `type=xhttp&alpn=h3`。要求 `tls: true`；与 REALITY / ECH / uTLS
+/// `alpn` 含 `h3`（如 `alpn: [h3]`）时，XHTTP 走 HTTP/3 (QUIC/UDP)，
+/// 对齐 Xray `type=xhttp&alpn=h3`。H3 只是传输层不同，`xhttp-mode` 照常解析
+/// （auto / packet-up / stream-up / stream-one 全部可用；auto → packet-up，
+/// 与非 H3 一致）。要求 `tls: true`；与 REALITY / ECH / uTLS
 /// 互斥（REALITY 与 ECH fail-fast，uTLS 忽略并告警）。`tls: false` fail-fast。
 ///
 /// ## vmess

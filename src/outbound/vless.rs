@@ -61,9 +61,14 @@ pub(crate) enum XhttpResolved {
     PacketUp,
     /// hyper：GET 长轮询下行 + 单条流式 POST 上行。
     StreamUp,
-    /// HTTP/3 (QUIC)：手写 H3 帧的单 POST 双向流（`super::xhttp_h3`）。
-    /// 由 `alpn` 含 `h3` 触发（对齐 Xray dialer.go 的 isH3 分支）。
+    /// HTTP/3 (QUIC) stream-one：手写 H3 帧的单 POST 双向流
+    /// （`super::xhttp_h3`）。由 `alpn` 含 `h3` 触发（对齐 Xray dialer.go
+    /// 的 isH3 分支；H3 只是传输层不同，模式语义与 h1/h2 一致）。
     H3,
+    /// HTTP/3 (QUIC) packet-up：GET 长轮询下行 + 攒批分包 POST 上行。
+    H3PacketUp,
+    /// HTTP/3 (QUIC) stream-up：GET 长轮询下行 + 单条流式 POST 上行。
+    H3StreamUp,
 }
 
 #[derive(Clone)]
@@ -259,8 +264,9 @@ impl VlessOutbound {
         //   auto / 空 → packet-up；REALITY 下 → stream-one（Xray REALITY 默认）。
         //   显式 packet-up / stream-up + REALITY → fail-fast（hyper 连接器无法
         //   承载自实现 REALITY TLS）。
-        //   `alpn` 含 `h3` → HTTP/3 (QUIC) 传输（Xray isH3 分支）：恒走
-        //   stream-one，且需要真实 TLS（REALITY / 关闭 TLS 均 fail-fast）。
+        //   `alpn` 含 `h3` → HTTP/3 (QUIC) 传输（Xray isH3 分支）：H3 只是
+        //   传输层不同，mode 照常解析（auto → packet-up），且需要真实 TLS
+        //   （REALITY / 关闭 TLS 均 fail-fast）。
         let xhttp = if network == "xhttp" {
             let host = cfg
                 .xhttp_host
@@ -291,7 +297,16 @@ impl VlessOutbound {
                         cfg.name
                     );
                 }
-                XhttpResolved::H3
+                match raw_mode {
+                    "auto" | "packet-up" => XhttpResolved::H3PacketUp,
+                    "stream-up" => XhttpResolved::H3StreamUp,
+                    "stream-one" => XhttpResolved::H3,
+                    other => bail!(
+                        "vless `{}`: unknown xhttp-mode {other:?} \
+                         (supported: auto/packet-up/stream-up/stream-one)",
+                        cfg.name
+                    ),
+                }
             } else {
                 match raw_mode {
                     "auto" => {
@@ -391,7 +406,10 @@ impl VlessOutbound {
             let effective_alpn: Vec<String> = if force_http11 {
                 vec!["http/1.1".to_string()]
             } else if opts.network == "xhttp"
-                && opts.xhttp_resolved == XhttpResolved::H3
+                && matches!(
+                    opts.xhttp_resolved,
+                    XhttpResolved::H3 | XhttpResolved::H3PacketUp | XhttpResolved::H3StreamUp
+                )
             {
                 // HTTP/3 (QUIC)：ALPN 固定为 h3（对齐 Xray dialer.go isH3 分支，
                 // quinn 握手只接受 h3 协商结果，混入 h2 反而会让匹配歧义）。
@@ -530,8 +548,16 @@ impl VlessOutbound {
                         Bytes::from(header),
                     )));
                 }
-                XhttpResolved::H3 => {
+                XhttpResolved::H3 | XhttpResolved::H3PacketUp | XhttpResolved::H3StreamUp => {
                     // HTTP/3 (QUIC)：ALPN h3 的 rustls 配置由 quinn 包装承载。
+                    // H3 只是传输层不同，packet-up / stream-up 与 stream-one
+                    // 走同一个手写 H3 客户端（对齐 Xray isH3 分支）。
+                    let mode = match self.opts.xhttp_resolved {
+                        XhttpResolved::H3 => "stream-one",
+                        XhttpResolved::H3PacketUp => "packet-up",
+                        XhttpResolved::H3StreamUp => "stream-up",
+                        _ => unreachable!("handled above"),
+                    };
                     let tls = self
                         .tls_config
                         .clone()
@@ -543,6 +569,7 @@ impl VlessOutbound {
                         tls,
                         &xcfg.host,
                         &xcfg.path,
+                        mode,
                         &xcfg.headers,
                     )
                     .await?;
@@ -555,9 +582,7 @@ impl VlessOutbound {
                     let mode = match self.opts.xhttp_resolved {
                         XhttpResolved::PacketUp => "packet-up",
                         XhttpResolved::StreamUp => "stream-up",
-                        XhttpResolved::StreamOne | XhttpResolved::H3 => {
-                            unreachable!("handled above")
-                        }
+                        _ => unreachable!("handled above"),
                     };
                     let tls = self.opts.xhttp_h2_tls.clone().map(|config| {
                         xhttp_h2::XhttpH2Tls {

@@ -59,6 +59,11 @@ use super::utls::{connect_utls, UtlsFingerprint, UtlsVerify};
 
 // ── 公共接口 ─────────────────────────────────────────────────────────────────
 
+/// 在途 packet POST 并发上限：与 h1 的 HTTP/1.1 pipelining 节奏对齐，
+/// 防止突发流量时 POST 任务无限堆积（seq 由上传循环同步分配，乱序到达
+/// 由服务端 uploadQueue 重排，因此限制并发不影响正确性）。
+const SC_MAX_CONCURRENT_POSTS: usize = 8;
+
 /// TLS 设置（调用方已把 ALPN 强制为 h2 的 rustls ClientConfig）。
 pub struct XhttpH2Tls {
     pub config: Arc<rustls::ClientConfig>,
@@ -530,6 +535,8 @@ async fn connect_packet_up(shared: Arc<XhttpShared>) -> anyhow::Result<XhttpStre
     let read_half = RespBodyReader::new(down_resp.into_body());
 
     let (up_tx, mut up_rx) = mpsc::channel::<Bytes>(128);
+    // 在途 POST 并发上限（超出后上传循环等待，形成背压）。
+    let in_flight = Arc::new(tokio::sync::Semaphore::new(SC_MAX_CONCURRENT_POSTS));
     {
         let shared = shared.clone();
         tokio::spawn(async move {
@@ -591,13 +598,25 @@ async fn connect_packet_up(shared: Arc<XhttpShared>) -> anyhow::Result<XhttpStre
                         }
                     }
 
+                    // seq 必须在上传循环里同步分配（不能在 spawn 的任务内）：
+                    // spawn 的 POST 任务并发执行，任务内 fetch_add 会乱序分配
+                    // seq，服务端按 seq 重排后数据错位。在循环内分配保证 seq
+                    // 严格等于应用层写入顺序。
+                    let seq = shared.seq.fetch_add(1, Ordering::Relaxed) as u64;
+
+                    // 并发 POST 上限：Xray 通过 httptrace WroteRequest 串行推进
+                    // 在途 POST（同一连接上 pipelining）；这里用信号量限制在途
+                    // 数量，防止突发时无限堆积内存。
+                    let _permit = in_flight.clone().acquire_owned().await;
+
                     // 与 Xray dialer.go:547-565 对齐：POST 异步发送，
                     // 不等待完整响应即可发送下一个 chunk。
                     let shared_clone = shared.clone();
                     tokio::spawn(async move {
-                        if let Err(e) = post_packet(&shared_clone, payload).await {
+                        if let Err(e) = post_packet(&shared_clone, seq, payload).await {
                             warn!("xhttp packet-up POST error: {e}");
                         }
+                        drop(_permit);
                     });
 
                     last_post = tokio::time::Instant::now();
@@ -611,9 +630,8 @@ async fn connect_packet_up(shared: Arc<XhttpShared>) -> anyhow::Result<XhttpStre
     Ok(XhttpStream::new(read_half, XhttpWriter::Packet(up_tx)))
 }
 
-async fn post_packet(shared: &XhttpShared, payload: Bytes) -> anyhow::Result<()> {
-    let seq = shared.seq.fetch_add(1, Ordering::Relaxed);
-    let url = shared.packet_url(seq);
+async fn post_packet(shared: &XhttpShared, seq: u64, payload: Bytes) -> anyhow::Result<()> {
+    let url = shared.packet_url(seq as i64);
     let payload_len = payload.len();
     let req = shared.build_request(&Method::POST, &url, XhttpBody::Full(Full::new(payload)), false)?;
     debug!(seq, payload_len, "xhttp packet-up: POST upload");

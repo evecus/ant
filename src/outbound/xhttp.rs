@@ -48,6 +48,21 @@ fn normalize_path(path: &str) -> String {
     }
 }
 
+/// 生成 `Referer: {scheme}://{host}{base}?x_padding=XXX...` 值。
+///
+/// 对齐 Xray `FillStreamRequest`（config.go）默认的 padding 放置：
+/// PlacementQueryInHeader + header="Referer" + key="x_padding"，长度
+/// 100–1000 随机（GetNormalizedXPaddingBytes 默认值）。当前版本 Xray /
+/// flux / shoes 服务端都会校验 padding：缺失或长度出界直接 400，
+/// 因此每个请求（GET/POST，任何模式）都必须携带。
+/// 'X' 在 HPACK/QPACK Huffman 静态表里占 8 bit，压缩不会缩短 padding
+/// 在线上的表观长度（RFC 7541 附录 B / RFC 9204 §4.1.2）。
+pub(crate) fn padding_referer_value(host: &str, base_path: &str) -> String {
+    use rand::Rng;
+    let len = rand::thread_rng().gen_range(100..=1000);
+    format!("https://{host}{base_path}?x_padding={}", "X".repeat(len))
+}
+
 /// Open XHTTP stream-one over an already-connected transport (TCP / TLS / REALITY).
 pub async fn connect_over_stream<S>(stream: S, cfg: &XhttpConfig) -> Result<XhttpPipe<S>>
 where
@@ -63,9 +78,17 @@ where
 
     let mut req = format!(
         "POST {path} HTTP/1.1\r\nHost: {host}\r\nTransfer-Encoding: chunked\r\n\
-Content-Type: application/octet-stream\r\nUser-Agent: Go-http-client/1.1\r\n\
+Content-Type: application/grpc\r\nUser-Agent: Go-http-client/1.1\r\n\
 Connection: keep-alive\r\n"
     );
+    // Referer padding（对齐 Xray FillStreamRequest；必须携带，见函数注释）。
+    // Referer 用 base path（剥离用户配置的 `?query` 部分），再追加 x_padding。
+    // 先注入，自定义 headers 后写 —— 用户显式配置 Referer 时覆盖默认值。
+    let referer_base = path.split('?').next().unwrap_or(&path);
+    let referer = padding_referer_value(host, referer_base);
+    req.push_str("Referer: ");
+    req.push_str(&referer);
+    req.push_str("\r\n");
     for (k, v) in &cfg.headers {
         if k.eq_ignore_ascii_case("host")
             || k.eq_ignore_ascii_case("transfer-encoding")

@@ -298,8 +298,10 @@ proxies:
     skip-cert-verify: false
 
   # VLESS + XHTTP over HTTP/3 (QUIC, UDP transport).
-  # `alpn` containing `h3` switches XHTTP stream-one onto HTTP/3, matching
-  # Xray share links with `type=xhttp&alpn=h3` (e.g. flux's xhttp + h3 nodes).
+  # `alpn` containing `h3` switches XHTTP onto HTTP/3, matching Xray share
+  # links with `type=xhttp&alpn=h3` (e.g. flux's xhttp + h3 nodes). H3 is a
+  # transport change only: `xhttp-mode` still applies (auto / packet-up /
+  # stream-up / stream-one; auto -> packet-up, same as non-H3).
   # Requires `tls: true`; incompatible with REALITY / ECH (fail-fast) and
   # ignored under client-fingerprint (QUIC TLS is not uTLS-patched).
   - name: vless-xhttp-h3
@@ -313,6 +315,7 @@ proxies:
     alpn: [h3]                                # <-- enables HTTP/3 (QUIC) transport
     xhttp-path: /xhttp
     xhttp-host: example.com
+    # xhttp-mode: auto                        # also honored over h3
 
   # Trojan outbound. Transports: tcp / ws / xhttp; TLS with optional uTLS
   # browser fingerprint (`client-fingerprint`). Dial sockets carry the global

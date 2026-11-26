@@ -141,7 +141,7 @@ impl TrojanOutbound {
         }
 
         // xhttp 运行模式解析（对齐 Xray dialer.go：auto → packet-up；无 REALITY）。
-        // `alpn` 含 `h3` → HTTP/3 (QUIC) 传输（Xray isH3 分支），恒走 stream-one。
+        // `alpn` 含 `h3` → HTTP/3 (QUIC) 传输（Xray isH3 分支），mode 照常解析。
         let is_h3 = network == "xhttp" && alpn.iter().any(|a| a.eq_ignore_ascii_case("h3"));
         let (xhttp, xhttp_resolved) = if network == "xhttp" {
             let host = cfg
@@ -166,7 +166,16 @@ impl TrojanOutbound {
                         cfg.name
                     );
                 }
-                XhttpResolved::H3
+                match raw_mode {
+                    "auto" | "packet-up" => XhttpResolved::H3PacketUp,
+                    "stream-up" => XhttpResolved::H3StreamUp,
+                    "stream-one" => XhttpResolved::H3,
+                    other => bail!(
+                        "trojan `{}`: unknown xhttp-mode {other:?} \
+                         (supported: auto/packet-up/stream-up/stream-one)",
+                        cfg.name
+                    ),
+                }
             } else {
                 match raw_mode {
                     "auto" | "packet-up" => XhttpResolved::PacketUp,
@@ -222,7 +231,12 @@ impl TrojanOutbound {
                 || (opts.network == "xhttp" && opts.xhttp_resolved == XhttpResolved::StreamOne);
             let effective_alpn: Vec<String> = if force_http11 {
                 vec!["http/1.1".to_string()]
-            } else if opts.network == "xhttp" && opts.xhttp_resolved == XhttpResolved::H3 {
+            } else if opts.network == "xhttp"
+                && matches!(
+                    opts.xhttp_resolved,
+                    XhttpResolved::H3 | XhttpResolved::H3PacketUp | XhttpResolved::H3StreamUp
+                )
+            {
                 // HTTP/3 (QUIC)：ALPN 固定为 h3（对齐 Xray isH3 分支，
                 // quinn 握手只接受 h3 协商结果，混入 h2 会让匹配歧义）。
                 vec!["h3".to_string()]
@@ -362,7 +376,13 @@ impl TrojanOutbound {
                     let pipe = connect_over_stream(io, xcfg).await?;
                     return Ok(Box::new(TrojanStreamIo::with_header(pipe, header)));
                 }
-                XhttpResolved::H3 => {
+                XhttpResolved::H3 | XhttpResolved::H3PacketUp | XhttpResolved::H3StreamUp => {
+                    let mode = match self.opts.xhttp_resolved {
+                        XhttpResolved::H3 => "stream-one",
+                        XhttpResolved::H3PacketUp => "packet-up",
+                        XhttpResolved::H3StreamUp => "stream-up",
+                        _ => unreachable!("handled above"),
+                    };
                     let tls = self
                         .tls_config
                         .clone()
@@ -374,6 +394,7 @@ impl TrojanOutbound {
                         tls,
                         &xcfg.host,
                         &xcfg.path,
+                        mode,
                         &xcfg.headers,
                     )
                     .await?;
@@ -383,9 +404,7 @@ impl TrojanOutbound {
                     let mode = match self.opts.xhttp_resolved {
                         XhttpResolved::PacketUp => "packet-up",
                         XhttpResolved::StreamUp => "stream-up",
-                        XhttpResolved::StreamOne | XhttpResolved::H3 => {
-                            unreachable!("handled above")
-                        }
+                        _ => unreachable!("handled above"),
                     };
                     let tls = self.opts.xhttp_h2_tls.clone().map(|config| {
                         xhttp_h2::XhttpH2Tls {
