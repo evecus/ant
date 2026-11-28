@@ -402,7 +402,7 @@ pub struct TuicOutbound {
     opts: TuicOption,
     client_config: ClientConfig,
     /// Lazily created endpoint + the interface name it was bound under.
-    endpoint: StdMutex<Option<(Endpoint, Option<String>)>>,
+    endpoint: StdMutex<Option<(Endpoint, Option<String>, bool)>>,
     state: tokio::sync::Mutex<ConnState>,
     next_session: AtomicU16,
 }
@@ -501,29 +501,30 @@ impl TuicOutbound {
     /// The endpoint is rebuilt only if the bound default interface changed since
     /// it was created (e.g. WLAN <-> Ethernet), since the socket stays pinned to
     /// the old one.
-    async fn get_endpoint(&self) -> Result<Endpoint> {
+    async fn get_endpoint(&self, server_addr: SocketAddr) -> Result<Endpoint> {
         let cur_if = crate::tun::bind_interface();
-        if let Some((ep, bound)) = self.endpoint.lock().unwrap().as_ref() {
-            if *bound == cur_if {
+        let want_v6 = server_addr.is_ipv6();
+        if let Some((ep, bound, is_v6)) = self.endpoint.lock().unwrap().as_ref() {
+            if *bound == cur_if && *is_v6 == want_v6 {
                 return Ok(ep.clone());
             }
         }
-        // Dual-stack wildcard so IPv6 servers work; fall back to v4-only when
-        // the host has IPv6 disabled.
-        let udp = match crate::app::sockopt::bind_udp("[::]:0".parse().unwrap()).await {
-            Ok(u) => u,
-            Err(e) => {
-                tracing::warn!("tuic: dual-stack udp bind failed ({e}); falling back to 0.0.0.0:0");
-                crate::app::sockopt::bind_udp("0.0.0.0:0".parse().unwrap()).await?
-            }
+        // Bind a socket of the same family as the server. A `[::]` socket is
+        // v6-only by default on Windows (IPV6_V6ONLY=1, unlike Linux) and
+        // `IP_UNICAST_IF` is not applied to it, so v4 servers would time out.
+        let bind: SocketAddr = if want_v6 {
+            "[::]:0".parse().unwrap()
+        } else {
+            "0.0.0.0:0".parse().unwrap()
         };
+        let udp = crate::app::sockopt::bind_udp(bind).await?;
         let endpoint = Endpoint::new(
             quinn::EndpointConfig::default(),
             None,
             udp.into_std()?,
             Arc::new(quinn::TokioRuntime),
         )?;
-        *self.endpoint.lock().unwrap() = Some((endpoint.clone(), cur_if));
+        *self.endpoint.lock().unwrap() = Some((endpoint.clone(), cur_if, want_v6));
         Ok(endpoint)
     }
 
@@ -572,7 +573,7 @@ impl TuicOutbound {
             self.opts.congestion_control
         );
 
-        let endpoint = self.get_endpoint().await.context("quic endpoint")?;
+        let endpoint = self.get_endpoint(server_addr).await.context("quic endpoint")?;
         let connecting = endpoint
             .connect_with(self.client_config.clone(), server_addr, &self.opts.sni)
             .context("quic connect start")?;
